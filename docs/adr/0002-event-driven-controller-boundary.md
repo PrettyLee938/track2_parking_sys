@@ -1,0 +1,3 @@
+# Event-driven controller boundary
+
+The parking system is a TypeScript modular monolith with a durable event inbox, deterministic domain reducer, command outbox, SQLite state, and a React dashboard served by the backend. Simulator events are the evidence for state transitions; REST command acceptance is not confirmation. After reconnect, the controller automatically resumes only after reconciliation, rejects new commands while connectivity is unknown, and keeps uncertain external outcomes unresolved until evidence arrives. This boundary keeps physical and payment decisions auditable and allows the core controller to operate without Jev; Jev remains deferred because the documented requirements do not establish a task that needs semantic AI judgment.

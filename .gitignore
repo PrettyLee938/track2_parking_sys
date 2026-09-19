@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.env
+data/*.db
+data/*.db-shm
+data/*.db-wal
+coverage/
+.agents/
+.scratch/
+tmp/
+skills-lock.json
