@@ -24,7 +24,7 @@ export class EventService {
     const previous = this.db.get<{ value: string }>('SELECT value FROM meta WHERE key = :key', { ':key': 'last_sequence' });
     const previousRun = this.db.get<{ value: string }>('SELECT value FROM meta WHERE key = :key', { ':key': 'run_id' })?.value;
     const previousSequence = previous ? Number(previous.value) : 0;
-    const ordering: Ordering = runText && previousRun && runText !== previousRun ? 'reset' : sequenceId === 0 || previousSequence === 0 || sequenceId === previousSequence + 1 ? 'in-order' : sequenceId > previousSequence + 1 ? 'gap' : 'out-of-order';
+    const ordering: Ordering = runText && previousRun && runText !== previousRun ? 'reset' : sequenceId === 0 && previousSequence > 0 ? 'out-of-order' : sequenceId === 0 || previousSequence === 0 || sequenceId === previousSequence + 1 ? 'in-order' : sequenceId > previousSequence + 1 ? 'gap' : 'out-of-order';
     const event = { eventId, type, sequenceId, runId: runText, receivedAt, payload };
     this.db.transaction(() => {
       this.db.run('INSERT INTO events (event_id, type, sequence_id, run_id, received_at, signature_valid, signature_digest, raw_json) VALUES (:id, :type, :sequence, :run, :received, 1, :digest, :raw)', { ':id': eventId, ':type': type, ':sequence': sequenceId, ':run': runText || null, ':received': receivedAt, ':digest': envelope.calculatedDigest, ':raw': JSON.stringify(payload) });
@@ -44,7 +44,7 @@ export class EventService {
     });
     if (ordering !== 'in-order') return { accepted: true, ordering, event };
     const readyEvents = this.collectReady(event);
-    if (this.db.get<{ value: string }>('SELECT value FROM meta WHERE key = :key', { ':key': 'reconcile_reason' })?.value === 'sequence-gap') {
+    if (event.sequenceId > 0 && this.db.get<{ value: string }>('SELECT value FROM meta WHERE key = :key', { ':key': 'reconcile_reason' })?.value === 'sequence-gap') {
       this.db.run('INSERT INTO meta (key, value) VALUES (:key, :value) ON CONFLICT(key) DO UPDATE SET value = excluded.value', { ':key': 'run_status', ':value': 'active' });
       this.db.run('DELETE FROM meta WHERE key = :key', { ':key': 'reconcile_reason' });
     }
