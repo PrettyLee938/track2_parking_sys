@@ -22,7 +22,8 @@ const EVENT_LABEL: Record<ComponentEventView["event"], { text: string; tone: "cr
 
 /** StateSnapshot.subsystems.environment (server/src/environment.ts). */
 interface EnvironmentView {
-  zones: { zone: string; fans_on: number; fans: number; busy: boolean; co_alert: boolean; last_co: { level: number; danger: string } | null }[];
+  polls: number;
+  zones: { zone: string; fans_on: number; fans: number; co: number | null; risk: string | null; forced: boolean; want: boolean }[];
 }
 
 export function ComponentHealthCard({ components, environment }: { components: ComponentView[]; environment?: unknown }) {
@@ -44,16 +45,16 @@ export function ComponentHealthCard({ components, environment }: { components: C
       </div>
       {env?.zones?.length ? (
         <>
-          <h3 className="section-title">Exhaust fans (CO)</h3>
+          <h3 className="section-title">Exhaust fans: on at CO 50 and above, off below</h3>
           <table className="data compact">
-            <thead><tr><th>Zone</th><th>Fans on</th><th>Why</th><th>Last CO reading</th></tr></thead>
+            <thead><tr><th>Zone</th><th className="right">CO</th><th>Fans on</th><th>State</th></tr></thead>
             <tbody>
               {env.zones.map((z) => (
                 <tr key={z.zone}>
                   <td><b>{z.zone}</b></td>
+                  <td className="right">{z.co === null ? "—" : `${z.co.toFixed(0)}${z.risk ? ` (${z.risk})` : ""}`}</td>
                   <td>{z.fans_on} / {z.fans}</td>
-                  <td>{z.co_alert ? <Badge tone="critical">CO alert</Badge> : z.busy ? <Badge tone="info">cars moving</Badge> : <span className="muted">quiet - off</span>}</td>
-                  <td className="muted">{z.last_co ? `${z.last_co.level.toFixed(0)} (${z.last_co.danger})` : "—"}</td>
+                  <td>{z.forced ? <Badge tone="critical">CO penalty - clearing</Badge> : z.want ? <Badge tone="warning">CO high - venting</Badge> : <span className="muted">clean - off</span>}</td>
                 </tr>
               ))}
             </tbody>

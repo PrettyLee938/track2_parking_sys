@@ -17,6 +17,7 @@ export class FakeSim implements SimApi {
   calls: Call[] = [];
   fans: SimExhaustFan[] = [];
   lights: SimLight[] = [];
+  zones: SimZone[] = [];
   /** Commands that throw (the simulator answering 4xx). */
   failing = new Set<string>();
   constructor(public spots: SimParkingSpot[], public barriers: SimBarrier[]) {}
@@ -24,7 +25,8 @@ export class FakeSim implements SimApi {
   async listLights() { return this.lights; }
   async listExhaustFans() { return this.fans; }
   async listAlarms(): Promise<SimAlarm[]> { return []; }
-  async listZones(): Promise<SimZone[]> { return []; }
+  zonePolls = 0;
+  async listZones(): Promise<SimZone[]> { this.zonePolls++; return this.zones; }
   private rec(...call: Call) {
     this.calls.push(call);
     if (this.failing.has(call[0])) throw new Error(`${call[0]} rejected`);

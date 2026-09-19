@@ -7,7 +7,7 @@ import { getAllocator } from "../src/allocation";
 import { loadSettings, REPO_ROOT, unknownSettingVars } from "../src/config";
 import { Controller } from "../src/controller";
 import { Store } from "../src/store";
-import { loadDir, resolve, type Topology } from "../src/topology";
+import { loadDir, resolve, routesFromLevel, type Topology } from "../src/topology";
 import {
   at, carEv, FakeSim, feed, fireTimers, gateEv, LVL1, make, parkAndReachExit, payEv, penaltyEv, RecordingQueue,
   silentLog, testSettings, TWO_ZONES, twoZoneSim,
@@ -382,6 +382,56 @@ describe("multi-lane sites", () => {
     expect(sim.calls).toContainEqual(["goto", "C", "S3"]);
   });
 
+  describe("routes (Level 2: one road, gates in series)", () => {
+    // ENTRY1 -> ZONE2 drives through g1 AND g3 and over the ENTRY2 sensor; nothing goes back up.
+    const ROUTED: Topology = {
+      ...TWO_ZONES,
+      routes: {
+        ENTRY1: { ZONE1: { gates: ["g1"], sensors: ["ENTRY1"] }, ZONE2: { gates: ["g1", "g3"], sensors: ["ENTRY1", "ENTRY2"] } },
+        ENTRY2: { ZONE2: { gates: ["g3"], sensors: ["ENTRY2"] } },
+      },
+    };
+    const setup = async () => {
+      const made = await make({ sim: twoZoneSim(), topo: ROUTED, cfg: { allocationStrategy: "zone_balanced" } });
+      made.c.spots.get("S1")!.reserved_for = "X"; made.c.spots.get("S2")!.reserved_for = "Y"; // ZONE1 full
+      return made;
+    };
+
+    it("opens every gate on the way before sending a car to a zone further down the road", async () => {
+      // 03:21 run: ENTRY1 cars sent to ZONE2 with only gate1 open never moved.
+      const { c, sim } = await setup();
+      await c.handle(carEv("A", "ENTRY1", "CarIn", "10:00:00"));
+      expect(sim.calls).toEqual([["open", "g1"]]);
+      await c.handle(gateEv("g1", "Open"));
+      expect(sim.last()).toEqual(["open", "g3"]); // not yet the goto
+      await c.handle(gateEv("g3", "Open"));
+      expect(sim.last()).toEqual(["goto", "A", "S3"]);
+    });
+
+    it("ignores the sensors a car passes on its way, and keeps the far gate open until it parks", async () => {
+      const { c, sim } = await setup();
+      await feed(c, carEv("A", "ENTRY1", "CarIn", "10:00:00"), gateEv("g1", "Open"), gateEv("g3", "Open"),
+        carEv("A", "ENTRY1", "CarOut", "10:00:01"),
+        carEv("A", "ENTRY2", "CarIn", "10:00:03"), carEv("A", "ENTRY2", "CarOut", "10:00:04")); // driving past ENTRY2
+      expect(c.counters.arrived).toBe(1); // not a new arrival at ENTRY2
+      expect(c.cars.get("A")!.status).toBe("entering");
+      expect(c.gateBusy("g3")).toBe(true);
+      await fireTimers(c);
+      expect(sim.calls).not.toContainEqual(["close", "g3"]); // A has not reached it yet
+      await c.handle(carEv("A", "S3", "CarIn", "10:00:08"));
+      await fireTimers(c);
+      expect(sim.calls).toContainEqual(["close", "g3"]);
+    });
+
+    it("never sends a car to a zone its entrance has no road to", async () => {
+      const { c, sim } = await setup();
+      c.spots.get("S3")!.reserved_for = "Z"; c.spots.get("S4")!.reserved_for = "W"; // ZONE2 full
+      c.spots.get("S1")!.reserved_for = null; // room in ZONE1 - but ENTRY2 cannot drive back up there
+      await feed(c, gateEv("g3", "Open"), carEv("B", "ENTRY2", "CarIn", "10:00:00"));
+      expect(sim.gotos()).toEqual([["goto", "B", "leavepark"]]);
+    });
+  });
+
   describe("zone_balanced", () => {
     const setup = async (cfg = {}) => {
       const made = await make({ sim: twoZoneSim(), topo: TWO_ZONES, cfg: { allocationStrategy: "zone_balanced", ...cfg } });
@@ -486,6 +536,26 @@ describe("multi-lane sites", () => {
 
 describe("topology", () => {
   const empty = path.join(REPO_ROOT, "does-not-exist");
+
+  it("derives routes from the level's road network: gates in driving order, sensors passed, one-way roads", () => {
+    // Level 2 in miniature: a one-way road down the west side, gate g1 then g3 across it,
+    // ZONE1 branching off after g1, ZONE2 after g3.
+    const level = {
+      Paths: [{
+        Points: [{ Name: "E", X: 0, Y: 0 }, { Name: "A", X: 0, Y: 1000 }, { Name: "B", X: 0, Y: 2000 },
+          { Name: "Z1", X: 1000, Y: 1000 }, { Name: "Z2", X: 1000, Y: 2000 }],
+        Connections: [{ From: "E", To: "A", Direction: 0 }, { From: "A", To: "B", Direction: 0 },
+          { From: "A", To: "Z1", Direction: 0 }, { From: "B", To: "Z2", Direction: 0 }],
+      }],
+      ParkingSpots: [{ Name: "ENTRY1", Purpose: "EntrySpot", X: 0, Y: 0 }, { Name: "ENTRY2", Purpose: "EntrySpot", X: 0, Y: 1900 },
+        { Name: "S1", Purpose: "Park", ZoneParent: "ZONE1", X: 1000, Y: 1000 }, { Name: "S3", Purpose: "Park", ZoneParent: "ZONE2", X: 1000, Y: 2000 }],
+      Gates: [{ Name: "g1", X: 80, Y: 500 }, { Name: "g3", X: 80, Y: 1950 }],
+    };
+    expect(routesFromLevel(level, TWO_ZONES)).toEqual({
+      ENTRY1: { ZONE1: { gates: ["g1"], sensors: ["ENTRY1"] }, ZONE2: { gates: ["g1", "g3"], sensors: ["ENTRY1", "ENTRY2"] } },
+      ENTRY2: { ZONE2: { gates: ["g3"], sensors: ["ENTRY2"] } }, // no way back up to ZONE1
+    });
+  });
 
   it("picks the matching topology and rejects ones naming missing gates", () => {
     const sim = FakeSim.lvl1();

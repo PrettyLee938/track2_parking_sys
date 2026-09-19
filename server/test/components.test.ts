@@ -220,25 +220,47 @@ describe("exhaust fans", () => {
     return sim;
   };
 
-  it("runs a zone's fans while cars move in it, and switches them off once it is quiet", async () => {
-    // 2026-09-20 03:12: no CO event ever came - only "High CO gas level" penalties (30 each).
+  const zone1 = (level: number) => [{ name: "ZONE1", gasCarbonMonoxideLevel: level, risk: level >= 50 ? "Mid" : "Safe" }];
+  const fanCalls = (sim: FakeSim) => sim.calls.filter((x) => x[0].startsWith("fan-"));
+
+  it("runs a zone's fans while its CO is 50 or more, and switches them off once it drops below", async () => {
+    // Spec: "better to turn off when CO levels are below 50". 2026-09-20: no CO webhook ever
+    // came - only "High CO gas level" penalties (30 each) - so the level is read (list-zones).
     const { c, sim, advance } = await make({ sim: withFans(), cfg: { gameSpeed: 1 } });
-    await c.handle(carEv("A", "S1", "CarIn", "10:00:00"));
+    sim.zones = zone1(20);
+    await c.handle(carEv("A", "S1", "CarIn", "10:00:00")); // traffic: worth measuring
     await c.tick();
-    expect(sim.calls.filter((x) => x[0] === "fan-on").map((x) => x[1])).toEqual(["fan0", "fan1"]);
-    advance(c.cfg.fanIdleOffGameS + 1);
+    expect(sim.zonePolls).toBe(1);
+    expect(fanCalls(sim)).toEqual([]); // 20: clean, fans stay off
+    sim.zones = zone1(63);
+    advance(c.cfg.coPollGameS);
     await c.tick();
-    expect(sim.calls.filter((x) => x[0] === "fan-off").map((x) => x[1])).toEqual(["fan0", "fan1"]);
-    expect(c.components.views().find((v) => v.name === "fan0")!.uses).toBeGreaterThan(0); // on-hours count as wear
+    expect(fanCalls(sim)).toEqual([["fan-on", "fan0"], ["fan-on", "fan1"]]);
+    sim.zones = zone1(49);
+    advance(c.cfg.coPollGameS);
+    await c.tick();
+    expect(fanCalls(sim).slice(2)).toEqual([["fan-off", "fan0"], ["fan-off", "fan1"]]);
+    expect(c.components.get("fan", "fan0")!.uses).toBeGreaterThan(0); // on-hours count as wear
   });
 
-  it("keeps fans on after a CO penalty, and never switches a broken fan", async () => {
+  it("does not poll CO while nothing moves and no fan runs", async () => {
     const { c, sim, advance } = await make({ sim: withFans(), cfg: { gameSpeed: 1 } });
+    advance(c.cfg.coPollGameS * 3);
+    await c.tick();
+    expect(sim.zonePolls).toBe(0); // every list call has a cost
+  });
+
+  it("vents after a CO penalty until a reading is clean, and never switches a broken fan", async () => {
+    const { c, sim, advance } = await make({ sim: withFans(), cfg: { gameSpeed: 1 } });
+    sim.zones = zone1(70);
     await c.handle(broken("ExhaustFan", "fan1"));
     await c.handle({ EventClass: "penalty", Reason: "High CO gas level detected", FineAmount: "30", ComponentName: "ZONE1", EventId: "co1", _received_at: "" });
-    advance(c.cfg.fanIdleOffGameS + 1); // quiet, but the alert holds
     await c.tick();
-    expect(sim.calls.filter((x) => x[0].startsWith("fan-"))).toEqual([["fan-on", "fan0"]]); // fan1 is broken: never touched
+    expect(fanCalls(sim)).toEqual([["fan-on", "fan0"]]); // fan1 is broken: never touched
+    sim.zones = zone1(30);
+    advance(c.cfg.coPollGameS);
+    await c.tick();
+    expect(fanCalls(sim)).toEqual([["fan-on", "fan0"], ["fan-off", "fan0"]]);
   });
 });
 
