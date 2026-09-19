@@ -66,9 +66,15 @@ export function buildApp(options: AppOptions = {}): { app: FastifyInstance; cont
     recovery.startAutomaticResume();
     if (recovery.status().status === 'reconciling') await recovery.reconcile();
     if (recovery.status().status === 'active') {
-      for (const event of events.pending(recovery.status().runId)) {
-        try { await eventController.apply(event); events.markProcessed(event.eventId); }
-        catch (error) { audit.record('event-replay-failed', 'event', event.eventId, { error: error instanceof Error ? error.message : String(error) }); }
+      let pending = events.pending(recovery.status().runId);
+      while (pending.length) {
+        let failed = false;
+        for (const event of pending) {
+          try { await eventController.apply(event); events.markProcessed(event.eventId); }
+          catch (error) { audit.record('event-replay-failed', 'event', event.eventId, { error: error instanceof Error ? error.message : String(error) }); failed = true; break; }
+        }
+        if (failed) break;
+        pending = events.pending(recovery.status().runId);
       }
     }
   });

@@ -72,7 +72,15 @@ export class EventService {
 
   private pendingEvents(runId?: string) {
     const rows = this.db.all<{ event_id: string; type: string; sequence_id: number; run_id: string | null; received_at: string; raw_json: string }>('SELECT event_id, type, sequence_id, run_id, received_at, raw_json FROM events WHERE processed = 0 AND ((run_id = :run) OR (:run IS NULL AND run_id IS NULL)) ORDER BY sequence_id', { ':run': runId || null });
-    return rows.map((row) => ({ eventId: row.event_id, type: row.type, sequenceId: row.sequence_id, runId: row.run_id || undefined, receivedAt: row.received_at, payload: JSON.parse(row.raw_json) as Record<string, unknown> }));
+    const last = this.db.get<{ sequence_id: number }>('SELECT MAX(sequence_id) AS sequence_id FROM events WHERE processed = 1 AND ((run_id = :run) OR (:run IS NULL AND run_id IS NULL))', { ':run': runId || null })?.sequence_id;
+    let expected = last === undefined || last === null ? rows[0]?.sequence_id || 0 : last + 1;
+    const ready = [];
+    for (const row of rows) {
+      if (row.sequence_id > 0 && row.sequence_id !== expected) break;
+      ready.push({ eventId: row.event_id, type: row.type, sequenceId: row.sequence_id, runId: row.run_id || undefined, receivedAt: row.received_at, payload: JSON.parse(row.raw_json) as Record<string, unknown> });
+      if (row.sequence_id > 0) expected = row.sequence_id + 1;
+    }
+    return ready;
   }
 
   pending(runId?: string) { return this.pendingEvents(runId); }
