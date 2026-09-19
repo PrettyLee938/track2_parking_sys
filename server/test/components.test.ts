@@ -17,7 +17,7 @@ describe("component health", () => {
   it("repairs a broken entry gate straight away and resumes the lane once it is fixed", async () => {
     // 2026-09-20 01:14 Level 2 run: gate1 broke a minute in, nothing repaired it, and the
     // only entrance stayed shut for 12 minutes.
-    const { c, sim } = await make();
+    const { c, sim, store } = await make();
     await c.handle(broken("BarrierGate", "gateA"));
     expect(repairs(sim)).toEqual([["repair", "gateA"]]);
     expect(c.gates.get("gateA")!.maintenance).toBe(true);
@@ -25,6 +25,7 @@ describe("component health", () => {
     expect(sim.calls.filter((x) => x[0] === "open")).toEqual([]); // operating it now is a penalty
     expect(c.entryLanes.get("ENTRY1")!.queue).toEqual(["A"]);
     await c.handle(fixed("BarrierGate", "gateA"));
+    expect(store.listMaintenanceJobs().map((j) => j.status)).toEqual(["completed"]);
     expect(sim.last()).toEqual(["open", "gateA"]);
     await c.handle(gateEv("gateA", "Open"));
     expect(sim.last()).toEqual(["goto", "A", "S1"]);

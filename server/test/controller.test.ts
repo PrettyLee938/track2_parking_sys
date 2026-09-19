@@ -54,6 +54,16 @@ describe("lifecycle", () => {
     expect(rows[0]).toMatchObject({ plate: "A", charge_parking: 2, paid: 2, payment_ok: true, spot: "S1" });
   });
 
+  it("persists the invoice and payment for a completed visit", async () => {
+    const { c, store } = await make();
+    await parkAndReachExit(c);
+    await fireTimers(c);
+    await c.handle(payEv("A", 2));
+    const invoice = store.db.prepare("SELECT invoice_id, visit_id, parking_amount, status FROM invoices").get() as Record<string, unknown>;
+    expect(invoice).toMatchObject({ visit_id: expect.stringContaining("visit:"), parking_amount: 2, status: "settled" });
+    expect(store.db.prepare("SELECT plate, amount, accepted FROM payments").get()).toMatchObject({ plate: "A", amount: 2, accepted: 1 });
+  });
+
   it("admits one car at a time, first in first out", async () => {
     const { c, sim } = await make();
     await feed(c, gateEv("gateA", "Open"), carEv("A", "ENTRY1", "CarIn", "10:00:00"), carEv("B", "ENTRY1", "CarIn", "10:00:01"));
@@ -90,6 +100,23 @@ describe("lifecycle", () => {
 // exit & payment
 // ---------------------------------------------------------------------------
 describe("exit and payment", () => {
+  it("holds a manually parked car until an operator reconciles its duration", async () => {
+    const { c, sim, store } = await make();
+    await c.handle(carEv("MAN 1", "EXIT_EXIT", "CarIn", "10:00:00", "5", "Electric"));
+    await fireTimers(c);
+    expect(c.cars.get("MAN 1")).toMatchObject({ status: "unknown", unknown_reason: expect.stringContaining("manual parking") });
+    expect(sim.charges()).toEqual([]);
+    expect(store.listIncidents({ status: "open" })[0]).toMatchObject({ kind: "manual_parked_car", visit_id: expect.stringContaining("manual:") });
+
+    const result = await c.manualReconcileCar("MAN 1", 3, "operator");
+    expect(result.ok).toBe(true);
+    await fireTimers(c);
+    expect(sim.charges()).toEqual([["charge", "MAN 1", 6, 0]]); // electric parking is doubled
+    expect(store.listIncidents({ status: "resolved" })[0]).toMatchObject({ kind: "manual_parked_car", resolved_by: "operator" });
+    await c.handle(payEv("MAN 1", 6));
+    expect(sim.gotos()).toContainEqual(["goto", "MAN 1", "leavepark"]);
+  });
+
   it("does not release a car that paid the wrong amount", async () => {
     const { c, sim } = await make();
     await parkAndReachExit(c);

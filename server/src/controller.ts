@@ -162,6 +162,7 @@ export interface Car extends CarView {
   fakePayments: number;          // payments with a bad signature
   waitingForGate: boolean;       // released, its leavepark queued until the exit gate opens
   routeGates: string[];          // entry gates on its way to its spot, in order (kept open until it parks)
+  manualIncidentId: number | null;
 }
 
 function newCar(plate: string, carType: string, planned: number | null, status: CarStatus, extra: Partial<Car> = {}): Car {
@@ -171,14 +172,14 @@ function newCar(plate: string, carType: string, planned: number | null, status: 
     exit_at: null, charge_parking: null, charge_electric: null, charge_attempts: 0, charge_override: null,
     paid: null, payment_ok: null, left_at: null,
     arrivedG: null, dispatchedG: null, parkedG: null, leftSpotG: null, releasedG: null, lastSeenG: null,
-    gotoG: null, gotoResends: 0, parkedA: null, leftSpotA: null, chargeScheduled: false, fakePayments: 0, waitingForGate: false, routeGates: [],
+    gotoG: null, gotoResends: 0, parkedA: null, leftSpotA: null, chargeScheduled: false, fakePayments: 0, waitingForGate: false, routeGates: [], manualIncidentId: null,
     ...extra,
   };
 }
 
 export function publicCar(c: Car): CarView {
   const { arrivedG, dispatchedG, parkedG, leftSpotG, releasedG, lastSeenG, gotoG, gotoResends, parkedA, leftSpotA,
-    chargeScheduled, fakePayments, waitingForGate, routeGates, ...view } = c;
+    chargeScheduled, fakePayments, waitingForGate, routeGates, manualIncidentId, ...view } = c;
   return view;
 }
 
@@ -493,6 +494,9 @@ export class Controller implements Engine {
     if (a.cmd === "charge") { // args: plate, parkingCost, chargingCost
       car.charge_parking = Number(a.args[1]);
       car.charge_electric = Number(a.args[2]) || 0;
+      const invoice = this.store.findInvoice(car.visit_id, car.plate);
+      car.invoice_id = invoice?.invoice_id ?? car.invoice_id ?? `invoice:${car.visit_id ?? car.plate}`;
+      car.billing_basis = invoice?.basis ?? car.billing_basis;
       car.charge_attempts++;
       if (!["released", "payment_mismatch", "gone"].includes(car.status)) car.status = "invoiced";
       return;
@@ -680,6 +684,7 @@ export class Controller implements Engine {
       this.forget(stale);
     }
     const car = newCar(plate, str(e, "CarType") || CarType.Normal, toInt(e.PlannedParkingDurationInMinutes), "queued", {
+      visit_id: e.EventId ? `visit:${e.EventId}` : undefined,
       entry_lane: lane.spot, arrived_at: e.ServerDateTime ?? null, arrivedG: this.gameAt(e),
     });
     this.cars.set(plate, car);
@@ -883,12 +888,30 @@ export class Controller implements Engine {
       // #endregion
       return;
     }
-    const car = this.cars.get(plate) ?? this.adopt(e);
+    const known = this.cars.get(plate);
+    const car = known ?? this.adopt(e);
     // #region agent log
     fetch('http://127.0.0.1:7502/ingest/5b601716-2241-46fc-9c1b-1aa5e55ae0bd',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'6f1c01'},body:JSON.stringify({sessionId:'6f1c01',hypothesisId:'D',location:'controller.ts:onExitIn',message:'exit CarIn',data:{plate,status:car.status,spot:car.spot,charge_parking:car.charge_parking,lane:lane.spot,recentPaid:this.recentPaid.has(plate),timeScale:this.timeScale},timestamp:Date.now()})}).catch(()=>{});
     // #endregion
     car.exit_lane = lane.spot;
     car.exit_at = e.ServerDateTime ?? null;
+    // A car that appears at an exit without an accepted entry/spot flow may have
+    // been parked manually. Never invent a parking duration and never release it
+    // automatically: hold it for an operator reconciliation and keep the incident
+    // visible across restarts.
+    if (!known || car.status === "unknown") {
+      car.status = "unknown";
+      car.unknown_reason = "manual parking detected at exit without entry/spot telemetry";
+      const existing = this.store.findOpenIncident("manual_parked_car", car.visit_id);
+      const incident = existing ?? (!this.replaying ? this.store.createIncident({
+        status: "open", kind: "manual_parked_car", zone: lane.zone, visit_id: car.visit_id,
+        reason: car.unknown_reason, confidence: "high",
+        evidence: { plate, exit: lane.spot, event_id: e.EventId ?? null, car_type: car.car_type },
+      }) : undefined);
+      car.manualIncidentId = incident?.id ?? null;
+      this.note("warn", `${plate} held at ${lane.spot}: ${car.unknown_reason}`);
+      return;
+    }
     // A car at the exit is no longer in its spot, whether or not we saw it leave. (From a
     // spot next to the exit the spot CarOut simply arrives ~0.2s later; if it was lost,
     // this is what frees the spot.)
@@ -935,13 +958,18 @@ export class Controller implements Engine {
     let parking: number, basis: string;
     if (car.charge_override !== null) {
       parking = car.charge_override;
-      basis = "amount stated by simulator";
+      basis = car.billing_basis ?? "operator or simulator override";
     } else {
       if (gameS === null && !car.planned_minutes) this.note("warn", `${plate}: no parking times and no planned duration, billing 1 minute`);
       parking = parkingCost(gameS ?? 60, car.planned_minutes, car.car_type, this.cfg);
       basis = `planned ${car.planned_minutes}m, measured ${gameS !== null ? (gameS / 60).toFixed(2) : "?"} game-min`;
     }
     const electric = chargingCost(car.car_type, this.cfg);
+    const invoiceId = car.invoice_id ?? `invoice:${car.visit_id ?? car.plate}`;
+    car.invoice_id = invoiceId;
+    car.billing_basis = basis;
+    this.store.createInvoice({ invoiceId, visitId: car.visit_id, plate: car.plate,
+      parkingAmount: parking, electricAmount: electric, basis });
     // #region agent log
     fetch('http://127.0.0.1:7502/ingest/5b601716-2241-46fc-9c1b-1aa5e55ae0bd',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'6f1c01'},body:JSON.stringify({sessionId:'6f1c01',hypothesisId:'B',location:'controller.ts:charge',message:'issuing charge',data:{plate,status:car.status,attempts:car.charge_attempts,planned:car.planned_minutes,gameS,parking,electric,basis,timeScale:this.timeScale,timeScaleSrc:this.timeScaleInfo.source,exitAt:car.exit_at,carType:car.car_type,qDepth:(this.queue as {depth?:number}).depth},timestamp:Date.now()})}).catch(()=>{});
     // #endregion
@@ -949,7 +977,10 @@ export class Controller implements Engine {
       car.charge_parking = parking;
       car.charge_electric = electric;
       car.status = "invoiced";
+      this.store.updateInvoiceStatus(invoiceId, "issued");
       this.note("info", `${plate} invoiced ${(parking + electric).toFixed(2)} (${basis})`);
+    } else {
+      this.store.updateInvoiceStatus(invoiceId, "outcome_unknown");
     }
     // On an HTTP failure we do NOT retry: the charge may have registered, and a second
     // one is a penalty. A rejection arrives as a penalty event instead (onPenalty).
@@ -967,12 +998,19 @@ export class Controller implements Engine {
     const amount = Number(e.Amount) || 0;
     const car = this.cars.get(plate);
     if (!car || car.charge_parking === null) {
+      const invoice = this.store.findInvoice(car?.visit_id, plate);
+      this.store.recordPayment({ eventId: e.EventId, invoiceId: invoice?.invoice_id, visitId: car?.visit_id,
+        plate, amount, accepted: false });
       this.note("warn", `payment ${amount.toFixed(2)} from ${plate} with no invoice - ignored`);
       return;
     }
     const expected = car.charge_parking + (car.charge_electric ?? 0);
+    const invoice = this.store.findInvoice(car.visit_id, plate);
+    car.invoice_id = car.invoice_id ?? invoice?.invoice_id ?? `invoice:${car.visit_id ?? car.plate}`;
     car.paid = amount;
-    if (Math.abs(amount - expected) <= this.cfg.paymentTolerance) {
+    const accepted = Math.abs(amount - expected) <= this.cfg.paymentTolerance;
+    this.store.recordPayment({ eventId: e.EventId, invoiceId: car.invoice_id, visitId: car.visit_id, plate, amount, accepted });
+    if (accepted) {
       car.payment_ok = true;
       this.counters.revenue += amount;
       await this.release(car);
@@ -996,6 +1034,9 @@ export class Controller implements Engine {
     const plate = str(e, "CarPlateNumber") ?? "?";
     const car = this.cars.get(plate);
     this.counters.fake_payments++;
+    const invoice = this.store.findInvoice(car?.visit_id, plate);
+    this.store.recordPayment({ eventId: e.EventId, invoiceId: car?.invoice_id ?? invoice?.invoice_id,
+      visitId: car?.visit_id, plate, amount: Number(e.Amount) || 0, accepted: false });
     this.note("error", `FAKE payment ${e.Amount} from ${plate} (bad signature) - not releasing`);
     if (!car || car.payment_ok || car.status !== "invoiced") return;
     car.fakePayments++;
@@ -1045,7 +1086,19 @@ export class Controller implements Engine {
   private async onExitOut(e: EventRecord, lane: ExitLane) {
     const plate = str(e, "CarPlateNumber")!;
     if (this.drivingIn(plate)) return; // passing over the exit sensor on the way to its spot
-    const car = this.cars.get(plate) ?? this.adopt(e);
+    const known = this.cars.get(plate);
+    const car = known ?? this.adopt(e);
+    if (!known) {
+      car.exit_lane = lane.spot;
+      car.unknown_reason = "car left through exit without entry/spot telemetry";
+      const existing = this.store.findOpenIncident("manual_parked_car", car.visit_id);
+      const incident = existing ?? (!this.replaying ? this.store.createIncident({
+        status: "open", kind: "manual_parked_car", zone: lane.zone, visit_id: car.visit_id,
+        reason: car.unknown_reason, confidence: "high",
+        evidence: { plate, exit: lane.spot, event_id: e.EventId ?? null, action: "exit_without_exit_in" },
+      }) : undefined);
+      car.manualIncidentId = incident?.id ?? null;
+    }
     if (car.status !== "released") {
       this.counters.escaped++;
       this.note("error", `${plate} left without being released (status ${car.status})`);
@@ -1537,7 +1590,9 @@ export class Controller implements Engine {
   /** A car we have no record of (e.g. it arrived before we started). */
   private adopt(e: EventRecord): Car {
     const plate = str(e, "CarPlateNumber")!;
-    const car = newCar(plate, str(e, "CarType") || CarType.Normal, toInt(e.PlannedParkingDurationInMinutes), "unknown");
+    const car = newCar(plate, str(e, "CarType") || CarType.Normal, toInt(e.PlannedParkingDurationInMinutes), "unknown", {
+      visit_id: e.EventId ? `manual:${e.EventId}` : undefined,
+    });
     this.cars.set(plate, car);
     this.note("warn", `adopted unknown car ${plate} at ${e.SpotName}`);
     return car;
@@ -1597,7 +1652,7 @@ export class Controller implements Engine {
         if (since !== null && now - since > allowed) overdueParked.push(car);
       } else if (car.status === "queued") {
         if (now - (car.arrivedG ?? now) > this.cfg.entryPatienceGameS + 60) this.retire(car, `is still queued at ${car.entry_lane} past the give-up time`);
-      } else if (["to_exit", "at_exit", "invoiced", "payment_mismatch", "entering", "unknown", "turned_away", "released"].includes(car.status)) {
+      } else if (["to_exit", "at_exit", "invoiced", "payment_mismatch", "entering", "turned_away", "released"].includes(car.status)) {
         if (quietFor > this.cfg.staleCarGameS) {
           this.retire(car, `has had no events for ${Math.round(quietFor)} game-s (status ${car.status})`,
             car.status === "turned_away" ? "turned_away" : "lost");
@@ -1680,6 +1735,24 @@ export class Controller implements Engine {
   // ---------------------------------------------------------------------------
   // manual control from the dashboard - always run through exclusive()
   // ---------------------------------------------------------------------------
+  /** Reconcile a car that was parked without the normal entry/spot telemetry. */
+  async manualReconcileCar(plate: string, minutes: number, actor: string): Promise<ControlResult> {
+    const car = this.cars.get(plate);
+    if (!car || car.status !== "unknown" || !car.exit_lane) return fail(`no unreconciled manual car ${plate} is waiting at an exit`);
+    if (!Number.isInteger(minutes) || minutes < 1 || minutes > 24 * 60) return fail("minutes must be an integer between 1 and 1440");
+    car.planned_minutes = minutes;
+    car.charge_override = parkingCost(minutes * 60, minutes, car.car_type, this.cfg);
+    car.billing_basis = `operator reconciled duration ${minutes}m`;
+    car.unknown_reason = null;
+    car.status = "at_exit";
+    if (car.manualIncidentId !== null) {
+      this.store.resolveIncident(car.manualIncidentId, actor, `reconciled ${minutes} minute manual parking`, "resolved");
+    }
+    this.note("warn", `${actor} reconciled manually parked ${plate} as ${minutes} minutes; charging before release`);
+    this.scheduleCharge(plate, this.chargeDelay(car.exit_lane));
+    return ok(`${plate} reconciled; invoice will be requested at the exit`);
+  }
+
   /** Run fn in turn with webhooks and ticks, so it never sees half-updated state. */
   exclusive<T>(fn: () => Promise<T> | T): Promise<T> {
     return this.queue.run(fn);
@@ -1803,6 +1876,7 @@ export class Controller implements Engine {
 
   snapshot(): StateSnapshot {
     const zones = this.zoneSummaries();
+    const environment = this.subsystems.find((s) => s.name === "environment")?.snapshot?.() as StateSnapshot["environment"];
     const spots = [...this.spots.values()]
       .sort((a, b) => a.purpose.localeCompare(b.purpose) || spotNumber(a.name) - spotNumber(b.name))
       .map((s) => ({
@@ -1827,6 +1901,7 @@ export class Controller implements Engine {
       components: this.components.views(),
       subsystems: Object.fromEntries(this.subsystems.filter((s) => s !== this.components && s.snapshot)
         .map((s) => [s.name, s.snapshot!()])),
+      environment,
     };
   }
 }

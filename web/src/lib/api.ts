@@ -52,6 +52,8 @@ export const api = {
   incidents: (status?: string, limit = 100) => call<{ items: IncidentView[] }>("GET", `/api/incidents${qs({ status, limit })}`),
   resolveIncident: (id: number, resolution: string, status: "resolved" | "dismissed" = "resolved") =>
     call<IncidentView>("POST", `/api/incidents/${id}/resolve`, { resolution, status }),
+  reconcileManualCar: (plate: string, minutes: number) =>
+    call<ControlResult>("POST", `/api/control/cars/${encodeURIComponent(plate)}/reconcile`, { minutes }),
   penalties: (limit = 200) => call<PenaltiesResponse>("GET", `/api/penalties${qs({ limit })}`),
   dailyReport: (day: string, kind: "operations" | "financial" = "operations") =>
     call<DailyReport>("GET", `/api/reports/daily${qs({ day, kind })}`),

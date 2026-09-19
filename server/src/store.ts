@@ -432,6 +432,14 @@ export class Store {
     return r ? toIncident(r) : undefined;
   }
 
+  findOpenIncident(kind: string, visitId: string | null | undefined): IncidentView | undefined {
+    if (!visitId) return undefined;
+    const r = this.db.prepare(`SELECT * FROM incidents
+      WHERE kind = ? AND visit_id = ? AND status IN ('open', 'provisional')
+      ORDER BY id DESC LIMIT 1`).get(kind, visitId) as Record<string, unknown> | undefined;
+    return r ? toIncident(r) : undefined;
+  }
+
   listIncidents(opts: { status?: IncidentStatus; limit?: number; since?: string; until?: string } = {}): IncidentView[] {
     const limit = Math.min(Math.max(opts.limit ?? 100, 1), 1000);
     const where: string[] = [], params: unknown[] = [];
@@ -490,8 +498,13 @@ export class Store {
   }
 
   createInvoice(input: { invoiceId: string; visitId?: string | null; plate: string; parkingAmount: number; electricAmount: number; basis: string }): void {
-    this.db.prepare(`INSERT OR IGNORE INTO invoices (invoice_id, visit_id, plate, parking_amount, electric_amount, basis, status, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, 'intended', ?)`).run(input.invoiceId, input.visitId ?? null, input.plate,
+    this.db.prepare(`INSERT INTO invoices (invoice_id, visit_id, plate, parking_amount, electric_amount, basis, status, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, 'intended', ?)
+      ON CONFLICT(invoice_id) DO UPDATE SET
+        parking_amount = CASE WHEN invoices.status = 'settled' THEN invoices.parking_amount ELSE excluded.parking_amount END,
+        electric_amount = CASE WHEN invoices.status = 'settled' THEN invoices.electric_amount ELSE excluded.electric_amount END,
+        basis = CASE WHEN invoices.status = 'settled' THEN invoices.basis ELSE excluded.basis END,
+        status = CASE WHEN invoices.status = 'settled' THEN invoices.status ELSE 'intended' END`).run(input.invoiceId, input.visitId ?? null, input.plate,
       input.parkingAmount, input.electricAmount, input.basis, new Date().toISOString());
   }
 

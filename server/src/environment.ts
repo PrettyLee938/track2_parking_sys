@@ -58,7 +58,10 @@ interface ZoneAir {
 
 /** Which cars are driving, and so what has to be lit. */
 const DRIVING_IN: ReadonlySet<CarStatus> = new Set(["dispatching", "dispatched", "entering"]);
-const DRIVING_OUT: ReadonlySet<CarStatus> = new Set(["to_exit", "at_exit", "invoiced", "payment_mismatch", "released"]);
+// Reaching an exit sensor is not the same as moving: cars can wait there for an
+// invoice/payment. Keep light demand tied to actual transit states so an exit
+// queue does not burn every light indefinitely.
+const DRIVING_OUT: ReadonlySet<CarStatus> = new Set(["to_exit"]);
 
 export class Environment implements Subsystem {
   readonly name = "environment";
