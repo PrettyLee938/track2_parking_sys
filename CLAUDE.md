@@ -156,7 +156,11 @@ Open / next:
   Diagnose a live run with 
 pm run report:live -w server (GET /debug/controller, loopback).
   Also verified: 0 of 2,165 turned-away cars parked without our goto (open entry gate safe).
-  105 tests. NEXT: live run to verify,
+  **Verified live 02:28-03:00: 0 breakdowns (24 preventive repairs, 35 s each vs ~140 s for a
+  broken gate), lanes down 21-24% (was 55%), 5 fake payments all paid for real after the re-charge,
+  0 penalties.** Remaining: 119/331 arrivals (36%) turned away - ZONE1 full while ZONE2/3 empty
+  (all cars enter at ENTRY1). Fixed: 49 double leaveparks (stuck check used the old entry goto;
+  car.gotoG reset on release + waitingForGate). 106 tests. NEXT (was: live run to verify),
   then zone distribution (user wants a smarter spread across zones: full/broken-gate zones,
   balance wear so one zone's gates/spots don't take all the maintenance).
   Team split (4 people): A = core engine/repairs/maintenance (Miro + Claude), B = environment

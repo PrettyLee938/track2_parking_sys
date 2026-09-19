@@ -159,6 +159,7 @@ export interface Car extends CarView {
   leftSpotA: number | null;
   chargeScheduled: boolean;
   fakePayments: number;          // payments with a bad signature
+  waitingForGate: boolean;       // released, its leavepark queued until the exit gate opens
 }
 
 function newCar(plate: string, carType: string, planned: number | null, status: CarStatus, extra: Partial<Car> = {}): Car {
@@ -168,14 +169,14 @@ function newCar(plate: string, carType: string, planned: number | null, status: 
     exit_at: null, charge_parking: null, charge_electric: null, charge_attempts: 0, charge_override: null,
     paid: null, payment_ok: null, left_at: null,
     arrivedG: null, dispatchedG: null, parkedG: null, leftSpotG: null, releasedG: null, lastSeenG: null,
-    gotoG: null, gotoResends: 0, parkedA: null, leftSpotA: null, chargeScheduled: false, fakePayments: 0,
+    gotoG: null, gotoResends: 0, parkedA: null, leftSpotA: null, chargeScheduled: false, fakePayments: 0, waitingForGate: false,
     ...extra,
   };
 }
 
 export function publicCar(c: Car): CarView {
   const { arrivedG, dispatchedG, parkedG, leftSpotG, releasedG, lastSeenG, gotoG, gotoResends, parkedA, leftSpotA,
-    chargeScheduled, fakePayments, ...view } = c;
+    chargeScheduled, fakePayments, waitingForGate, ...view } = c;
   return view;
 }
 
@@ -958,11 +959,13 @@ export class Controller implements Engine {
       car.status = "released";
       car.releasedG = this.clock.now();
       car.gotoResends = 0;
+      // Its entry goto is history: the stuck-goto check must wait for the leavepark. (It
+      // did not, and re-released cars still waiting for the gate: 49 double leaveparks.)
+      car.gotoG = null;
     }
     const lane = car.exit_lane ? this.exitLanes.get(car.exit_lane) : undefined;
     lane?.releasing.add(car.plate);
     const gate = lane?.gate ? this.gates.get(lane.gate) : undefined;
-    const leave = () => this.leavePark(car);
     if (lane?.gate && (!gate || !gate.operable)) {
       // Not told to leave yet (gotoG null): the gate is free to be repaired, no goto to
       // re-send, and resume() releases it once the gate is fixed.
@@ -970,8 +973,13 @@ export class Controller implements Engine {
       this.note("warn", `exit gate ${lane.gate} not operable - ${car.plate} waits`);
       return;
     }
-    if (gate) await this.whenGateOpen(gate, leave);
-    else await leave();
+    if (!gate) return void await this.leavePark(car);
+    if (car.waitingForGate && gate.state !== GateState.Open) return; // already queued on this gate
+    car.waitingForGate = true;
+    await this.whenGateOpen(gate, () => {
+      car.waitingForGate = false;
+      return this.leavePark(car);
+    });
   }
 
   private async onExitOut(e: EventRecord, lane: ExitLane) {
