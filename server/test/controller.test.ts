@@ -259,12 +259,13 @@ describe("game speed", () => {
   it("scales the gate-confirmation timeout by the game speed", async () => {
     const { c, sim, advance } = await make({ cfg: { gameSpeed: 0.5 } }); // slow game: 3 game-s = 6 real s
     await c.handle(carEv("A", "ENTRY1", "CarIn", "10:00:00"));
+    const opens = () => sim.calls.filter((x) => x[0] === "open");
     advance(4); // too early to retry at half speed
     await c.tick();
-    expect(sim.calls).toEqual([["open", "gateA"]]);
+    expect(opens()).toEqual([["open", "gateA"]]);
     advance(3);
     await c.tick();
-    expect(sim.calls).toEqual([["open", "gateA"], ["open", "gateA"]]);
+    expect(opens()).toEqual([["open", "gateA"], ["open", "gateA"]]);
   });
 
   it("takes the speed from, in order: configuration, learned stays, simulator settings, 1.0", async () => {
@@ -392,7 +393,7 @@ describe("multi-lane sites", () => {
       },
     };
     const setup = async () => {
-      const made = await make({ sim: twoZoneSim(), topo: ROUTED, cfg: { allocationStrategy: "zone_balanced" } });
+      const made = await make({ sim: twoZoneSim(), topo: ROUTED, cfg: { allocationStrategy: "zone_balanced", gameSpeed: 1 } });
       made.c.spots.get("S1")!.reserved_for = "X"; made.c.spots.get("S2")!.reserved_for = "Y"; // ZONE1 full
       return made;
     };
@@ -420,6 +421,30 @@ describe("multi-lane sites", () => {
       expect(sim.calls).not.toContainEqual(["close", "g3"]); // A has not reached it yet
       await c.handle(carEv("A", "S3", "CarIn", "10:00:08"));
       await fireTimers(c);
+      expect(sim.calls).toContainEqual(["close", "g3"]);
+    });
+
+    it("does not write a zone off when a car there is slow to start - the route is known", async () => {
+      // 04:01 run at x5.8: the 4 game-s confirm window is 0.7 real s; ZONE2/3 were "learned"
+      // unreachable and 291 cars were turned away with 60 spots free.
+      const { c, sim, advance } = await setup();
+      await feed(c, carEv("A", "ENTRY1", "CarIn", "10:00:00"), gateEv("g1", "Open"), gateEv("g3", "Open"));
+      expect(sim.last()).toEqual(["goto", "A", "S3"]);
+      advance(c.cfg.gotoConfirmGameS + 0.5);
+      await c.tick();
+      expect(sim.last()).toEqual(["goto", "A", "S3"]); // re-sent, same spot
+      expect(c.unreachable.size).toBe(0);
+    });
+
+    it("closes a far gate left open with nobody on the way through it", async () => {
+      // 04:11 run: gate3 and gate5 stood open for minutes after cross-zone traffic stopped.
+      const { c, sim, advance } = await setup();
+      await feed(c, carEv("A", "ENTRY1", "CarIn", "10:00:00"), gateEv("g1", "Open"), gateEv("g3", "Open"));
+      c.cars.get("A")!.status = "lost"; // its parking event never came
+      c.cars.get("A")!.routeGates = [];
+      await c.tick();
+      advance(c.cfg.entryGateCloseDelayGameS + 1);
+      await c.tick();
       expect(sim.calls).toContainEqual(["close", "g3"]);
     });
 

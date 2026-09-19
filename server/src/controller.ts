@@ -117,6 +117,7 @@ export class Gate {
   openRequestedAt: number | null = null;  // game clock
   openRetries = 0;
   closeRequestedAt: number | null = null; // game clock
+  idleSinceG: number | null = null;       // open with nobody using it since (closeForgottenGates)
   moveSentReal: number | null = null;     // a clean open/close was sent at this real time (speed sample)
 
   constructor(readonly name: string, public zone: string) {}
@@ -1259,9 +1260,13 @@ export class Controller implements Engine {
   /** A car on its way to a zone further down the road, still to pass this gate (it is on its
    * route, and not the gate of its own entrance - that one is the lane's business). */
   private inTransitThrough(gate: string): Car | null {
+    const now = this.clock.now();
     for (const car of this.cars.values()) {
       if (!car.routeGates.includes(gate) || !(MID_ENTRY.includes(car.status) || car.status === "entering")) continue;
       if (car.entry_lane && this.entryLanes.get(car.entry_lane)?.gate === gate) continue;
+      // A drive down the road takes seconds; a car "on its way" for longer lost its parking
+      // event - it must not hold the gate open.
+      if (car.dispatchedG !== null && now - car.dispatchedG > this.cfg.transitMaxGameS) continue;
       return car;
     }
     return null;
@@ -1375,10 +1380,33 @@ export class Controller implements Engine {
     await this.checkGateTimeouts(now);
     await this.checkStuckGotos(now);
     await this.sweepGhosts(now);
+    await this.closeForgottenGates(now);
     await this.each("onTick", (s) => s.onTick?.(now));
     this.sample(nowS());
     const horizon = now - this.cfg.repeatExitWindowGameS;
     for (const [plate, t] of this.recentPaid) if (t < horizon) this.recentPaid.delete(plate);
+  }
+
+  /**
+   * Any lane gate standing open with nobody using it is closed once its hold time is up -
+   * whatever the reason no close was scheduled (a car redirected or written off on its way
+   * through). 04:11 run: gate3 and gate5 stood open for minutes with no traffic through them.
+   */
+  private async closeForgottenGates(now: number) {
+    const exitGates = new Set([...this.exitLanes.values()].map((l) => l.gate));
+    const laneGates = new Set([...this.entryLanes.values(), ...this.exitLanes.values()].map((l) => l.gate).filter((g): g is string => !!g));
+    for (const name of laneGates) {
+      const gate = this.gates.get(name);
+      if (!gate) continue;
+      const idle = gate.state === GateState.Open && !gate.hold && gate.operable && !gate.onOpen.length && !this.gateBusy(name);
+      if (!idle) { gate.idleSinceG = null; continue; }
+      gate.idleSinceG ??= now;
+      const hold = exitGates.has(name) ? this.cfg.gateCloseDelayGameS : this.cfg.entryGateCloseDelayGameS;
+      if (now - gate.idleSinceG >= hold) {
+        gate.idleSinceG = null;
+        await this.closeGateIfIdle(name);
+      }
+    }
   }
 
   /**
@@ -1397,8 +1425,12 @@ export class Controller implements Engine {
       const where = car.status === "released" ? car.exit_lane : car.entry_lane;
       const dest = onEntry ? car.spot : Destination.LeavePark;
       const spotZone = onEntry && car.spot ? this.spots.get(car.spot)?.zone : undefined;
+      // Only guess "unreachable" without route data. With routes from the level's road network
+      // the answer is known, and a slow start is just a slow start: at x5.8 game speed the
+      // confirm window is 0.7 real s - 04:01 run: ZONE2/3 wrongly written off, 291 cars
+      // turned away while 60 spots stood empty. Re-send instead.
       const routeOpen = car.routeGates.every((g) => this.gates.get(g)?.state === GateState.Open);
-      if (onEntry && spotZone && entry!.zone && spotZone !== entry!.zone && routeOpen) {
+      if (onEntry && !this.topology?.routes && spotZone && entry!.zone && spotZone !== entry!.zone && routeOpen) {
         // Sent to another zone and did not move: the simulator ignores a goto to a spot the
         // car cannot reach - no penalty, the car just sits on the entry sensor and blocks
         // the lane (2026-09-20 03:21: 13 of 13 ENTRY1 cars sent to ZONE2 never moved).
