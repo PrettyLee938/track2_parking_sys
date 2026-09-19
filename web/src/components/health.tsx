@@ -20,8 +20,14 @@ const EVENT_LABEL: Record<ComponentEventView["event"], { text: string; tone: "cr
   fixed: { text: "back in service", tone: "good" },
 };
 
-export function ComponentHealthCard({ components }: { components: ComponentView[] }) {
+/** StateSnapshot.subsystems.environment (server/src/environment.ts). */
+interface EnvironmentView {
+  zones: { zone: string; fans_on: number; fans: number; busy: boolean; co_alert: boolean; last_co: { level: number; danger: string } | null }[];
+}
+
+export function ComponentHealthCard({ components, environment }: { components: ComponentView[]; environment?: unknown }) {
   const trouble = components.filter((c) => c.health !== "ok");
+  const env = environment as EnvironmentView | undefined;
   return (
     <Card title="Component health" subtitle="Broken parts are repaired automatically as soon as nothing is using them">
       <div className="tiles">
@@ -36,6 +42,24 @@ export function ComponentHealthCard({ components }: { components: ComponentView[
           );
         })}
       </div>
+      {env?.zones?.length ? (
+        <>
+          <h3 className="section-title">Exhaust fans (CO)</h3>
+          <table className="data compact">
+            <thead><tr><th>Zone</th><th>Fans on</th><th>Why</th><th>Last CO reading</th></tr></thead>
+            <tbody>
+              {env.zones.map((z) => (
+                <tr key={z.zone}>
+                  <td><b>{z.zone}</b></td>
+                  <td>{z.fans_on} / {z.fans}</td>
+                  <td>{z.co_alert ? <Badge tone="critical">CO alert</Badge> : z.busy ? <Badge tone="info">cars moving</Badge> : <span className="muted">quiet - off</span>}</td>
+                  <td className="muted">{z.last_co ? `${z.last_co.level.toFixed(0)} (${z.last_co.danger})` : "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      ) : null}
       <h3 className="section-title">Out of service</h3>
       {!trouble.length ? <Empty>Everything is working.</Empty> : (
         <table className="data compact">

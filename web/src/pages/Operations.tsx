@@ -29,7 +29,7 @@ export function Operations({ s }: { s: StateSnapshot }) {
 
   return (
     <div className="page">
-      <ComponentHealthCard components={s.components ?? []} />
+      <ComponentHealthCard components={s.components ?? []} environment={s.subsystems?.environment} />
 
       <Card title="Barrier gates" subtitle="Holding a gate open or closed overrides the automation until you return it to automatic">
         <div className="gate-grid">

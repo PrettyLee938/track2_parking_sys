@@ -17,6 +17,7 @@
 import type { FeedLevel } from "@gpa/shared";
 import type { ComponentRegistry } from "./components";
 import type { Settings } from "./config";
+import { Environment } from "./environment";
 import type { Car, EntryLane, ExitLane, Gate, Spot } from "./controller";
 import type { EventRecord, Store } from "./store";
 import type { GameClock } from "./gameClock";
@@ -58,6 +59,6 @@ export interface Engine {
 }
 
 /** Every subsystem, in the order they see events. */
-export function createSubsystems(_engine: Engine): Subsystem[] {
-  return [];
+export function createSubsystems(engine: Engine): Subsystem[] {
+  return [new Environment(engine)];
 }

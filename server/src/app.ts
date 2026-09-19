@@ -316,6 +316,7 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
       }),
       gate_limit: controller.components.limit("gate"),
       out_of_service: s.components.filter((c) => c.health !== "ok").map((c) => `${c.kind} ${c.name} ${c.health}${c.waiting ? ` (${c.waiting})` : ""}`),
+      environment: s.subsystems.environment ?? null, unreachable: [...controller.unreachable],
       cars: s.active_cars.length, counters: s.counters, feed: s.feed.slice(-40),
     };
   });

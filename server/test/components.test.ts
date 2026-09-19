@@ -183,12 +183,62 @@ describe("component health", () => {
     expect(sim.last()).toEqual(["open", "gateA"]);
   });
 
+  it("lets out paid cars that waited through an exit gate's preventive repair", async () => {
+    // 2026-09-20 03:03: gate2 went into preventive repair while idle; three cars paid during
+    // it and were never let out once it was fixed - they left on their own minutes later.
+    const { c, sim, advance } = await make({ cfg: { gateCycleLimit: 10, gameSpeed: 1 } });
+    for (let i = 0; i < 8; i++) await feed(c, gateEv("gateB", "Closed"), gateEv("gateB", "Open"));
+    await c.tick(); // idle and 8/10: preventive repair
+    expect(repairs(sim)).toEqual([["repair", "gateB"]]);
+    await parkAndReachExit(c);
+    await fireTimers(c);
+    await c.handle(payEv("A", 2));
+    expect(sim.gotos().filter((g) => g[2] === "leavepark")).toEqual([]); // gate under repair
+    advance(c.cfg.releaseTimeoutGameS + 30); // a repair takes ~35 s: longer than the release timeout
+    await c.tick();
+    expect(c.cars.get("A")?.status).toBe("released"); // still waiting, not written off
+    await c.handle(fixed("BarrierGate", "gateB"));
+    await fireTimers(c);
+    const after = sim.calls.slice(sim.calls.findIndex((x) => x[0] === "charge") + 1);
+    expect(after).toContainEqual(["goto", "A", "leavepark"]);
+    expect(after.filter((x) => x[0] === "close" && x[1] === "gateB")).toEqual([]);
+  });
+
   it("keeps working when the level has no fans or lights to list (Level 1)", async () => {
     const sim = FakeSim.lvl1();
     sim.listExhaustFans = async () => { throw new Error("404"); };
     const { c } = await make({ sim });
     expect(c.components.views().filter((v) => v.kind === "gate")).toHaveLength(3);
     expect(c.feed.some((f) => f.msg.includes("could not list fans/lights"))).toBe(true);
+  });
+});
+
+describe("exhaust fans", () => {
+  const withFans = () => {
+    const sim = FakeSim.lvl1();
+    sim.fans = ["fan0", "fan1"].map((name) => ({ name, zoneParent: "ZONE1", broken: false, isUnderMaintenance: false, isOn: false }));
+    return sim;
+  };
+
+  it("runs a zone's fans while cars move in it, and switches them off once it is quiet", async () => {
+    // 2026-09-20 03:12: no CO event ever came - only "High CO gas level" penalties (30 each).
+    const { c, sim, advance } = await make({ sim: withFans(), cfg: { gameSpeed: 1 } });
+    await c.handle(carEv("A", "S1", "CarIn", "10:00:00"));
+    await c.tick();
+    expect(sim.calls.filter((x) => x[0] === "fan-on").map((x) => x[1])).toEqual(["fan0", "fan1"]);
+    advance(c.cfg.fanIdleOffGameS + 1);
+    await c.tick();
+    expect(sim.calls.filter((x) => x[0] === "fan-off").map((x) => x[1])).toEqual(["fan0", "fan1"]);
+    expect(c.components.views().find((v) => v.name === "fan0")!.uses).toBeGreaterThan(0); // on-hours count as wear
+  });
+
+  it("keeps fans on after a CO penalty, and never switches a broken fan", async () => {
+    const { c, sim, advance } = await make({ sim: withFans(), cfg: { gameSpeed: 1 } });
+    await c.handle(broken("ExhaustFan", "fan1"));
+    await c.handle({ EventClass: "penalty", Reason: "High CO gas level detected", FineAmount: "30", ComponentName: "ZONE1", EventId: "co1", _received_at: "" });
+    advance(c.cfg.fanIdleOffGameS + 1); // quiet, but the alert holds
+    await c.tick();
+    expect(sim.calls.filter((x) => x[0].startsWith("fan-"))).toEqual([["fan-on", "fan0"]]); // fan1 is broken: never touched
   });
 });
 
