@@ -47,6 +47,32 @@ export class RecoveryService {
     return checks.some(Boolean);
   }
 
+  private hasBusinessState(runId: string) {
+    return [
+      this.db.get('SELECT 1 FROM parking_sessions WHERE run_id = :run LIMIT 1', { ':run': runId }),
+      this.db.get('SELECT 1 FROM commands WHERE run_id = :run LIMIT 1', { ':run': runId }),
+      this.db.get('SELECT 1 FROM invoices WHERE session_id IN (SELECT id FROM parking_sessions WHERE run_id = :run) LIMIT 1', { ':run': runId }),
+      this.db.get('SELECT 1 FROM payments WHERE session_id IN (SELECT id FROM parking_sessions WHERE run_id = :run) LIMIT 1', { ':run': runId }),
+      this.db.get('SELECT 1 FROM overrides WHERE session_id IN (SELECT id FROM parking_sessions WHERE run_id = :run) LIMIT 1', { ':run': runId })
+    ].some(Boolean);
+  }
+
+  private canBaselineGap(runId: string) {
+    if (this.hasBusinessState(runId)) return false;
+    const pending = this.db.all<{ type: string }>('SELECT type FROM events WHERE processed = 0 AND run_id = :run', { ':run': runId });
+    return pending.every((event) => event.type === 'car_spot_action' || event.type === 'test_webhook');
+  }
+
+  private baselineGap(runId: string) {
+    const latest = this.db.get<{ sequence_id: number }>('SELECT MAX(sequence_id) AS sequence_id FROM events WHERE run_id = :run', { ':run': runId })?.sequence_id;
+    this.db.transaction(() => {
+      this.db.run('UPDATE events SET processed = 1 WHERE processed = 0 AND run_id = :run', { ':run': runId });
+      if (latest !== undefined && latest !== null) this.setMeta('last_sequence', String(latest));
+      this.db.run('DELETE FROM meta WHERE key = :key', { ':key': 'reconcile_reason' });
+      this.audit.record('run-gap-baselined', 'simulator-run', runId, { lastSequence: latest, discardedPendingEvents: true });
+    });
+  }
+
   private canAdoptLegacyLocalRun(previous: string | undefined, observed: string | undefined) {
     return Boolean(previous?.startsWith('local-') && observed?.startsWith('local-') && previous !== observed && !this.hasOperationalState(previous));
   }
@@ -70,6 +96,7 @@ export class RecoveryService {
           return { status: 'ambiguous' as const, runId: snapshot.runId };
         }
       }
+      if (this.meta('reconcile_reason') === 'sequence-gap' && this.canBaselineGap(snapshot.runId)) this.baselineGap(snapshot.runId);
       await this.parking.refreshSnapshot(snapshot);
       if (!current) this.setMeta('run_id', snapshot.runId);
       const waitingForEvents = this.meta('reconcile_reason') === 'sequence-gap';

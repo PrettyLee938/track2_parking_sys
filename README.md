@@ -4,20 +4,20 @@ This repository contains the backend baseline for the Level 1 Grand Park Auto ch
 
 ## Run locally
 
-Use Node.js 24 or newer. Copy `.env.example` to `.env`, set the simulator credentials and the first Admin credentials locally, then install and start the backend:
+Use Node.js 24 or newer. Configure the simulator credentials and the first Admin credentials in `.env`, then run the backend before starting the simulator:
 
-```text
+```bash
 npm install
 npm run dev
 ```
 
-The backend listens on `http://127.0.0.1:3000` by default. Run the Windows simulator on port `9898` and configure its webhook URL as `http://127.0.0.1:3000/webhooks/simulator`. Start the backend before starting the simulator so the webhook receiver is ready. Keep credentials and the SQLite database outside Git.
+The backend listens on `http://127.0.0.1:3000` by default. Run the Windows simulator on port `9898` and configure its webhook URL as `http://127.0.0.1:3000/webhooks/simulator`. Start the backend before starting the simulator so the webhook receiver is ready. Keep credentials and the SQLite database outside Git. If the backend was previously offline, it safely baselines missed car events when no parking sessions or commands exist; active work remains protected behind reconciliation.
 
 Useful checks are:
 
-```text
+```bash
 npm run check
-npm test -- --run
+npm test
 ```
 
 The check includes TypeScript compilation, the authored source/test 200-line limit, and the full Vitest suite.

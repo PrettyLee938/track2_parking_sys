@@ -40,4 +40,22 @@ describe('run recovery', () => {
     expect((await recovery.reconcile()).status).toBe('resumed');
     expect(recovery.status()).toMatchObject({ runId: 'local-current', status: 'active' });
   });
+
+  it('baselines a missed webhook sequence when no work exists to reconcile', async () => {
+    const db = new Database(':memory:');
+    const audit = new AuditService(db);
+    const gateway = new FixtureGateway({ runId: 'local-run' });
+    await gateway.login();
+    const parking = new ParkingService(db, new CommandService(db, gateway, audit), audit);
+    db.run("INSERT INTO meta (key, value) VALUES ('run_id', 'local-run'), ('run_status', 'reconciling'), ('reconcile_reason', 'sequence-gap'), ('last_sequence', '3')");
+    for (const sequenceId of [5, 6]) {
+      db.run('INSERT INTO events (event_id, type, sequence_id, run_id, received_at, signature_valid, signature_digest, raw_json) VALUES (:id, :type, :sequence, :run, :received, 0, :digest, :raw)', { ':id': `gap-${sequenceId}`, ':type': 'car_spot_action', ':sequence': sequenceId, ':run': 'local-run', ':received': new Date().toISOString(), ':digest': '', ':raw': '{}' });
+    }
+    const recovery = new RecoveryService(db, gateway, parking, audit);
+    expect((await recovery.reconcile()).status).toBe('resumed');
+    expect(recovery.status()).toMatchObject({ runId: 'local-run', status: 'active' });
+    expect(db.get<{ value: string }>('SELECT value FROM meta WHERE key = :key', { ':key': 'reconcile_reason' })).toBeUndefined();
+    expect(db.get<{ value: string }>('SELECT value FROM meta WHERE key = :key', { ':key': 'last_sequence' })?.value).toBe('6');
+    expect(db.get<{ processed: number }>('SELECT processed FROM events WHERE event_id = :id', { ':id': 'gap-6' })?.processed).toBe(1);
+  });
 });
