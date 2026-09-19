@@ -381,15 +381,16 @@ export function computeSignature(payload: Record<string, unknown>): string {
 ```
 
 Level 1 sends `Signature: null` on every event, so `signatureStatus()` returns one of
-three values — `valid`, `unsigned`, `invalid` — and what to do with `unsigned` is a
-setting (`GPA_REQUIRE_SIGNATURE`, default `false`). Turn it on once a level actually
-signs.
+three values — `valid`, `unsigned`, `invalid` — and which ones are acted on is the
+`GPA_SIGNATURE_MODE` setting: `strict` (only `valid`; Level 2+), `lenient` (also
+`unsigned`; the default, for Level 1) or `monitor` (everything; only records the status,
+to check how a new level signs with `npm run report:level -w server`). Every event is
+stored either way, with its status and whether it was acted on.
 
 ### Dedupe and gap detection
 
 ```ts
-const trusted = sig === "valid" || (sig === "unsigned" && !this.requireSignature);
-const accept = trusted && !duplicate;
+const accept = trusted(sig, this.mode) && !duplicate;
 ```
 
 `Intake` keeps a set of seen `EventId`s and the last `SequenceId`. A gap is **recorded,
@@ -1497,7 +1498,7 @@ export function unknownSettingVars(env = process.env): string[] {
 | `GPA_ALLOCATION_STRATEGY` | `lane_zone_first_free` | see [§11](#11-spot-allocation) |
 | `GPA_BILLING_ROUNDING` | `planned` | `planned` \| `round` \| `ceil` |
 | `GPA_GAME_SPEED` | — | fixed override; normally leave unset |
-| `GPA_REQUIRE_SIGNATURE` | `false` | drop unsigned webhooks |
+| `GPA_SIGNATURE_MODE` | `lenient` | `strict` / `lenient` / `monitor`: which signature statuses are acted on |
 | `GPA_LOG_LEVEL` | `info` | `fatal`…`trace` |
 
 **Naming convention:** a setting ending in `_GAME_S` is in **game seconds** and is scaled

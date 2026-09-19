@@ -31,12 +31,20 @@ export function computeSignature(payload: Record<string, unknown>): string {
 }
 
 export type SigStatus = "valid" | "unsigned" | "invalid";
+export type SignatureMode = "strict" | "lenient" | "monitor";
 
 /** Level 1 sends Signature=null on every event. */
 export function signatureStatus(payload: Record<string, unknown>): SigStatus {
   const received = payload.Signature;
   if (!received) return "unsigned";
   return computeSignature(payload) === String(received).toLowerCase() ? "valid" : "invalid";
+}
+
+/** Whether an event with this signature status may be acted on (see config.ts). */
+export function trusted(sig: SigStatus, mode: SignatureMode): boolean {
+  if (mode === "monitor") return true;
+  if (mode === "lenient") return sig !== "invalid";
+  return sig === "valid";
 }
 
 export interface IntakeResult {
@@ -52,7 +60,7 @@ export class Intake {
   lastSeq: number | null = null;
   readonly stats = { received: 0, accepted: 0, sig_valid: 0, sig_unsigned: 0, sig_invalid: 0, duplicates: 0, seq_gaps: 0 };
 
-  constructor(private readonly requireSignature: boolean) {}
+  constructor(private readonly mode: SignatureMode) {}
 
   check(event: SimEventBase): IntakeResult {
     this.stats.received++;
@@ -73,8 +81,7 @@ export class Intake {
       if (this.lastSeq === null || seq > this.lastSeq) this.lastSeq = seq;
     }
 
-    const trusted = sig === "valid" || (sig === "unsigned" && !this.requireSignature);
-    const accept = trusted && !duplicate;
+    const accept = trusted(sig, this.mode) && !duplicate;
     if (accept) {
       if (eventId) this.seenIds.add(eventId);
       this.stats.accepted++;

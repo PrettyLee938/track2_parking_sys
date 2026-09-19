@@ -39,9 +39,13 @@ const schema = z.object({
   // false = passive listener (log events, send no commands). Use it with the
   // single-car tool, which drives cars by hand.
   controllerEnabled: bool().default(true),
-  // Level 1 sends Signature=null. Turn on once a level signs its webhooks, so
-  // unsigned events are dropped as untrusted.
-  requireSignature: bool().default(false),
+  // Which webhooks are acted on. Every one is stored either way, with its signature status
+  // (valid / unsigned / invalid), so rejected calls stay visible.
+  //   strict  - only correctly signed ones (Level 2+: "respond only to signed webhooks")
+  //   lenient - signed or unsigned, never a wrong signature (Level 1 sends Signature=null)
+  //   monitor - all of them, status only recorded: to check how a new level signs
+  //             (npm run report:level -w server) before switching to strict
+  signatureMode: z.enum(["strict", "lenient", "monitor"]).default("lenient"),
 
   // ---- site layout ----------------------------------------------------------
   topologyDir: repoPath().default(path.resolve(REPO_ROOT, "topology")),
