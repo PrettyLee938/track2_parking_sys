@@ -45,6 +45,11 @@ GPA_ADMIN_PASSWORD=something-long
 3. Dashboard: `npm run dev:web` and open http://localhost:5173 - or `npm run build` once and
    the server serves it at http://127.0.0.1:8000 itself.
 
+For a local simulator run from Git Bash, use `npm run dev:sim`. It starts the configured
+`ParkingSimulator.exe`, captures its output in `logs/simulator.log`, and runs the backend
+with output captured in `logs/server.log`. Select Level 2 and press Start in the simulator
+window; the simulator does not expose a REST command for choosing a level.
+
 > **Never run the live server in watch mode.** `npm run dev:watch` restarts the server on
 > every source change; each restart during a run loses the webhooks sent while it is down.
 > A restart in the middle of a run is survivable (the server replays its recent events *and*
@@ -88,7 +93,8 @@ Sign in with a dashboard account (the admin creates the others under **Admin**).
 
 | Command | What |
 |---|---|
-| `npm run dev` | server with reload on change |
+| `npm run dev` | server for simulator runs |
+| `npm run dev:sim` | start the local simulator and server, capturing both logs under `logs/` |
 | `npm start` | server |
 | `npm run dev:web` | dashboard dev server (proxies `/api` to the server) |
 | `npm run build` | build the dashboard into `web/dist` |

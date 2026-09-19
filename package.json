@@ -9,6 +9,7 @@
   ],
   "scripts": {
     "dev": "npm run dev -w server",
+    "dev:sim": "bash scripts/run-local.sh",
     "dev:watch": "npm run dev:watch -w server",
     "dev:web": "npm run dev -w web",
     "start": "npm run start -w server",
