@@ -187,6 +187,8 @@ const schema = z.object({
   // A payment_made with a bad signature is a fake: the car has not paid. It is never
   // released for it; ask it to pay once more (the only way it can still pay).
   rechargeAfterFakePayment: bool().default(true),
+  // How many times to ask again after fake payments (2026-09-20: some cars faked twice).
+  fakePaymentRecharges: num().int().min(0).default(3),
 
   // ---- our own timing (REAL seconds) ------------------------------------------------
   tickIntervalS: num().positive().default(0.5),

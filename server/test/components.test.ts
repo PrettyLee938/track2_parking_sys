@@ -295,6 +295,24 @@ describe("fake payments", () => {
     expect(sim.last()).toEqual(["goto", "A", "leavepark"]);
   });
 
+  it("keeps asking a car that fakes its payment more than once", async () => {
+    // 04:44 run: ZLP 294, BCA 039 and LCC 468 faked twice; asked only once more, each sat on
+    // the exit fined every ~45 s.
+    const { c, sim } = await make();
+    await parkAndReachExit(c);
+    await fireTimers(c);
+    const fake = async () => {
+      c.submitRejected({ ...payEv("A", 2), Signature: "0".repeat(32), _sig: "invalid" });
+      await (c.queue as RecordingQueue).tasks.at(-1)!();
+      await fireTimers(c);
+    };
+    await fake();
+    await fake();
+    expect(sim.charges()).toHaveLength(3); // the bill + a re-ask after each fake
+    await c.handle(payEv("A", 2));
+    expect(sim.last()).toEqual(["goto", "A", "leavepark"]);
+  });
+
   it("hands a badly signed payment to the controller without acting on it", async () => {
     const { app, queue } = await testServer({ cfg: { signatureMode: "strict" } });
     const body = JSON.stringify({ EventClass: "payment_made", CarPlateNumber: "VWW 515", Amount: "4.00", Reason: "Car Payment",
