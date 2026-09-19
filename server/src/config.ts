@@ -180,8 +180,34 @@ const schema = z.object({
   // CO webhook at all in the 2026-09-20 runs, only CO penalties.
   fanControl: bool().default(true),
   coFanOnLevel: num().nonnegative().default(50),
-  coFanOffLevel: num().nonnegative().default(50),
+  coFanOffLevel: num().nonnegative().default(30),
   coPollGameS: num().positive().default(15),
+
+  // Lights (spec: they guide drivers in dark zones, cost electricity, "make sure they run
+  // only at night", "no need to be on if all cars are parking, they must be on if a car is
+  // moving in the zone"). A zone's lights follow the cars moving in it, not its occupancy:
+  // a full car park with nobody driving needs no light, and one car moving through an empty
+  // one does.
+  lightControl: bool().default(true),
+  // auto = only between nightStartHour and nightEndHour; always = ignore the clock (still
+  // only while cars move); never = leave every light alone, for manual control.
+  // NOTE no event carries the simulator's time of day - ServerDateTime is the wall clock -
+  // so "night" is this configured window read off the latest event's hour. If a future
+  // level exposes a real day/night field, drive it from that instead.
+  lightsMode: z.enum(["auto", "always", "never"]).default("auto"),
+  nightStartHour: num().min(0).max(24).default(18),
+  nightEndHour: num().min(0).max(24).default(6),
+  // route = light only what a car is using: the middle aisle it drives along, plus the bay
+  // light over its own row while it parks (needs the level file for light positions).
+  // group = one command per zone, all ten lights together - fewer commands, more burning.
+  lightsDetail: z.enum(["route", "group"]).default("route"),
+  // Keep a light on this long after the last car needed it, so a stream of cars does not
+  // flicker it off and on between them.
+  lightsHoldGameS: num().min(0).default(20),
+  // Nothing has moved anywhere in the car park for this long: switch every light off,
+  // whatever else thinks. Catches a light left on by a command that was dropped, or by a
+  // car record that never closed.
+  lightsIdleOffGameS: num().min(0).default(300),
 
   // ---- payments --------------------------------------------------------------------
   // A payment_made with a bad signature is a fake: the car has not paid. It is never

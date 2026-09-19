@@ -71,8 +71,9 @@ export function loadDir(dir: string, log: Logger = quiet): Topology[] {
   return out;
 }
 
-interface LevelSpot { Name: string; Purpose: string; X: number; Y: number; ZoneParent?: string }
+interface LevelSpot { Name: string; Purpose: string; X: number; Y: number; ZoneParent?: string; Height?: number }
 interface LevelGate { Name: string; X: number; Y: number; ZoneParent?: string }
+interface LevelLight { Name: string; X: number; Y: number; ZoneParent?: string; Group?: string; LightType?: string }
 interface LevelPoint { Name: string; X: number; Y: number }
 interface LevelPath { Points?: LevelPoint[]; Connections?: { From: string; To: string; Direction?: number }[] }
 
@@ -175,6 +176,104 @@ export function routesFromLevelsDir(dir: string, t: Topology, log: Logger = quie
     }
   }
   return undefined;
+}
+
+// ---------------------------------------------------------------------------
+// where the lights are
+// ---------------------------------------------------------------------------
+/**
+ * A light's place in its zone. `list-lights` gives only name/group/zone/isOn, so lighting
+ * just the part of a zone a car is using needs the level file's coordinates.
+ */
+export interface LightPlacement {
+  name: string;
+  zone: string;
+  group: string;
+  /** "road" = the middle aisle cars drive along; "bay" = over a row of parking spots. */
+  role: "road" | "bay";
+  x: number;
+  y: number;
+}
+
+/**
+ * Sorts a zone's lights into the middle road and the parking rows.
+ *
+ * Every Level 2 zone is two rows of bays with one aisle between them, so a light is a road
+ * light exactly when it sits in the gap between the rows. The rows are found from the
+ * zone's own parking spots rather than assumed, so this still holds if a level is laid out
+ * differently - a zone whose spots do not split into two rows simply has no road lights and
+ * falls back to lighting the whole group.
+ */
+export function lightsFromLevel(level: { Lights?: LevelLight[]; ParkingSpots?: LevelSpot[] }): Map<string, LightPlacement> {
+  const out = new Map<string, LightPlacement>();
+  const parking = (level.ParkingSpots ?? []).filter((s) => s.Purpose === SpotPurpose.Park);
+
+  for (const light of level.Lights ?? []) {
+    const zone = light.ZoneParent ?? "";
+    const spots = parking.filter((s) => (s.ZoneParent ?? "") === zone);
+    let role: LightPlacement["role"] = "bay";
+    if (spots.length) {
+      const top = Math.min(...spots.map((s) => s.Y));
+      const bottom = Math.max(...spots.map((s) => s.Y));
+      const middle = (top + bottom) / 2;
+      // The aisle runs from the bottom edge of the upper row to the top edge of the lower one.
+      const upper = spots.filter((s) => s.Y < middle);
+      const lower = spots.filter((s) => s.Y >= middle);
+      if (upper.length && lower.length) {
+        const aisleTop = Math.max(...upper.map((s) => s.Y + (s.Height ?? 0)));
+        const aisleBottom = Math.min(...lower.map((s) => s.Y));
+        if (light.Y > aisleTop && light.Y < aisleBottom) role = "road";
+      }
+    }
+    out.set(light.Name, { name: light.Name, zone, group: light.Group ?? "", role, x: light.X, y: light.Y });
+  }
+  return out;
+}
+
+/** Where everything a light decision needs is, read from the level file in one pass. */
+export interface SitePlacement {
+  lights: Map<string, LightPlacement>;
+  /** Parking spot name -> position, for picking the bay light over a car's own row. */
+  spots: Map<string, { x: number; y: number }>;
+}
+
+/** lightsFromLevel for the level file that matches this topology, as routesFromLevelsDir does. */
+export function placementFromLevelsDir(dir: string, t: Topology, log: Logger = quiet): SitePlacement | undefined {
+  let files: string[];
+  try {
+    files = readdirSync(dir).filter((f) => /^lvl.*\.json$/.test(f)).sort();
+  } catch {
+    return undefined;
+  }
+  for (const f of files) {
+    try {
+      const level = JSON.parse(readFileSync(path.join(dir, f), "utf8").replace(/^﻿/, ""));
+      const sensors = (level.ParkingSpots ?? []) as LevelSpot[];
+      const set = (purpose: string) => new Set(sensors.filter((s) => s.Purpose === purpose).map((s) => s.Name));
+      if (!matches(t, set(SpotPurpose.Entry), set(SpotPurpose.Exit))) continue;
+      const lights = lightsFromLevel(level);
+      if (!lights.size) return undefined;
+      const spots = new Map(sensors.map((s) => [s.Name, { x: s.X, y: s.Y }]));
+      const road = [...lights.values()].filter((l) => l.role === "road").length;
+      log.info(`lights from ${f}: ${lights.size} (${road} over the middle road, ${lights.size - road} over the bays)`);
+      return { lights, spots };
+    } catch (e) {
+      log.error(`cannot read lights from ${f}: ${(e as Error).message}`);
+    }
+  }
+  return undefined;
+}
+
+/** The bay light nearest a parking spot - the one that lights the car's own row. */
+export function nearestLight(lights: Iterable<LightPlacement>, to: { x: number; y: number }, role?: LightPlacement["role"]): LightPlacement | null {
+  let best: LightPlacement | null = null;
+  let bestD = Infinity;
+  for (const l of lights) {
+    if (role && l.role !== role) continue;
+    const d = Math.hypot(l.x - to.x, l.y - to.y);
+    if (d < bestD) { bestD = d; best = l; }
+  }
+  return best;
 }
 
 /**
