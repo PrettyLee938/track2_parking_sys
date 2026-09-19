@@ -321,3 +321,113 @@ describe("fake payments", () => {
     expect(queue.tasks).toHaveLength(1); // submitRejected, not submit: see the test above
   });
 });
+
+describe("lights", () => {
+  // Spec: lights guide drivers in dark zones and cost electricity - "make sure they run
+  // only at night", "no need to be on if all cars are parking, they must be on if a car is
+  // moving in the zone". So the rule is movement, not occupancy.
+  const withLights = () => {
+    const sim = FakeSim.lvl1();
+    sim.lights = ["l1", "l2"].map((name) => ({ name, group: "G1", zoneParent: "ZONE1", isOn: false }));
+    return sim;
+  };
+  const lightCalls = (sim: FakeSim) => sim.calls.filter((x) => /^(light|group)-/.test(x[0]));
+  // No level file in tests, so there are no light positions: group mode is what runs.
+  const night = { gameSpeed: 1, lightsDetail: "group" as const };
+
+  it("leaves every light off in the daytime, however much traffic there is", async () => {
+    const { c, sim } = await make({ sim: withLights(), cfg: night });
+    await c.handle(carEv("A", "ENTRY1", "CarIn", "12:00:00")); // midday
+    await c.tick();
+    expect(lightCalls(sim)).toEqual([]);
+  });
+
+  it("lights a zone at night while a car is driving in it", async () => {
+    const { c, sim } = await make({ sim: withLights(), cfg: night });
+    await c.handle(carEv("A", "ENTRY1", "CarIn", "22:00:00")); // night: the car is dispatched
+    await c.tick();
+    expect(lightCalls(sim)).toEqual([["group-on", "G1"]]);
+    expect(c.components.get("light", "l1")!.on).toBe(true);
+  });
+
+  it("switches them off again once every car has parked", async () => {
+    const { c, sim, advance } = await make({ sim: withLights(), cfg: night });
+    await c.handle(carEv("A", "ENTRY1", "CarIn", "22:00:00"));
+    await c.tick();
+    expect(lightCalls(sim)).toEqual([["group-on", "G1"]]);
+
+    await c.handle(carEv("A", "S1", "CarIn", "22:00:20")); // parked: nothing is moving now
+    advance(c.cfg.lightsHoldGameS + 1);                    // the anti-flicker hold expires
+    await c.tick();
+    expect(lightCalls(sim)).toEqual([["group-on", "G1"], ["group-off", "G1"]]);
+  });
+
+  it("keeps them on between cars, so a stream does not flicker them", async () => {
+    const { c, sim, advance } = await make({ sim: withLights(), cfg: night });
+    await c.handle(carEv("A", "ENTRY1", "CarIn", "22:00:00"));
+    await c.tick();
+    await c.handle(carEv("A", "S1", "CarIn", "22:00:10"));  // A parks
+    advance(c.cfg.lightsHoldGameS / 2);                     // still inside the hold
+    await c.tick();
+    expect(lightCalls(sim)).toEqual([["group-on", "G1"]]);  // not switched off yet
+  });
+
+  it("lights up again when a parked car leaves", async () => {
+    const { c, sim, advance } = await make({ sim: withLights(), cfg: night });
+    await c.handle(carEv("A", "ENTRY1", "CarIn", "22:00:00"));
+    await c.tick();                                        // lights come on for the arrival
+    await c.handle(carEv("A", "S1", "CarIn", "22:00:20"));
+    advance(c.cfg.lightsHoldGameS + 1);
+    await c.tick();
+    expect(lightCalls(sim).at(-1)).toEqual(["group-off", "G1"]);
+
+    await c.handle(carEv("A", "S1", "CarOut", "22:05:00")); // driving to the exit
+    await c.tick();
+    expect(lightCalls(sim).at(-1)).toEqual(["group-on", "G1"]);
+  });
+
+  it("switches everything off when nothing has moved for the idle timeout", async () => {
+    const { c, sim, advance } = await make({ sim: withLights(), cfg: { ...night, lightsHoldGameS: 10_000 } });
+    await c.handle(carEv("A", "ENTRY1", "CarIn", "22:00:00"));
+    await c.tick();
+    expect(lightCalls(sim)).toEqual([["group-on", "G1"]]);
+
+    // The hold alone would keep them on; the park-wide idle rule overrides it.
+    advance(c.cfg.lightsIdleOffGameS + 1);
+    await c.tick();
+    expect(lightCalls(sim).at(-1)).toEqual(["group-off", "G1"]);
+  });
+
+  it("never operates a broken light, not even inside a group command", async () => {
+    const { c, sim } = await make({ sim: withLights(), cfg: night });
+    await c.handle(broken("Light", "l1"));
+    await c.handle(carEv("A", "ENTRY1", "CarIn", "22:00:00"));
+    await c.tick();
+    // A group command operates every light in the group, so with one broken the others are
+    // switched individually instead - operating a broken part is a penalty.
+    expect(lightCalls(sim)).toEqual([["light-on", "l2"]]);
+    expect(c.components.get("light", "l1")!.on).toBe(false);
+    expect(c.components.get("light", "l2")!.on).toBe(true);
+  });
+
+  it("counts on-time as usage, the way fans are measured", async () => {
+    const { c, sim, advance } = await make({ sim: withLights(), cfg: night });
+    await c.handle(carEv("A", "ENTRY1", "CarIn", "22:00:00"));
+    await c.tick();
+    advance(3600); // an hour of game time with the lights on
+    await c.tick();
+    expect(c.components.get("light", "l1")!.uses).toBeGreaterThan(0);
+  });
+
+  it("can be turned off entirely, or forced on whatever the hour", async () => {
+    const off = await make({ sim: withLights(), cfg: { ...night, lightsMode: "never" } });
+    await off.c.handle(carEv("A", "ENTRY1", "CarIn", "22:00:00"));
+    await off.c.tick();
+    expect(lightCalls(off.sim)).toEqual([]);
+
+    const always = await make({ sim: withLights(), cfg: { ...night, lightsMode: "always" } });
+    await always.c.handle(carEv("A", "ENTRY1", "CarIn", "12:00:00")); // midday
+    await always.c.tick();
+    expect(lightCalls(always.sim)).toEqual([["group-on", "G1"]]);
+  });
+});
