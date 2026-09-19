@@ -119,7 +119,7 @@ Open / next:
   "cannot reach" penalties); gate1 broke 1 min in and nothing repaired it (lane dead 12
   min); ServerDateTime is wall clock (x1.01) so day/night is NOT in events; CO max 7 (fans
   never needed); all 30 lights on.
-  **Step 2 (component health) IN PROGRESS** (uncommitted): `server/src/subsystems.ts`
+  **Step 2 (component health) BUILT** (commit f4a8f7b on miro_level2, not yet verified live): `server/src/subsystems.ts`
   (plug-in slot: Subsystem{onSync,onEvent,onTick,snapshot} + Engine interface; add new ones
   in createSubsystems()), `server/src/components.ts` (ComponentRegistry: gates/spots/fans/
   lights, health, usage persisted in tables `components` + `component_events`, auto repair
