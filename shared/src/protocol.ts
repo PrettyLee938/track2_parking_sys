@@ -122,3 +122,34 @@ export interface SimBarrier {
   isUnderMaintenance: boolean;
   state: string;
 }
+
+/** list-lights (Level 2+). Switched one by one or per group. */
+export interface SimLight {
+  name: string;
+  group: string;
+  zoneParent: string;
+  isOn: boolean;
+}
+
+/** list-exhaust-fans (Level 2+). */
+export interface SimExhaustFan {
+  name: string;
+  zoneParent: string;
+  broken: boolean;
+  isUnderMaintenance: boolean;
+  isOn: boolean;
+}
+
+/** list-alarms: components flagged broken, e.g. { name: "gate1", problem: "Require Maintenance" }. */
+export interface SimAlarm {
+  name: string;
+  zoneParent?: string;
+  problem: string;
+}
+
+/** list-zones: CO per zone. risk: "Safe" | "Mid" | "High" | "Critical" (webhooks only from Mid). */
+export interface SimZone {
+  name: string;
+  gasCarbonMonoxideLevel: number;
+  risk: string;
+}

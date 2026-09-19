@@ -1,6 +1,7 @@
 /** Manual control: gates, spots and (admin) entrances. The server refuses anything the simulator penalises. */
 import { useEffect, useState } from "react";
 import type { ActionView, GateView, StateSnapshot } from "@gpa/shared";
+import { ComponentHealthCard } from "../components/health";
 import { CarsTable, GateBadge, SpotMap, spotState } from "../components/site";
 import { Badge, Button, Card, Empty, useCommand } from "../components/ui";
 import { api } from "../lib/api";
@@ -28,6 +29,8 @@ export function Operations({ s }: { s: StateSnapshot }) {
 
   return (
     <div className="page">
+      <ComponentHealthCard components={s.components ?? []} />
+
       <Card title="Barrier gates" subtitle="Holding a gate open or closed overrides the automation until you return it to automatic">
         <div className="gate-grid">
           {gates.map((g) => {

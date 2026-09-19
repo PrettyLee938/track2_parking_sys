@@ -382,6 +382,16 @@ describe("multi-lane sites", () => {
     expect(sim.calls).toContainEqual(["goto", "C", "S3"]);
   });
 
+  it("fills the lane's own zone first, then overflows to another zone", async () => {
+    // Level 2 run: every car came in at ENTRY1 and ZONE2/ZONE3 sat empty.
+    const { c, sim } = await make({ sim: twoZoneSim(), topo: TWO_ZONES, cfg: { allocationStrategy: "lane_zone_then_any" } });
+    await c.handle(gateEv("g1", "Open"));
+    for (const [i, p] of ["A", "B", "C"].entries()) {
+      await feed(c, carEv(p, "ENTRY1", "CarIn", `10:00:0${i}`), carEv(p, "ENTRY1", "CarOut", `10:00:1${i}`));
+    }
+    expect(sim.gotos()).toEqual([["goto", "A", "S1"], ["goto", "B", "S2"], ["goto", "C", "S3"]]);
+  });
+
   it("reloads the layout on an unknown entry and handles that same car (level switch)", async () => {
     const { c, sim } = await make({ topologies: [LVL1, TWO_ZONES] });
     const next = twoZoneSim(); // the simulator switched to a two-zone level

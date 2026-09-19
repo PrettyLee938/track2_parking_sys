@@ -1,6 +1,6 @@
 /** Typed calls to our own server. The session travels in an HttpOnly cookie. */
 import type {
-  ActionsResponse, ControlResult, CreateUserRequest, EventsResponse, GateAction, MeResponse, SessionsResponse, StateSnapshot,
+  ActionsResponse, ComponentsResponse, ControlResult, CreateUserRequest, EventsResponse, GateAction, MeResponse, SessionsResponse, StateSnapshot,
   StatsResponse, TimeseriesResponse, UpdateUserRequest, UsersResponse,
 } from "@gpa/shared";
 
@@ -41,6 +41,7 @@ export const api = {
 
   state: () => call<StateSnapshot>("GET", "/api/state"),
   timeseries: () => call<TimeseriesResponse>("GET", "/api/timeseries"),
+  components: (q: { name?: string; limit?: number } = {}) => call<ComponentsResponse>("GET", `/api/components${qs(q)}`),
   stats: (minutes: number) => call<StatsResponse>("GET", `/api/stats${qs({ minutes })}`),
 
   sessions: (q: { plate?: string; status?: string; since?: string; before?: number; limit?: number }) =>

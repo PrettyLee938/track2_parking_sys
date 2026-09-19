@@ -14,7 +14,7 @@ import path from "node:path";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type {
   ActionsResponse, ApiError, ControlResult, CreateUserRequest, EventsResponse, GateAction, LoginRequest, MeResponse, Role,
-  SessionsResponse, StateSnapshot, StatsResponse, TimeseriesResponse, UpdateUserRequest, UserView, UsersResponse,
+  ComponentsResponse, SessionsResponse, StateSnapshot, StatsResponse, TimeseriesResponse, UpdateUserRequest, UserView, UsersResponse,
 } from "@gpa/shared";
 import { AuthService, hashPassword, hasRole, validateCredentials } from "./auth";
 import { REPO_ROOT, type Settings } from "./config";
@@ -184,6 +184,12 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
 
   app.get("/api/timeseries", operator, async (): Promise<TimeseriesResponse> =>
     ({ sample_s: cfg.statsSampleS, points: controller.timeseries }));
+
+  // Every gate, spot, fan and light with health and usage, plus breakdown/repair history.
+  app.get<{ Querystring: { name?: string; limit?: string } }>("/api/components", operator, async (req): Promise<ComponentsResponse> => ({
+    items: controller.components.views(),
+    events: store.listComponentEvents({ name: req.query.name || undefined, limit: Number(req.query.limit) || 200 }),
+  }));
 
   app.get<{ Querystring: { minutes?: string } }>("/api/stats", operator, async (req): Promise<StatsResponse> => {
     const minutes = Math.min(Math.max(Number(req.query.minutes) || 60, 5), 7 * 24 * 60);

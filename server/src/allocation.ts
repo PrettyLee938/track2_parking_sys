@@ -41,7 +41,7 @@ export class Allocator {
 
   /** A spot built for this car type first (an electric car to a charger), then generic
    * spots. Normal cars never reach typed spots: accepts() excludes them. */
-  rank(s: AllocSpot): [number, number] {
+  rank(s: AllocSpot, _laneZone = ""): [number, number] {
     return [s.car_type === CarType.Any ? 1 : 0, spotNumber(s.name)];
   }
 
@@ -73,9 +73,34 @@ export class LaneZoneAllocator extends Allocator {
   }
 }
 
+/**
+ * The lane's own zone first; when it is full, any other zone. Level 2 run 2026-09-20: every
+ * car came in at ENTRY1, so with lane_zone_first_free ZONE2 and ZONE3 (60 spots) sat empty
+ * while ENTRY1 turned cars away. Only useful if cars can drive from an entrance to the
+ * other zones - watch for "cannot reach" penalties when trying it.
+ */
+export class LaneZoneOverflowAllocator extends Allocator {
+  static override readonly id = "lane_zone_then_any";
+
+  override rank(s: AllocSpot, laneZone = ""): [number, number] {
+    const [typed, number] = super.rank(s);
+    return [(laneZone && s.zone !== laneZone ? 2 : 0) + typed, number];
+  }
+
+  override choose<S extends AllocSpot>(carType: string, laneZone: string, spots: Iterable<S>): S | null {
+    const found = this.candidates(carType, laneZone, spots);
+    if (!found.length) return null;
+    return found.reduce((best, s) => {
+      const [a1, a2] = this.rank(s, laneZone), [b1, b2] = this.rank(best, laneZone);
+      return a1 < b1 || (a1 === b1 && a2 < b2) ? s : best;
+    });
+  }
+}
+
 export const STRATEGIES: Record<string, new () => Allocator> = {
   [Allocator.id]: Allocator,
   [LaneZoneAllocator.id]: LaneZoneAllocator,
+  [LaneZoneOverflowAllocator.id]: LaneZoneOverflowAllocator,
 };
 
 export function getAllocator(name: string): Allocator {

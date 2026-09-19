@@ -32,7 +32,9 @@ import {
 import { getAllocator, spotNumber, type Allocator, type AllocSpot } from "./allocation";
 import { chargingCost, parkingCost } from "./billing";
 import { readSimGameSpeed, type Settings } from "./config";
+import { ComponentRegistry } from "./components";
 import { GameClock } from "./gameClock";
+import { createSubsystems, type Engine, type Subsystem } from "./subsystems";
 import { SerialQueue, type TaskQueue } from "./serialQueue";
 import type { SimApi } from "./simClient";
 import type { ActionRecord, EventRecord, Store } from "./store";
@@ -193,15 +195,17 @@ export interface ControllerDeps {
   queue?: TaskQueue;
   /** Injected clock (tests); otherwise one on the wall clock. */
   clock?: GameClock;
+  /** Plug-in subsystems; defaults to createSubsystems() in subsystems.ts. */
+  subsystems?: (engine: Engine) => Subsystem[];
 }
 
 // =============================================================================
 // controller
 // =============================================================================
-export class Controller {
+export class Controller implements Engine {
   readonly cfg: Settings;
-  private readonly sim: SimApi;
-  private readonly store: Store;
+  readonly sim: SimApi;
+  readonly store: Store;
   private readonly log: Logger;
   private readonly allocator: Allocator;
   private readonly topologyCandidates?: Topology[];
@@ -228,6 +232,10 @@ export class Controller {
   recentPaid = new Map<string, number>();         // plate -> when its paid session ended (game clock)
   readonly clock: GameClock;
   timers: Timer[] = [];
+  /** Core: health and usage of every part (Level 2). Sees events before the plug-ins. */
+  readonly components: ComponentRegistry;
+  /** components first, then the plug-ins. */
+  readonly subsystems: Subsystem[];
 
   completed: SessionView[] = [];
   feed: FeedItem[] = [];
@@ -246,6 +254,19 @@ export class Controller {
     this.queue = deps.queue ?? new SerialQueue((err) => this.log.error(`controller task failed: ${(err as Error)?.stack ?? err}`));
     this.clock = deps.clock ?? new GameClock(this.cfg);
     this.clock.setSettingsSpeed(readSimGameSpeed(this.cfg.simSettingsFile));
+    this.components = new ComponentRegistry(this);
+    this.subsystems = [this.components, ...(deps.subsystems ?? createSubsystems)(this)];
+  }
+
+  /** Run one hook on every subsystem; one failing never stops the others or the engine. */
+  private async each(hook: string, fn: (s: Subsystem) => Promise<void> | void) {
+    for (const s of this.subsystems) {
+      try {
+        await fn(s);
+      } catch (err) {
+        this.note("error", `subsystem ${s.name} failed in ${hook}: ${(err as Error)?.stack ?? err}`);
+      }
+    }
   }
 
   /** Game seconds per real second (= the simulator's GameSpeedMultiplier), and where
@@ -370,6 +391,7 @@ export class Controller {
     this.note("info", `Synced '${this.topology!.name}': ${this.entryLanes.size} entries, ${this.exitLanes.size} exits, ` +
       `${park.length} park spots (${park.filter((s) => s.available).length} free); tracking ${this.cars.size} cars; ` +
       `game speed ${speed.value.toFixed(2)} (${speed.source})`);
+    await this.each("onSync", (s) => s.onSync?.()); // components first: starts repairs of parts found broken
     for (const lane of this.entryLanes.values()) await this.pumpEntry(lane);
     if (this.cfg.closeIdleGatesOnSync) {
       const names = new Set([...this.entryLanes.values(), ...this.exitLanes.values()].map((l) => l.gate).filter(Boolean));
@@ -555,6 +577,7 @@ export class Controller {
       case EventClass.ComponentFixed: await this.onComponent(e, false); break;
       case EventClass.Penalty: await this.onPenalty(e); break;
     }
+    await this.each("onEvent", (s) => s.onEvent?.(e));
     // Stale-record detection (sweepGhosts) measures silence from here.
     const car = this.cars.get(str(e, "CarPlateNumber") ?? "");
     if (car) car.lastSeenG = this.gameAt(e);
@@ -901,6 +924,9 @@ export class Controller {
     const gate = lane?.gate ? this.gates.get(lane.gate) : undefined;
     const leave = () => this.leavePark(car);
     if (lane?.gate && (!gate || !gate.operable)) {
+      // Not told to leave yet (gotoG null): the gate is free to be repaired, no goto to
+      // re-send, and resume() releases it once the gate is fixed.
+      car.gotoG = null;
       this.note("warn", `exit gate ${lane.gate} not operable - ${car.plate} waits`);
       return;
     }
@@ -1045,6 +1071,9 @@ export class Controller {
   }
 
   private async requestOpen(gate: Gate) {
+    // Operating a broken or under-repair gate is a penalty. Whoever waits on it stays in
+    // onOpen; resume() asks again once it is fixed.
+    if (!gate.operable) return;
     const clean = gate.state === GateState.Closed, sent = this.clock.real();
     if (await this.cmd("open", () => this.sim.openGate(gate.name), [gate.name])) {
       gate.state = GateState.Opening;
@@ -1074,6 +1103,7 @@ export class Controller {
    */
   private async checkGateTimeouts(now: number) {
     for (const gate of this.gates.values()) {
+      if (!gate.operable) continue; // broken or being repaired: never touch it
       if (gate.onOpen.length && gate.openRequestedAt !== null && now - gate.openRequestedAt >= this.cfg.gateConfirmGameS) {
         if (gate.openRetries === 0) {
           gate.openRetries = 1;
@@ -1110,15 +1140,58 @@ export class Controller {
     }
   }
 
+  /** Gates and spots keep their own flags; the components subsystem records the rest
+   * (history, usage) and starts the repair. */
   private async onComponent(e: EventRecord, broken: boolean) {
     const name = str(e, "Name") ?? "", kind = str(e, "Type");
-    const target = kind === ComponentType.BarrierGate ? this.gates.get(name) : this.spots.get(name);
+    const target = kind === ComponentType.BarrierGate ? this.gates.get(name)
+      : kind === ComponentType.ParkingSpot ? this.spots.get(name) : undefined;
     if (target) {
       target.broken = broken;
       if (!broken) target.maintenance = false;
     }
-    this.note(broken ? "error" : "info", `${kind} ${name} ${broken ? "BROKEN" : "fixed"}`);
-    if (!broken) for (const lane of this.entryLanes.values()) await this.pumpEntry(lane);
+    if (!broken) {
+      this.note("info", `${kind} ${name} fixed`);
+      await this.resume();
+    }
+  }
+
+  /** Why a gate cannot be worked on right now: a car is driving through it. */
+  gateInUse(name: string): string | null {
+    for (const lane of this.entryLanes.values()) {
+      const car = lane.gate === name && lane.current ? this.cars.get(lane.current) : undefined;
+      if (car?.status === "dispatched") return `${car.plate} is driving through`;
+    }
+    for (const lane of this.exitLanes.values()) {
+      if (lane.gate !== name) continue;
+      for (const plate of lane.releasing) {
+        const car = this.cars.get(plate);
+        // Told to leave after it was released: it is on its way through the gate.
+        if (car?.status === "released" && car.gotoG !== null && car.releasedG !== null && car.gotoG >= car.releasedG) {
+          return `${plate} is driving out`;
+        }
+      }
+    }
+    return null;
+  }
+
+  /** A part is back in service: restart what waited for it - queued arrivals, cars
+   * waiting on a gate to open, paid cars waiting at an exit. */
+  async resume(): Promise<void> {
+    if (this.replaying) return;
+    for (const gate of this.gates.values()) {
+      if (gate.operable && gate.onOpen.length && gate.state !== GateState.Open && gate.state !== GateState.Opening && gate.hold !== "closed") {
+        await this.requestOpen(gate);
+      }
+    }
+    for (const lane of this.exitLanes.values()) {
+      for (const plate of [...lane.releasing]) {
+        const car = this.cars.get(plate);
+        const waiting = car?.status === "released" && (car.gotoG === null || car.releasedG === null || car.gotoG < car.releasedG);
+        if (waiting) await this.release(car!);
+      }
+    }
+    for (const lane of this.entryLanes.values()) await this.pumpEntry(lane);
   }
 
   // ---------------------------------------------------------------------------
@@ -1130,6 +1203,7 @@ export class Controller {
     await this.checkGateTimeouts(now);
     await this.checkStuckGotos(now);
     await this.sweepGhosts(now);
+    await this.each("onTick", (s) => s.onTick?.(now));
     this.sample(nowS());
     const horizon = now - this.cfg.repeatExitWindowGameS;
     for (const [plate, t] of this.recentPaid) if (t < horizon) this.recentPaid.delete(plate);
@@ -1287,7 +1361,7 @@ export class Controller {
     this.cars.delete(car.plate);
   }
 
-  private async cmd(what: string, fn: () => Promise<void>, args: (string | number)[], actor: string | null = null): Promise<boolean> {
+  async cmd(what: string, fn: () => Promise<void>, args: (string | number)[], actor: string | null = null): Promise<boolean> {
     if (this.replaying) return true; // the command was sent the first time round
     const t0 = performance.now();
     let ok = true, error: string | null = null;
@@ -1362,6 +1436,7 @@ export class Controller {
         if (inUse) return fail(`${name} is in use - repairing it now is a penalty`);
         if (!(await this.cmd("repair", () => this.sim.repairGate(name), [name], actor))) return fail(`the simulator rejected repair ${name}`);
         gate.maintenance = true;
+        this.components.repairStarted("gate", name, actor, !gate.broken);
         this.note("warn", `${actor} started maintenance on ${name}`);
         return ok(`maintenance started on ${name}`);
       }
@@ -1376,6 +1451,7 @@ export class Controller {
     if (who) return fail(`${name} is ${spot.occupant ? "occupied" : "reserved"}${who !== "?" ? ` by ${who}` : ""} - repairing it now is a penalty`);
     if (!(await this.cmd("repair", () => this.sim.repairSpot(name), [name], actor))) return fail(`the simulator rejected repair ${name}`);
     spot.maintenance = true; // not offered to cars until the simulator reports it fixed
+    this.components.repairStarted("spot", name, actor, !spot.broken);
     this.note("warn", `${actor} started maintenance on ${name}`);
     return ok(`maintenance started on ${name}`);
   }
@@ -1449,6 +1525,9 @@ export class Controller {
       recent_sessions: this.completed.slice(-50),
       counters: { ...this.counters },
       feed: this.feed.slice(-100),
+      components: this.components.views(),
+      subsystems: Object.fromEntries(this.subsystems.filter((s) => s !== this.components && s.snapshot)
+        .map((s) => [s.name, s.snapshot!()])),
     };
   }
 }

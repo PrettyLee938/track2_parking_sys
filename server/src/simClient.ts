@@ -7,21 +7,32 @@
  * The list-* endpoints carry a simulated operational cost: call them once at startup
  * (or after a crash / level change) to sync state, never on a polling loop.
  */
-import type { SimBarrier, SimParkingSpot } from "@gpa/shared";
+import type { SimAlarm, SimBarrier, SimExhaustFan, SimLight, SimParkingSpot, SimZone } from "@gpa/shared";
 import type { Settings } from "./config";
 
 export class SimError extends Error {}
 
-/** What the controller needs from the simulator (a fake implements it in tests). */
+/** What the controller and subsystems need from the simulator (a fake implements it in tests). */
 export interface SimApi {
   listParkingSpots(): Promise<SimParkingSpot[]>;
   listBarriers(): Promise<SimBarrier[]>;
+  listLights(): Promise<SimLight[]>;
+  listExhaustFans(): Promise<SimExhaustFan[]>;
+  listAlarms(): Promise<SimAlarm[]>;
+  listZones(): Promise<SimZone[]>;
   openGate(name: string): Promise<void>;
   closeGate(name: string): Promise<void>;
   carGoto(plate: string, destination: string): Promise<void>;
   carCharge(plate: string, parkingCost: number, chargingCost: number): Promise<void>;
   repairGate(name: string): Promise<void>;
   repairSpot(name: string): Promise<void>;
+  repairFan(name: string): Promise<void>;
+  fanOn(name: string): Promise<void>;
+  fanOff(name: string): Promise<void>;
+  lightOn(name: string): Promise<void>;
+  lightOff(name: string): Promise<void>;
+  lightGroupOn(group: string): Promise<void>;
+  lightGroupOff(group: string): Promise<void>;
 }
 
 export class SimClient implements SimApi {
@@ -71,10 +82,10 @@ export class SimClient implements SimApi {
   // ---- discovery (costly: once per level load) --------------------------------
   listParkingSpots = () => this.request<SimParkingSpot[]>("GET", "/list-parking-spots");
   listBarriers = () => this.request<SimBarrier[]>("GET", "/list-barriers");
-  listLights = () => this.request<unknown[]>("GET", "/list-lights");
-  listExhaustFans = () => this.request<unknown[]>("GET", "/list-exhaust-fans");
-  listAlarms = () => this.request<unknown[]>("GET", "/list-alarms");
-  listZones = () => this.request<unknown[]>("GET", "/list-zones");
+  listLights = () => this.request<SimLight[]>("GET", "/list-lights");
+  listExhaustFans = () => this.request<SimExhaustFan[]>("GET", "/list-exhaust-fans");
+  listAlarms = () => this.request<SimAlarm[]>("GET", "/list-alarms");
+  listZones = () => this.request<SimZone[]>("GET", "/list-zones");
   testWebhook = () => this.request<string>("GET", "/test");
 
   // ---- gates ------------------------------------------------------------------

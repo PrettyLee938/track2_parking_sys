@@ -134,6 +134,12 @@ const schema = z.object({
   // Any other car (driving to or waiting at an exit) with no event for this long.
   staleCarGameS: num().positive().default(600),
 
+  // ---- component health (Level 2, components.ts) -----------------------------------
+  // Repair a broken gate, spot or fan as soon as nothing is using it.
+  autoRepair: bool().default(true),
+  // After a rejected repair command, wait this long (GAME seconds) before trying again.
+  repairRetryGameS: num().positive().default(10),
+
   // ---- our own timing (REAL seconds) ------------------------------------------------
   tickIntervalS: num().positive().default(0.5),
   maxChargeAttempts: num().int().min(1).default(3),

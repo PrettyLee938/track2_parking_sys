@@ -29,7 +29,7 @@ const fields = (title: string, xs: Row[]) => {
 
 const [spots, gates, lights, fans, alarms, zones] = await Promise.all([
   sim.listParkingSpots(), sim.listBarriers(), sim.listLights(), sim.listExhaustFans(), sim.listAlarms(), sim.listZones(),
-]) as [SimParkingSpot[], SimBarrier[], Row[], Row[], Row[], Row[]];
+]) as unknown as [SimParkingSpot[], SimBarrier[], Row[], Row[], Row[], Row[]];
 
 const entries = spots.filter((s) => s.purpose === "EntrySpot").map((s) => s.name).sort();
 console.log(`Level with entries [${entries.join(", ")}] - ${spots.length} spots, ${gates.length} gates, ` +
