@@ -20,6 +20,7 @@
     "report:gaps": "tsx tools/gaps.ts",
     "report:penalties": "tsx tools/penalties.ts",
     "report:window": "tsx tools/window.ts",
+    "report:speed": "tsx tools/speedReplay.ts",
     "user:password": "tsx tools/setPassword.ts",
     "fake-sim": "tsx tools/fakeSim.ts"
   },

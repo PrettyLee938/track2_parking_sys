@@ -144,12 +144,21 @@ Learned from live runs; each has a test in `server/test/controller.test.ts`.
 - Charging the instant a car reaches the exit is rejected - wait ~1.5 s.
 - The simulator checks the bill against the **planned** minutes, so billing is right at
   any game speed.
-- Webhook timestamps are wall-clock, but cars, gates and sensors move in game time. Every
-  timer that waits on the simulator (gate close, billing delay, gate/dispatch timeouts,
-  silence detection) is set in **game seconds** (`*_GAME_S`) and converted with the current
-  game speed: `GPA_GAME_SPEED` if set, else learned from completed stays (follows
-  Shift+PgUp), else `GameSpeedMultiplier` from the simulator's `settings.json`, else 1.0.
-  `/api/state` shows it as `time_scale` and `time_scale_source`.
+- Webhook timestamps are wall-clock, but cars, gates and sensors move in game time, and the
+  speed can change while the simulator runs (Shift+PgUp). Every timer and timeout that
+  waits on the simulator is set in **game seconds** (`*_GAME_S`) and measured on a game clock
+  (`server/src/gameClock.ts`) that runs at the current speed and **stops while the game is
+  paused** (no webhook for `GPA_PAUSE_AFTER_SILENCE_S`). The speed is `GPA_GAME_SPEED` if
+  set; else read from gate timing right after a change (a barrier move takes a fixed ~0.5
+  game-s, so its real duration reveals a new speed within a few gate cycles); else learned
+  from completed stays; else `GameSpeedMultiplier` from `settings.json`; else 1.0.
+  `/api/state` shows it as `time_scale` and `time_scale_source`;
+  `npm run report:speed -w server -- 21:00 21:30` replays a run through the estimator.
+- The simulator acknowledges every `goto` but **silently drops some** (~15% of those sent
+  while another car's event fires). The car just sits on its sensor, holding its lane and
+  open gate. A car that has not driven off `GPA_GOTO_CONFIRM_GAME_S` after its goto gets
+  it again (entry dispatch, exit release and turn-away alike), up to `GPA_MAX_GOTO_RESENDS`
+  times. Unconfirmed gate opens and closes are re-sent too.
 - From a spot next to the exit, the exit `CarIn` arrives ~0.2 s *before* the spot `CarOut`.
 - An `open` sent while a gate is still closing is silently ignored.
 - The simulator autosaves cars into its `lvl*.json` and reuses plates across restarts.

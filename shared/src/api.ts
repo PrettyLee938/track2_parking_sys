@@ -112,7 +112,7 @@ export interface Counters {
 }
 
 /** Where the game speed figure came from (see the server's config.ts, "game clock"). */
-export type TimeScaleSource = "configured" | "learned" | "simulator settings" | "default";
+export type TimeScaleSource = "configured" | "gate timing" | "learned" | "simulator settings" | "default";
 
 /** GET /api/state */
 export interface StateSnapshot {

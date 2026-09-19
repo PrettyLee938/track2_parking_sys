@@ -138,8 +138,11 @@ describe("exit and payment", () => {
   });
 
   it("honours billing settings", async () => {
-    const { c, sim } = await make({ cfg: { billingRounding: "ceil", pricePerMinute: 2 } });
-    await parkAndReachExit(c); // parked exactly 180 s
+    const { c, sim, advance } = await make({ cfg: { billingRounding: "ceil", pricePerMinute: 2, gameSpeed: 1 } });
+    await feed(c, gateEv("gateA", "Open"), carEv("A", "ENTRY1", "CarIn", "10:00:00"), carEv("A", "ENTRY1", "CarOut", "10:00:02"),
+      carEv("A", "S1", "CarIn", "10:00:05"));
+    advance(179.5); // parked 179.5 s -> ceil 3 minutes
+    await feed(c, carEv("A", "S1", "CarOut", "10:03:05"), carEv("A", "EXIT_EXIT", "CarIn", "10:03:10"));
     await fireTimers(c);
     expect(sim.charges().at(-1)).toEqual(["charge", "A", 6, 0]);
   });
@@ -165,30 +168,32 @@ describe("exit and payment", () => {
 
   it("bills planned minutes at any game speed", async () => {
     // Game speed 1.7: a 4-minute planned stay lasts only 2.35 real minutes.
-    const { c, sim } = await make();
-    const t0 = Date.now() / 1000;
-    const stamped = [
-      [gateEv("gateA", "Open"), t0], [carEv("V", "ENTRY1", "CarIn", "10:00:00", "4"), t0],
-      [carEv("V", "S1", "CarIn", "10:00:05", "4"), t0 + 5], [carEv("V", "S1", "CarOut", "10:02:26", "4"), t0 + 146],
-      [carEv("V", "EXIT_EXIT", "CarIn", "10:02:30", "0"), t0 + 150],
-    ] as const;
-    for (const [ev, ts] of stamped) await c.handle({ ...ev, _received_at: at(ts) });
+    const { c, sim, advance } = await make();
+    await feed(c, gateEv("gateA", "Open"), carEv("V", "ENTRY1", "CarIn", "10:00:00", "4"));
+    advance(5);
+    await c.handle(carEv("V", "S1", "CarIn", "10:00:05", "4"));
+    advance(141);
+    await c.handle(carEv("V", "S1", "CarOut", "10:02:26", "4"));
+    advance(4);
+    await c.handle(carEv("V", "EXIT_EXIT", "CarIn", "10:02:30", "0"));
     await fireTimers(c);
     expect(sim.charges()).toEqual([["charge", "V", 4, 0]]); // right even before the speed is known
     expect(c.timeScaleInfo.source).toBe("default"); // one stay is not enough to learn from
   });
 
   it("scales measured billing by the learned game speed", async () => {
-    const { c, sim } = await make({ cfg: { billingRounding: "round" } });
-    const t0 = Date.now() / 1000;
+    const { c, sim, advance } = await make({ cfg: { billingRounding: "round" } });
     for (let i = 0; i < 3; i++) { // three stays at game speed 2.0 teach the scale
-      await c.handle({ ...carEv(`L${i}`, "S2", "CarIn", "09:00:00", "2"), _received_at: at(t0) });
-      await c.handle({ ...carEv(`L${i}`, "S2", "CarOut", "09:01:00", "2"), _received_at: at(t0 + 60) });
+      await c.handle(carEv(`L${i}`, "S2", "CarIn", "09:00:00", "2"));
+      advance(60);
+      await c.handle(carEv(`L${i}`, "S2", "CarOut", "09:01:00", "2"));
     }
     expect(c.timeScale).toBeCloseTo(2, 9);
-    await c.handle({ ...carEv("M", "S1", "CarIn", "10:00:00", "0"), _received_at: at(t0) });
-    await c.handle({ ...carEv("M", "S1", "CarOut", "10:01:30", "0"), _received_at: at(t0 + 90) });
-    await c.handle({ ...carEv("M", "EXIT_EXIT", "CarIn", "10:01:35", "0"), _received_at: at(t0 + 95) });
+    await c.handle(carEv("M", "S1", "CarIn", "10:00:00", "0"));
+    advance(90);
+    await c.handle(carEv("M", "S1", "CarOut", "10:01:30", "0"));
+    advance(5);
+    await c.handle(carEv("M", "EXIT_EXIT", "CarIn", "10:01:35", "0"));
     await fireTimers(c);
     expect(sim.calls).toContainEqual(["charge", "M", 3, 0]); // 90 real s x 2.0 = 3 game min
   });
@@ -215,14 +220,30 @@ describe("game speed", () => {
     writeFileSync(file, "\uFEFF" + JSON.stringify({ TeamName: "T", GameSpeedMultiplier: speed })); // the sim writes a BOM
     return file;
   };
-  const dueIn = (c: Controller, label: string) => c.timers.find((t) => t.label === label)!.due - Date.now() / 1000;
+  /** Real seconds until a timer fires, at the current speed. */
+  const dueIn = (c: Controller, label: string) => c.clock.realUntil(c.timers.find((t) => t.label === label)!.due);
 
   /** Three completed stays at the given game speed (planned 2 game-min each). */
-  async function learnSpeed(c: Controller, speed: number) {
-    const t0 = Date.now() / 1000, realS = 120 / speed;
+  async function learnSpeed(c: Controller, advance: (s: number) => void, speed: number, spot = "S3") {
     for (let i = 0; i < 3; i++) {
-      await c.handle({ ...carEv(`L${speed}${i}`, "S3", "CarIn", "09:00:00", "2"), _received_at: at(t0) });
-      await c.handle({ ...carEv(`L${speed}${i}`, "S3", "CarOut", "09:02:00", "2"), _received_at: at(t0 + realS) });
+      await c.handle(carEv(`L${speed}${i}`, spot, "CarIn", "09:00:00", "2"));
+      advance(120 / speed);
+      await c.handle(carEv(`L${speed}${i}`, spot, "CarOut", "09:02:00", "2"));
+    }
+  }
+
+  /** n automatic gate cycles on gateA, each move taking moveRealS. */
+  async function gateCycles(c: Controller, advance: (s: number) => void, n: number, moveRealS: number) {
+    for (let i = 0; i < n; i++) {
+      await c.handle(carEv(`G${moveRealS}${i}`, "ENTRY1", "CarIn", "10:00:00")); // -> open gateA
+      advance(moveRealS);
+      await c.handle(gateEv("gateA", "Open"));
+      await c.handle(carEv(`G${moveRealS}${i}`, "ENTRY1", "CarOut", "10:00:01"));
+      await fireTimers(c); // -> close gateA
+      advance(moveRealS);
+      await c.handle(gateEv("gateA", "Closed"));
+      await c.handle(carEv(`G${moveRealS}${i}`, "S1", "CarIn", "10:00:03"));
+      await c.handle(carEv(`G${moveRealS}${i}`, "S1", "CarOut", "10:00:04"));
     }
   }
 
@@ -236,12 +257,12 @@ describe("game speed", () => {
   });
 
   it("scales the gate-confirmation timeout by the game speed", async () => {
-    const { c, sim } = await make({ cfg: { gameSpeed: 0.5 } }); // slow game: 6 game-s = 12 real s
+    const { c, sim, advance } = await make({ cfg: { gameSpeed: 0.5 } }); // slow game: 3 game-s = 6 real s
     await c.handle(carEv("A", "ENTRY1", "CarIn", "10:00:00"));
-    c.gates.get("gateA")!.openRequestedAt! -= 8; // 8 real s: too early to retry at half speed
+    advance(4); // too early to retry at half speed
     await c.tick();
     expect(sim.calls).toEqual([["open", "gateA"]]);
-    c.gates.get("gateA")!.openRequestedAt! -= 5; // 13 real s
+    advance(3);
     await c.tick();
     expect(sim.calls).toEqual([["open", "gateA"], ["open", "gateA"]]);
   });
@@ -249,21 +270,52 @@ describe("game speed", () => {
   it("takes the speed from, in order: configuration, learned stays, simulator settings, 1.0", async () => {
     expect((await make()).c.timeScaleInfo).toEqual({ value: 1, source: "default" });
 
-    const { c } = await make({ cfg: { simSettingsFile: simSettings(1.7) } });
+    const { c, advance } = await make({ cfg: { simSettingsFile: simSettings(1.7) } });
     expect(c.timeScaleInfo).toEqual({ value: 1.7, source: "simulator settings" });
-    await learnSpeed(c, 2);
+    await learnSpeed(c, advance, 2);
     expect(c.timeScaleInfo.source).toBe("learned");
     expect(c.timeScale).toBeCloseTo(2, 6);
 
-    const fixed = (await make({ cfg: { gameSpeed: 3, simSettingsFile: simSettings(1.7) } })).c;
-    await learnSpeed(fixed, 2);
-    expect(fixed.timeScaleInfo).toEqual({ value: 3, source: "configured" });
+    const fixed = await make({ cfg: { gameSpeed: 3, simSettingsFile: simSettings(1.7) } });
+    await learnSpeed(fixed.c, fixed.advance, 2);
+    expect(fixed.c.timeScaleInfo).toEqual({ value: 3, source: "configured" });
+  });
+
+  it("follows a speed change within a few gate cycles, before any stay completes", async () => {
+    // 21:10 run: speed raised 1.7 -> 3.3 while running. Stays took minutes to catch up, and
+    // until then every timer ran at the old speed.
+    const { c, advance } = await make();
+    await learnSpeed(c, advance, 2);
+    // A move takes 0.03 s (network) + 0.5 game-s: 0.28 s at speed 2 calibrates...
+    await gateCycles(c, advance, 5, 0.28);
+    expect(c.timeScaleInfo).toMatchObject({ source: "learned" });
+    await gateCycles(c, advance, 3, 0.155); // ...and 0.155 s means speed 4
+    expect(c.timeScaleInfo.source).toBe("gate timing");
+    expect(c.timeScale).toBeCloseTo(4, 1);
+    await learnSpeed(c, advance, 4, "S2"); // stays measured at the new speed take over again
+    expect(c.timeScaleInfo.source).toBe("learned");
+    expect(c.timeScale).toBeCloseTo(4, 6);
+  });
+
+  it("stops the game clock while the game is paused, so parked cars do not look overdue", async () => {
+    // 20:35-21:07 the game sat paused for 31 minutes; on real time every parked car looked
+    // long overdue and was retired, freeing spots that were still taken.
+    const { c, advance } = await make({ cfg: { gameSpeed: 1 } });
+    await c.handle(carEv("P", "S1", "CarIn", "20:35:00", "2"));
+    advance(60);
+    advance(1860, false); // paused: no events at all
+    await c.tick();
+    expect(c.cars.get("P")!.status).toBe("parked");
+    expect(c.spots.get("S1")!.available).toBe(false);
+    advance(c.cfg.parkedOverstayGameS + 120); // running again: now it really is overdue
+    await c.tick();
+    expect(c.cars.has("P")).toBe(false);
   });
 
   it("relearns when the simulator is restarted at another speed", async () => {
     const file = simSettings(1.7);
-    const { c } = await make({ cfg: { simSettingsFile: file } });
-    await learnSpeed(c, 1.7);
+    const { c, advance } = await make({ cfg: { simSettingsFile: file } });
+    await learnSpeed(c, advance, 1.7);
     expect(c.timeScaleInfo.source).toBe("learned");
     writeFileSync(file, JSON.stringify({ GameSpeedMultiplier: 3 })); // restarted with a new speed
     await c.sync();
@@ -579,7 +631,7 @@ describe("simulator quirks", () => {
     const { c, sim } = await make();
     await parkAndReachExit(c); // A cleared ENTRY1 -> entry gate close is scheduled
     const entryClose = c.timers.find((t) => t.label === "close gateA")!;
-    expect(entryClose.due - Date.now() / 1000).toBeCloseTo(c.real(c.cfg.gateCloseDelayGameS), 1);
+    expect(entryClose.due - c.clock.now()).toBeCloseTo(c.cfg.gateCloseDelayGameS, 1);
     expect(c.cfg.gateCloseDelayGameS).toBe(1.5);
     await fireTimers(c);
     c.gates.get("gateB")!.state = "Closed";
@@ -587,7 +639,7 @@ describe("simulator quirks", () => {
     await c.handle(gateEv("gateB", "Open"));
     await c.handle(carEv("A", "EXIT_EXIT", "CarOut", "10:03:12"));
     const exitClose = c.timers.find((t) => t.label === "close gateB")!;
-    expect(exitClose.due - Date.now() / 1000).toBeCloseTo(c.real(c.cfg.gateCloseDelayGameS), 1);
+    expect(exitClose.due - c.clock.now()).toBeCloseTo(c.cfg.gateCloseDelayGameS, 1);
     await fireTimers(c);
     expect(sim.last()).toEqual(["close", "gateB"]);
   });
@@ -597,12 +649,89 @@ describe("simulator quirks", () => {
     await c.handle(carEv("A", "ENTRY1", "CarIn", "10:00:00"));
     expect(sim.calls).toEqual([["open", "gateA"]]);
     const gate = c.gates.get("gateA")!;
-    gate.openRequestedAt! -= c.real(c.cfg.gateOpenTimeoutGameS) + 1; // no Open event arrives
+    gate.openRequestedAt! -= c.cfg.gateConfirmGameS + 1; // no Open event arrives
     await c.tick();
     expect(sim.calls).toEqual([["open", "gateA"], ["open", "gateA"]]);
-    gate.openRequestedAt! -= c.real(c.cfg.gateOpenTimeoutGameS) + 1;
+    gate.openRequestedAt! -= c.cfg.gateConfirmGameS + 1;
     await c.tick();
     expect(sim.last()).toEqual(["goto", "A", "S1"]); // lane keeps moving
+  });
+
+  it("re-sends a close the simulator never confirmed", async () => {
+    const { c, sim } = await make();
+    await feed(c, gateEv("gateA", "Open"), carEv("A", "ENTRY1", "CarIn", "10:00:00"), carEv("A", "ENTRY1", "CarOut", "10:00:02"));
+    await fireTimers(c);
+    expect(sim.last()).toEqual(["close", "gateA"]);
+    c.gates.get("gateA")!.closeRequestedAt! -= c.cfg.gateConfirmGameS + 1; // no Closed event arrives
+    await c.tick();
+    expect(sim.calls.filter((x) => x[0] === "close" && x[1] === "gateA")).toHaveLength(2);
+    await c.tick(); // only once
+    expect(sim.calls.filter((x) => x[0] === "close" && x[1] === "gateA")).toHaveLength(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// commands the simulator dropped
+// ---------------------------------------------------------------------------
+describe("dropped gotos", () => {
+  /** Let game time pass without the car moving. */
+  const wait = (advance: (s: number) => void, c: Controller, gameS: number) => advance(gameS / c.timeScale);
+
+  it("re-sends a goto the car at the entry never acted on, keeping the rest of the queue waiting", async () => {
+    // 21:10:58 run: KAB 813's goto S21 was dropped; it sat on ENTRY1 for 10 s with gateA
+    // open, the four cars behind it piled up, then all went in at once.
+    const { c, sim, advance } = await make();
+    await feed(c, gateEv("gateA", "Open"), carEv("KAB 813", "ENTRY1", "CarIn", "21:10:58"), carEv("AAA 509", "ENTRY1", "CarIn", "21:11:00"));
+    expect(sim.gotos()).toEqual([["goto", "KAB 813", "S1"]]);
+    wait(advance, c, c.cfg.gotoConfirmGameS - 1);
+    await c.tick();
+    expect(sim.gotos()).toHaveLength(1); // normal cars take ~2 game-s
+    wait(advance, c, 2);
+    await c.tick();
+    expect(sim.gotos()).toEqual([["goto", "KAB 813", "S1"], ["goto", "KAB 813", "S1"]]);
+    expect(c.counters.admitted).toBe(1); // a re-send is not a new admission
+    await c.handle(carEv("KAB 813", "ENTRY1", "CarOut", "21:11:01"));
+    expect(sim.gotos().at(-1)).toEqual(["goto", "AAA 509", "S2"]);
+  });
+
+  it("gives up on a car that never leaves the entry after the re-sends, so the lane moves", async () => {
+    const { c, sim, advance } = await make({ cfg: { maxGotoResends: 2 } });
+    await feed(c, gateEv("gateA", "Open"), carEv("A", "ENTRY1", "CarIn", "10:00:00"), carEv("B", "ENTRY1", "CarIn", "10:00:02"));
+    for (let i = 0; i < 3; i++) {
+      wait(advance, c, c.cfg.gotoConfirmGameS + 0.5);
+      await c.tick();
+    }
+    expect(sim.gotos().filter((g) => g[1] === "A")).toHaveLength(3);
+    expect(sim.gotos().at(-1)).toEqual(["goto", "B", "S1"]); // A's spot went to B
+  });
+
+  it("re-sends leavepark to a paid car still on the exit sensor, holding the gate open for it", async () => {
+    // 21:31:06 run: AAA 509 paid, its leavepark was dropped; gateB closed after 6 s and the
+    // car sat on EXIT_EXIT for another minute.
+    const { c, sim, advance } = await make();
+    await parkAndReachExit(c);
+    await fireTimers(c);
+    await feed(c, payEv("A", 2), gateEv("gateB", "Open"));
+    const leaves = () => sim.gotos().filter((g) => g[1] === "A" && g[2] === "leavepark");
+    expect(leaves()).toHaveLength(1);
+    wait(advance, c, c.cfg.gotoConfirmGameS + 0.5);
+    await c.tick();
+    expect(leaves()).toHaveLength(2);
+    expect(sim.calls).not.toContainEqual(["close", "gateB"]);
+    await c.handle(carEv("A", "EXIT_EXIT", "CarOut", "10:03:20"));
+    expect(c.cars.has("A")).toBe(false);
+  });
+
+  it("re-sends leavepark to a turned-away car still on the entry sensor", async () => {
+    const { c, sim, advance } = await make({ sim: FakeSim.lvl1(1) });
+    await feed(c, gateEv("gateA", "Open"), carEv("A", "ENTRY1", "CarIn", "10:00:00"), carEv("A", "ENTRY1", "CarOut", "10:00:01"),
+      carEv("B", "ENTRY1", "CarIn", "10:00:05")); // full: B is turned away
+    expect(sim.gotos().at(-1)).toEqual(["goto", "B", "leavepark"]);
+    wait(advance, c, c.cfg.gotoConfirmGameS + 0.5);
+    await c.tick();
+    expect(sim.gotos().filter((g) => g[1] === "B")).toHaveLength(2);
+    await c.handle(carEv("B", "ENTRY1", "CarOut", "10:00:08"));
+    expect(c.cars.has("B")).toBe(false);
   });
 });
 
@@ -610,8 +739,8 @@ describe("simulator quirks", () => {
 // lost webhooks & vanished cars
 // ---------------------------------------------------------------------------
 describe("lost webhooks", () => {
-  const back = (c: Controller, plate: string, field: "releasedReal" | "parkedReal" | "arrivedReal" | "lastSeenReal", gameS: number) => {
-    c.cars.get(plate)![field]! -= c.real(gameS) + 1;
+  const back = (c: Controller, plate: string, field: "releasedG" | "parkedG" | "arrivedG" | "lastSeenG", gameS: number) => {
+    c.cars.get(plate)![field]! -= gameS + 1;
   };
 
   it("keeps both cars when one is parked on top of another; the spot frees when both left", async () => {
@@ -645,7 +774,7 @@ describe("lost webhooks", () => {
     expect(c.gateBusy("gateB")).toBe(true);
     await c.tick();
     expect(sim.calls).not.toContainEqual(["close", "gateB"]); // not yet: it may still be driving out
-    back(c, "A", "releasedReal", c.cfg.releaseTimeoutGameS);
+    back(c, "A", "releasedG", c.cfg.releaseTimeoutGameS);
     await c.tick();
     expect(sim.last()).toEqual(["close", "gateB"]); // the gate does not stay open forever
     expect(c.cars.has("A")).toBe(false);
@@ -656,10 +785,10 @@ describe("lost webhooks", () => {
     const { c } = await make();
     await feed(c, gateEv("gateA", "Open"), carEv("A", "ENTRY1", "CarIn", "10:00:00", "2"), carEv("A", "ENTRY1", "CarOut", "10:00:02", "2"),
       { ...carEv("A", "S1", "CarIn", "10:00:05", "2"), _received_at: new Date().toISOString() });
-    back(c, "A", "parkedReal", 120 + c.cfg.parkedOverstayGameS - 30);
+    back(c, "A", "parkedG", 120 + c.cfg.parkedOverstayGameS - 30);
     await c.tick();
     expect(c.cars.get("A")!.status).toBe("parked"); // late, but within the margin
-    back(c, "A", "parkedReal", 60);
+    back(c, "A", "parkedG", 60);
     await c.tick();
     expect(c.cars.has("A")).toBe(false);
     expect(c.spots.get("S1")!.available).toBe(true);
@@ -671,8 +800,8 @@ describe("lost webhooks", () => {
     await fireTimers(c); // A invoiced, then nothing more is heard (payment or exit lost)
     await feed(c, carEv("P", "ENTRY1", "CarIn", "10:05:00"), carEv("Q", "ENTRY1", "CarIn", "10:05:01"));
     expect(c.entryLanes.get("ENTRY1")!).toMatchObject({ current: "P", queue: ["Q"] }); // Q waits behind P
-    back(c, "A", "lastSeenReal", c.cfg.staleCarGameS);
-    back(c, "Q", "arrivedReal", c.cfg.entryPatienceGameS + 60); // Q's "gave up" CarOut was lost
+    back(c, "A", "lastSeenG", c.cfg.staleCarGameS);
+    back(c, "Q", "arrivedG", c.cfg.entryPatienceGameS + 60); // Q's "gave up" CarOut was lost
     await c.tick();
     expect(c.cars.has("A")).toBe(false);
     expect(c.cars.has("Q")).toBe(false);
@@ -688,8 +817,8 @@ describe("lost webhooks", () => {
     expect(sim.last()).toEqual(["goto", "ARA 545", "S2"]);
     expect(c.spots.get("S1")!.occupant).toBe("?"); // someone we lost track of is in there
     expect(c.spots.get("S1")!.available).toBe(false);
-    c.cars.get("ARA 545")!.dispatchedReal! -= c.real(c.cfg.entryDispatchTimeoutGameS) + 1;
-    await c.tick(); // the dispatch retry goes to the new spot, never back to S1
+    c.cars.get("ARA 545")!.gotoG! -= c.cfg.gotoConfirmGameS + 1;
+    await c.tick(); // a re-send goes to the new spot, never back to S1
     expect(sim.gotos().filter((g) => g[2] === "S1")).toHaveLength(1);
     await c.handle(carEv("JVL 813", "S1", "CarOut", "16:31:00")); // the unknown car leaves
     expect(c.spots.get("S1")!.available).toBe(true);

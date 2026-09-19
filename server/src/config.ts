@@ -66,20 +66,29 @@ const schema = z.object({
   // instead of leaving the car stuck on (and blocking) the exit.
   rechargeOnWrongAmount: bool().default(true),
 
-  // ---- game clock -------------------------------------------------------------
+  // ---- game clock (see gameClock.ts) ---------------------------------------------
   // The simulator runs GameSpeedMultiplier times faster than the wall clock; cars,
-  // gates and sensors all move in game time. Every *GameS timer below is converted to
-  // real time with the current game speed, taken from (first that applies):
+  // gates and sensors all move in game time. Every *GameS setting below is measured on a
+  // game clock that runs at the current game speed, taken from (first that applies):
   //   1. gameSpeed, if set here - a fixed override
-  //   2. learned from completed stays (planned game time / measured real time), once
-  //      timeScaleMinSamples stays have been seen - follows Shift+PgUp changes live
-  //   3. GameSpeedMultiplier in the simulator's settings.json (simSettingsFile)
-  //   4. 1.0
+  //   2. gate timing, right after it detects a speed change (Shift+PgUp while running)
+  //   3. learned from completed stays (planned game time / measured real time), once
+  //      timeScaleMinSamples stays have been seen
+  //   4. GameSpeedMultiplier in the simulator's settings.json (simSettingsFile)
+  //   5. 1.0
   gameSpeed: num().positive().optional(),
   // Defaults to <simLevelsDir>/settings.json when simLevelsDir is set.
   simSettingsFile: repoPath().optional(),
-  timeScaleSamples: num().int().min(1).default(30),
+  // Stays kept for the median. Small, so a speed change is followed within a few stays.
+  timeScaleSamples: num().int().min(1).default(9),
   timeScaleMinSamples: num().int().min(1).default(3),
+  // Gate movements per speed reading; a reading this far (0.25 = 25%) off the current speed
+  // is a speed change. A gate move takes ~0.6 game-s at any speed.
+  gateSpeedSamples: num().int().min(1).default(5),
+  speedChangeThreshold: num().positive().default(0.25),
+  // No webhook at all for this many REAL seconds: the game is paused (or on its menu) and
+  // the game clock stops, so parked cars are not aged into "missed their exit".
+  pauseAfterSilenceS: num().positive().default(20),
 
   // ---- simulator timing (GAME seconds: scaled by game speed) ------------------------
   // Charging the instant exit CarIn arrives is rejected ("Car should be charged at the
@@ -90,12 +99,16 @@ const schema = z.object({
   // car to pass the barrier, short enough that nobody else follows. Cars leave the exit
   // ~1.5 game-s after paying and arrive every ~8 game-s.
   gateCloseDelayGameS: num().nonnegative().default(1.5),
-  // The simulator sometimes never confirms a gate opening (normally ~0.5 game-s). After
-  // this long the open command is re-sent once; after the same again, it is assumed open.
-  gateOpenTimeoutGameS: num().positive().default(6),
-  // A dispatched car normally leaves its entry within ~3 game-s. After this long its goto
-  // is re-sent, then it is given up on so the lane keeps moving.
-  entryDispatchTimeoutGameS: num().positive().default(30),
+  // A gate normally reports Open/Closed ~0.6 game-s after the command. An open not
+  // confirmed after this long is re-sent once, then assumed open; a close is re-sent.
+  gateConfirmGameS: num().positive().default(3),
+  // The simulator silently drops some goto commands (~15% of those sent while another
+  // car's event fires): the car just sits on the entry or exit sensor, holding the lane and
+  // its open gate. A car normally drives off within ~2 game-s; if it has not after this
+  // long, the goto is re-sent - up to maxGotoResends times, then a stuck entry car is
+  // given up on so the lane keeps moving.
+  gotoConfirmGameS: num().positive().default(4),
+  maxGotoResends: num().int().min(0).default(5),
   // Cars give up after ~5 game-minutes at an entry.
   entryPatienceGameS: num().positive().default(290),
   // Cars arrive every ~8 game-s. No webhook for this long usually means the simulator was
@@ -109,9 +122,9 @@ const schema = z.object({
   // Delivery is at-most-once (1 of 3,406 events lost in a Level 1 run) and a simulator
   // restart makes cars vanish silently. A car record whose closing event never arrives
   // is retired after these limits, so it cannot hold a spot, a lane or a gate forever.
-  // A paid, released car normally leaves ~1.5 game-s later. Until its exit CarOut
-  // arrives the exit gate is held open for it.
-  releaseTimeoutGameS: num().positive().default(20),
+  // A paid, released car normally leaves ~1 game-s later (its leavepark is re-sent every
+  // gotoConfirmGameS if not). Until its exit CarOut arrives the exit gate is held open.
+  releaseTimeoutGameS: num().positive().default(30),
   // A parked car normally leaves at its planned time; this much longer means we missed it.
   parkedOverstayGameS: num().positive().default(300),
   // Any other car (driving to or waiting at an exit) with no event for this long.
@@ -120,7 +133,6 @@ const schema = z.object({
   // ---- our own timing (REAL seconds) ------------------------------------------------
   tickIntervalS: num().positive().default(0.5),
   maxChargeAttempts: num().int().min(1).default(3),
-  maxDispatchRetries: num().int().min(0).default(1),
   // Close any open gate nobody is using when syncing (levels start with exit gates open).
   closeIdleGatesOnSync: bool().default(true),
 

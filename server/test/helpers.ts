@@ -5,6 +5,7 @@ import { registerRoutes } from "../src/app";
 import { AuthService, hashPassword } from "../src/auth";
 import { loadSettings, type Settings } from "../src/config";
 import { Controller, type Logger } from "../src/controller";
+import { GameClock } from "../src/gameClock";
 import type { Task, TaskQueue } from "../src/serialQueue";
 import type { SimApi } from "../src/simClient";
 import { Store, type EventRecord } from "../src/store";
@@ -110,9 +111,21 @@ export async function make(opts: { sim?: FakeSim; topo?: Topology; topologies?: 
   const queue = new RecordingQueue();
   // closeIdleGatesOnSync off keeps call logs simple; it has its own test.
   const cfg = testSettings({ closeIdleGatesOnSync: false, ...opts.cfg });
-  const c = new Controller({ sim, cfg, store, queue, log: silentLog, topologies: opts.topologies ?? [opts.topo ?? LVL1] });
+  // The clock reads a hand-driven wall clock, starting at the real one (replayed events
+  // carry real timestamps).
+  const time = { now: Date.now() / 1000 };
+  const clock = new GameClock(cfg, () => time.now);
+  const c = new Controller({ sim, cfg, store, queue, clock, log: silentLog, topologies: opts.topologies ?? [opts.topo ?? LVL1] });
   await c.sync();
-  return { c, sim, store, queue };
+  /** Let realS wall-clock seconds pass. live: the simulator keeps sending events meanwhile
+   * (false = silent, as when the game is paused). */
+  const advance = (realS: number, live = true) => {
+    for (let left = realS; left > 0; left -= 5) {
+      time.now += Math.min(5, left);
+      if (live) clock.activity();
+    }
+  };
+  return { c, sim, store, queue, clock, advance };
 }
 
 /**

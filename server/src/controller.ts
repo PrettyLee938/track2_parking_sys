@@ -32,6 +32,7 @@ import {
 import { getAllocator, spotNumber, type Allocator, type AllocSpot } from "./allocation";
 import { chargingCost, parkingCost } from "./billing";
 import { readSimGameSpeed, type Settings } from "./config";
+import { GameClock } from "./gameClock";
 import { SerialQueue, type TaskQueue } from "./serialQueue";
 import type { SimApi } from "./simClient";
 import type { ActionRecord, EventRecord, Store } from "./store";
@@ -62,11 +63,6 @@ const toInt = (v: unknown): number | null => {
   if (v === null || v === undefined || v === "") return null;
   const n = Number(v);
   return Number.isInteger(n) ? n : null;
-};
-
-const median = (xs: number[]) => {
-  const s = [...xs].sort((a, b) => a - b), m = Math.floor(s.length / 2);
-  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
 };
 
 const str = (e: EventRecord, k: string) => (e[k] as string | undefined) ?? undefined;
@@ -116,8 +112,10 @@ export class Gate {
   maintenance = false;
   onOpen: Callback[] = [];              // run once the gate reports Open
   hold: GateHold = null;                // operator override: held open/closed until back to automatic
-  openRequestedAt: number | null = null;
+  openRequestedAt: number | null = null;  // game clock
   openRetries = 0;
+  closeRequestedAt: number | null = null; // game clock
+  moveSentReal: number | null = null;     // a clean open/close was sent at this real time (speed sample)
 
   constructor(readonly name: string, public zone: string) {}
 
@@ -142,15 +140,21 @@ export interface ExitLane {
   releasing: Set<string>;  // paid plates sent to leavepark, not out yet
 }
 
-/** Public fields mirror CarView; the camelCase ones are internal bookkeeping (real clock). */
+/**
+ * Public fields mirror CarView; the camelCase ones are internal bookkeeping. *G fields are
+ * game-clock stamps (GameClock.now()), so deadlines hold across speed changes and pauses.
+ */
 export interface Car extends CarView {
-  arrivedReal: number | null;
-  dispatchedReal: number | null;
-  parkedReal: number | null;
-  leftSpotReal: number | null;
-  releasedReal: number | null;   // when the exit gate was opened for it
-  lastSeenReal: number | null;   // last event about this plate
-  dispatchRetries: number;
+  arrivedG: number | null;
+  dispatchedG: number | null;
+  parkedG: number | null;
+  leftSpotG: number | null;
+  releasedG: number | null;      // when the exit gate was opened for it
+  lastSeenG: number | null;      // last event about this plate
+  gotoG: number | null;          // last goto sent for it (checkStuckGotos)
+  gotoResends: number;
+  parkedA: number | null;        // active real seconds (GameClock.activeNow), to learn the speed
+  leftSpotA: number | null;
   chargeScheduled: boolean;
 }
 
@@ -160,15 +164,15 @@ function newCar(plate: string, carType: string, planned: number | null, status: 
     entry_lane: null, exit_lane: null, arrived_at: null, spot: null, parked_at: null, left_spot_at: null,
     exit_at: null, charge_parking: null, charge_electric: null, charge_attempts: 0, charge_override: null,
     paid: null, payment_ok: null, left_at: null,
-    arrivedReal: null, dispatchedReal: null, parkedReal: null, leftSpotReal: null, releasedReal: null,
-    lastSeenReal: null, dispatchRetries: 0, chargeScheduled: false,
+    arrivedG: null, dispatchedG: null, parkedG: null, leftSpotG: null, releasedG: null, lastSeenG: null,
+    gotoG: null, gotoResends: 0, parkedA: null, leftSpotA: null, chargeScheduled: false,
     ...extra,
   };
 }
 
 export function publicCar(c: Car): CarView {
-  const { arrivedReal, dispatchedReal, parkedReal, leftSpotReal, releasedReal, lastSeenReal, dispatchRetries, chargeScheduled,
-    ...view } = c;
+  const { arrivedG, dispatchedG, parkedG, leftSpotG, releasedG, lastSeenG, gotoG, gotoResends, parkedA, leftSpotA,
+    chargeScheduled, ...view } = c;
   return view;
 }
 
@@ -176,7 +180,7 @@ const AT_EXIT: CarStatus[] = ["at_exit", "invoiced", "payment_mismatch", "releas
 const MID_ENTRY: CarStatus[] = ["dispatching", "dispatched"];
 const DEAD: CarStatus[] = ["turned_away", "neglected", "lost", "unknown"];
 
-interface Timer { due: number; label: string; fn: Callback; done: boolean }
+interface Timer { due: number; label: string; fn: Callback; done: boolean } // due: game clock
 
 export interface ControllerDeps {
   sim: SimApi;
@@ -187,6 +191,8 @@ export interface ControllerDeps {
   topologies?: Topology[];
   /** Where resyncs are scheduled; defaults to the controller's own serial queue. */
   queue?: TaskQueue;
+  /** Injected clock (tests); otherwise one on the wall clock. */
+  clock?: GameClock;
 }
 
 // =============================================================================
@@ -219,9 +225,8 @@ export class Controller {
   entryLanes = new Map<string, EntryLane>();
   exitLanes = new Map<string, ExitLane>();
   cars = new Map<string, Car>();                  // active cars by plate
-  recentPaid = new Map<string, number>();         // plate -> when its paid session ended
-  private scaleSamples: number[] = [];            // game seconds per real second, per completed stay
-  private simSettingsSpeed: number | null = null; // GameSpeedMultiplier from the simulator's settings.json
+  recentPaid = new Map<string, number>();         // plate -> when its paid session ended (game clock)
+  readonly clock: GameClock;
   timers: Timer[] = [];
 
   completed: SessionView[] = [];
@@ -239,40 +244,33 @@ export class Controller {
     this.allocator = getAllocator(this.cfg.allocationStrategy);
     this.topologyCandidates = deps.topologies;
     this.queue = deps.queue ?? new SerialQueue((err) => this.log.error(`controller task failed: ${(err as Error)?.stack ?? err}`));
-    this.simSettingsSpeed = readSimGameSpeed(this.cfg.simSettingsFile);
+    this.clock = deps.clock ?? new GameClock(this.cfg);
+    this.clock.setSettingsSpeed(readSimGameSpeed(this.cfg.simSettingsFile));
   }
 
   /** Game seconds per real second (= the simulator's GameSpeedMultiplier), and where
-   * that figure came from. See the "game clock" section of config.ts. */
+   * that figure came from. See gameClock.ts. */
   get timeScaleInfo(): { value: number; source: TimeScaleSource } {
-    if (this.cfg.gameSpeed) return { value: this.cfg.gameSpeed, source: "configured" };
-    if (this.scaleSamples.length >= this.cfg.timeScaleMinSamples) return { value: median(this.scaleSamples), source: "learned" };
-    if (this.simSettingsSpeed) return { value: this.simSettingsSpeed, source: "simulator settings" };
-    return { value: 1, source: "default" };
+    return this.clock.info;
   }
 
   get timeScale(): number {
-    return this.timeScaleInfo.value;
+    return this.clock.speed;
   }
 
-  /** Real seconds for a duration the simulator measures in game time. */
+  /** Real seconds for a duration the simulator measures in game time, at today's speed. */
   real(gameS: number): number {
     return gameS / this.timeScale;
   }
 
-  private learnTimeScale(car: Car) {
-    // A car stays exactly its planned game minutes, so planned / measured-real
-    // recovers the game speed without it having to be configured anywhere.
-    if (car.planned_minutes && car.parkedReal && car.leftSpotReal) {
-      const realS = car.leftSpotReal - car.parkedReal;
-      if (realS > 5) {
-        const ratio = (car.planned_minutes * 60) / realS;
-        if (ratio > 0.1 && ratio < 20) {
-          this.scaleSamples.push(ratio);
-          if (this.scaleSamples.length > this.cfg.timeScaleSamples) this.scaleSamples.shift();
-        }
-      }
-    }
+  /** Game-clock time when an event arrived (not when its turn in the queue came; and for
+   * replayed events, minutes ago). */
+  private gameAt(e: EventRecord): number {
+    return this.clock.gameAt(tsOf(e._received_at));
+  }
+
+  private activeAt(e: EventRecord): number {
+    return this.clock.activeAt(tsOf(e._received_at));
   }
 
   // ---------------------------------------------------------------------------
@@ -383,11 +381,7 @@ export class Controller {
    * restarted at another speed, so stays learned at the old speed no longer apply. */
   private refreshSimSettingsSpeed() {
     const speed = readSimGameSpeed(this.cfg.simSettingsFile);
-    if (speed && this.simSettingsSpeed && speed !== this.simSettingsSpeed) {
-      this.note("info", `simulator game speed changed ${this.simSettingsSpeed} -> ${speed}; relearning`);
-      this.scaleSamples = [];
-    }
-    this.simSettingsSpeed = speed;
+    if (this.clock.setSettingsSpeed(speed)) this.note("info", `simulator settings.json game speed is now ${speed}; relearning`);
   }
 
   private upsertSpot(s: SimParkingSpot) {
@@ -446,7 +440,7 @@ export class Controller {
     const plate = a.args[0];
     const car = this.cars.get(plate);
     if (!car) return;
-    const t = tsOf(a.at);
+    const t = this.clock.gameAt(tsOf(a.at));
     if (a.cmd === "charge") { // args: plate, parkingCost, chargingCost
       car.charge_parking = Number(a.args[1]);
       car.charge_electric = Number(a.args[2]) || 0;
@@ -461,10 +455,11 @@ export class Controller {
       if (notYetIn) { // turned away at the entry
         if (lane) lane.queue = lane.queue.filter((p) => p !== plate);
         car.status = "turned_away";
+        car.gotoG = t;
         this.counters.turned_away++;
       } else { // released at an exit
         car.status = "released";
-        car.releasedReal = t;
+        car.releasedG = car.gotoG = t;
         if (car.exit_lane) this.exitLanes.get(car.exit_lane)?.releasing.add(plate);
       }
     } else if (target !== Destination.Exit) { // sent to a parking spot
@@ -478,7 +473,7 @@ export class Controller {
       if (spot && !spot.occupants.has(plate)) spot.reserved_for = plate;
       car.spot = target;
       if (notYetIn) { car.status = "dispatched"; this.counters.admitted++; }
-      car.dispatchedReal = t;
+      car.dispatchedG = car.gotoG = t;
     }
   }
 
@@ -501,14 +496,14 @@ export class Controller {
     for (const car of [...this.cars.values()]) {
       const sensor = car.exit_lane ? this.spots.get(car.exit_lane) : undefined;
       if (AT_EXIT.includes(car.status) && !sensor?.detected) this.cars.delete(car.plate);
-      else if (car.status === "at_exit") this.scheduleCharge(car.plate, this.real(this.cfg.exitChargeDelayGameS));
+      else if (car.status === "at_exit") this.scheduleCharge(car.plate, this.cfg.exitChargeDelayGameS);
       else if (car.status === "released") await this.release(car);
       else if (DEAD.includes(car.status)) this.cars.delete(car.plate);
     }
   }
 
   private reconcileLanes() {
-    const now = nowS();
+    const now = this.clock.now();
     // A car sent to a spot just before a restart is still driving there: keep its
     // reservation. (Clearing it let the next car be sent to the same spot - two cars in
     // one spot, and a fine for every car sent there after.)
@@ -524,8 +519,8 @@ export class Controller {
       if (lane.current && !onTheWay(lane.current)) lane.current = null;
       lane.queue = lane.queue.filter((plate) => {
         const car = this.cars.get(plate);
-        const alive = !!car && !!sensor?.detected &&
-          now - (car.arrivedReal ?? 0) < this.real(this.cfg.entryPatienceGameS);
+        const alive = !!car && !!sensor?.detected && car.arrivedG !== null &&
+          now - car.arrivedG < this.cfg.entryPatienceGameS;
         if (!alive) this.cars.delete(plate);
         return alive;
       });
@@ -543,6 +538,7 @@ export class Controller {
       if (eid) this.replayedIds.add(eid);
     } else {
       if (eid && this.replayedIds.has(eid)) return;
+      this.clock.activity(); // the game is running (not paused)
       const now = nowS();
       if (this.lastEventReal && now - this.lastEventReal > this.real(this.cfg.resyncAfterSilenceGameS)) {
         // The simulator was probably restarted or reloaded while we kept running.
@@ -561,7 +557,7 @@ export class Controller {
     }
     // Stale-record detection (sweepGhosts) measures silence from here.
     const car = this.cars.get(str(e, "CarPlateNumber") ?? "");
-    if (car) car.lastSeenReal = tsOf(e._received_at) ?? nowS();
+    if (car) car.lastSeenG = this.gameAt(e);
   }
 
   private async routeCarEvent(e: EventRecord): Promise<void> {
@@ -625,7 +621,7 @@ export class Controller {
       this.forget(stale);
     }
     const car = newCar(plate, str(e, "CarType") || CarType.Normal, toInt(e.PlannedParkingDurationInMinutes), "queued", {
-      entry_lane: lane.spot, arrived_at: e.ServerDateTime ?? null, arrivedReal: tsOf(e._received_at) ?? nowS(),
+      entry_lane: lane.spot, arrived_at: e.ServerDateTime ?? null, arrivedG: this.gameAt(e),
     });
     this.cars.set(plate, car);
     this.counters.arrived++;
@@ -666,7 +662,8 @@ export class Controller {
     spot.reserved_for = plate;
     car.spot = spot.name;
     car.status = "dispatching";
-    car.dispatchedReal = nowS();
+    car.dispatchedG = this.clock.now();
+    car.gotoResends = 0;
     lane.current = plate;
     const send = () => this.sendToSpot(plate, lane);
     if (gate) await this.whenGateOpen(gate, send);
@@ -677,8 +674,10 @@ export class Controller {
     const car = this.cars.get(plate);
     if (!car || lane.current !== plate || !car.spot) return;
     if (await this.cmd("goto", () => this.sim.carGoto(plate, car.spot!), [plate, car.spot])) {
+      car.gotoG = this.clock.now();
+      if (car.status !== "dispatching") return; // a re-send (checkStuckGotos)
       car.status = "dispatched";
-      car.dispatchedReal = nowS();
+      car.dispatchedG = car.gotoG;
       this.counters.admitted++;
       this.note("info", `${plate} -> ${car.spot}`);
     }
@@ -691,7 +690,7 @@ export class Controller {
       if (car) car.status = "entering";
       lane.current = null;
       if (lane.queue.length) await this.pumpEntry(lane);
-      else this.later(this.real(this.cfg.gateCloseDelayGameS), `close ${lane.gate}`, () => this.closeGateIfIdle(lane.gate));
+      else this.later(this.cfg.gateCloseDelayGameS, `close ${lane.gate}`, () => this.closeGateIfIdle(lane.gate));
     } else if (lane.queue.includes(plate)) {
       lane.queue.splice(lane.queue.indexOf(plate), 1);
       car!.status = "neglected";
@@ -707,7 +706,14 @@ export class Controller {
     car.status = "turned_away";
     this.counters.turned_away++;
     this.note("warn", `${car.plate} turned away: ${reason}`);
-    await this.cmd("goto", () => this.sim.carGoto(car.plate, Destination.LeavePark), [car.plate, Destination.LeavePark]);
+    await this.leavePark(car);
+  }
+
+  /** Send a car out of the car park (turned away at an entry, or released at an exit). */
+  private async leavePark(car: Car) {
+    if (await this.cmd("goto", () => this.sim.carGoto(car.plate, Destination.LeavePark), [car.plate, Destination.LeavePark])) {
+      car.gotoG = this.clock.now();
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -732,7 +738,8 @@ export class Controller {
     car.spot = name;
     car.status = "parked";
     car.parked_at = e.ServerDateTime ?? null;
-    car.parkedReal = tsOf(e._received_at);
+    car.parkedG = this.gameAt(e);
+    car.parkedA = this.activeAt(e);
     car.planned_minutes = toInt(e.PlannedParkingDurationInMinutes) || car.planned_minutes;
     const lane = car.entry_lane ? this.entryLanes.get(car.entry_lane) : undefined;
     if (lane && lane.current === plate) { // parked without an entry CarOut we saw
@@ -751,8 +758,11 @@ export class Controller {
     }
     const car = this.cars.get(plate) ?? this.adopt(e);
     car.left_spot_at = e.ServerDateTime ?? null;
-    car.leftSpotReal = tsOf(e._received_at);
-    this.learnTimeScale(car);
+    car.leftSpotG = this.gameAt(e);
+    car.leftSpotA = this.activeAt(e);
+    // A car stays exactly its planned game minutes: planned / measured real time is the
+    // game speed, learned without it having to be configured anywhere.
+    this.clock.addStay(car.planned_minutes, car.parkedA, car.leftSpotA);
     // Only advance the state. From a spot right next to an exit (S15 on Level 1) the
     // exit CarIn arrives ~0.2s BEFORE this CarOut; overwriting "at_exit" here would
     // cancel the pending charge and the car escapes unpaid.
@@ -810,14 +820,14 @@ export class Controller {
     car.status = "at_exit";
     // Charging the instant the sensor fires is rejected ("Car should be charged at the
     // exit"): give the car a moment to settle on the exit spot.
-    this.scheduleCharge(plate, this.real(this.cfg.exitChargeDelayGameS));
+    this.scheduleCharge(plate, this.cfg.exitChargeDelayGameS);
   }
 
-  scheduleCharge(plate: string, delayS: number): void {
+  scheduleCharge(plate: string, delayGameS: number): void {
     const car = this.cars.get(plate);
     if (this.replaying || !car || car.chargeScheduled) return; // after a replay, reconcile() reschedules
     car.chargeScheduled = true;
-    this.later(delayS, `charge ${plate}`, () => this.charge(plate));
+    this.later(delayGameS, `charge ${plate}`, () => this.charge(plate));
   }
 
   private async charge(plate: string) {
@@ -852,9 +862,8 @@ export class Controller {
 
   /** How long the car was parked, in game time. */
   private parkedGameSeconds(car: Car): number | null {
-    const realS = car.parkedReal && car.leftSpotReal
-      ? car.leftSpotReal - car.parkedReal
-      : simSecondsBetween(car.parked_at, car.left_spot_at); // wall-clock stamps
+    if (car.parkedG !== null && car.leftSpotG !== null) return car.leftSpotG - car.parkedG;
+    const realS = simSecondsBetween(car.parked_at, car.left_spot_at); // wall-clock stamps
     return realS === null ? null : realS * this.timeScale;
   }
 
@@ -882,12 +891,15 @@ export class Controller {
 
   async release(car: Car): Promise<void> {
     if (this.replaying) return; // whether it was released is in the recorded commands
-    car.status = "released";
-    car.releasedReal = nowS();
+    if (car.status !== "released") {
+      car.status = "released";
+      car.releasedG = this.clock.now();
+      car.gotoResends = 0;
+    }
     const lane = car.exit_lane ? this.exitLanes.get(car.exit_lane) : undefined;
     lane?.releasing.add(car.plate);
     const gate = lane?.gate ? this.gates.get(lane.gate) : undefined;
-    const leave = () => this.cmd("goto", () => this.sim.carGoto(car.plate, Destination.LeavePark), [car.plate, Destination.LeavePark]);
+    const leave = () => this.leavePark(car);
     if (lane?.gate && (!gate || !gate.operable)) {
       this.note("warn", `exit gate ${lane.gate} not operable - ${car.plate} waits`);
       return;
@@ -910,7 +922,7 @@ export class Controller {
     lane.releasing.delete(plate);
     this.counters.exited++;
     this.finish(car, e);
-    this.later(this.real(this.cfg.gateCloseDelayGameS), `close ${lane.gate}`, () => this.closeGateIfIdle(lane.gate));
+    this.later(this.cfg.gateCloseDelayGameS, `close ${lane.gate}`, () => this.closeGateIfIdle(lane.gate));
   }
 
   // ---------------------------------------------------------------------------
@@ -970,17 +982,17 @@ export class Controller {
     }
     alt.reserved_for = car.plate;
     car.spot = alt.name;
-    car.dispatchRetries = 0;
-    car.dispatchedReal = nowS();
+    car.gotoResends = 0;
+    car.dispatchedG = this.clock.now();
     this.note("warn", `${spot.name} is occupied - redirecting ${car.plate} to ${alt.name}`);
-    await this.cmd("goto", () => this.sim.carGoto(car.plate, alt.name), [car.plate, alt.name]);
+    if (await this.cmd("goto", () => this.sim.carGoto(car.plate, alt.name), [car.plate, alt.name])) car.gotoG = this.clock.now();
   }
 
   private rebill(car: Car, override: number | null) {
     car.charge_parking = car.charge_electric = null;
     car.charge_override = override;
     car.status = "at_exit";
-    if (car.charge_attempts < this.cfg.maxChargeAttempts) this.scheduleCharge(car.plate, this.real(this.cfg.exitChargeRetryGameS));
+    if (car.charge_attempts < this.cfg.maxChargeAttempts) this.scheduleCharge(car.plate, this.cfg.exitChargeRetryGameS);
     else this.note("error", `${car.plate}: invoice rejected ${car.charge_attempts}x, giving up`);
   }
 
@@ -995,7 +1007,15 @@ export class Controller {
     const name = str(e, "Name")!;
     let gate = this.gates.get(name);
     if (!gate) this.gates.set(name, (gate = new Gate(name, "")));
+    const was = gate.state;
     gate.state = str(e, "Action")!;
+    if (gate.state === GateState.Closed) gate.closeRequestedAt = null;
+    if (gate.moveSentReal !== null && !this.replaying) {
+      // A gate move takes fixed game time: its real duration tracks the game speed.
+      const expected = was === GateState.Opening ? GateState.Open : was === GateState.Closing ? GateState.Closed : null;
+      if (gate.state === expected) this.learnFromGate((tsOf(e._received_at) ?? this.clock.real()) - gate.moveSentReal);
+      gate.moveSentReal = null;
+    }
     if (gate.state === GateState.Open) {
       await this.gateOpened(gate);
     } else if (gate.state === GateState.Closed && gate.onOpen.length && gate.hold !== "closed") {
@@ -1021,29 +1041,55 @@ export class Controller {
     gate.onOpen.push(fn);
     if (gate.hold === "closed") return; // an operator holds it shut: the car waits until it is released
     if (gate.state !== GateState.Opening) await this.requestOpen(gate);
-    else if (gate.openRequestedAt === null) gate.openRequestedAt = nowS(); // opening per sync: still arm the timeout
+    else if (gate.openRequestedAt === null) gate.openRequestedAt = this.clock.now(); // opening per sync: still arm the timeout
   }
 
   private async requestOpen(gate: Gate) {
+    const clean = gate.state === GateState.Closed, sent = this.clock.real();
     if (await this.cmd("open", () => this.sim.openGate(gate.name), [gate.name])) {
       gate.state = GateState.Opening;
-      gate.openRequestedAt = nowS();
+      gate.openRequestedAt = this.clock.now();
+      gate.closeRequestedAt = null;
+      gate.moveSentReal = clean ? sent : null;
     }
   }
 
-  /** The simulator does not always confirm an opening: re-send once, then assume open. */
+  private async requestClose(gate: Gate) {
+    const clean = gate.state === GateState.Open, sent = this.clock.real();
+    if (await this.cmd("close", () => this.sim.closeGate(gate.name), [gate.name])) {
+      gate.state = GateState.Closing;
+      gate.closeRequestedAt = this.clock.now();
+      gate.moveSentReal = clean ? sent : null;
+    }
+  }
+
+  private learnFromGate(realS: number) {
+    const change = this.clock.addGateMove(realS);
+    if (change) this.note("warn", `game speed changed: x${change.from.toFixed(2)} -> x${change.to.toFixed(2)} (from gate timing)`);
+  }
+
+  /**
+   * The simulator does not always act on a gate command. An open not confirmed in time is
+   * re-sent once, then assumed; a close is re-sent once (a gate left open lets cars through).
+   */
   private async checkGateTimeouts(now: number) {
     for (const gate of this.gates.values()) {
-      if (!gate.onOpen.length || gate.openRequestedAt === null) continue;
-      if (now - gate.openRequestedAt < this.real(this.cfg.gateOpenTimeoutGameS)) continue;
-      if (gate.openRetries === 0) {
-        gate.openRetries = 1;
-        this.note("warn", `${gate.name} did not confirm opening, re-sending open`);
-        await this.requestOpen(gate);
-      } else {
-        this.note("warn", `${gate.name} still unconfirmed, assuming it is open`);
-        gate.state = GateState.Open;
-        await this.gateOpened(gate);
+      if (gate.onOpen.length && gate.openRequestedAt !== null && now - gate.openRequestedAt >= this.cfg.gateConfirmGameS) {
+        if (gate.openRetries === 0) {
+          gate.openRetries = 1;
+          this.note("warn", `${gate.name} did not confirm opening, re-sending open`);
+          await this.requestOpen(gate);
+        } else {
+          this.note("warn", `${gate.name} still unconfirmed, assuming it is open`);
+          gate.state = GateState.Open;
+          await this.gateOpened(gate);
+        }
+      } else if (gate.state === GateState.Closing && gate.closeRequestedAt !== null &&
+          now - gate.closeRequestedAt >= this.cfg.gateConfirmGameS) {
+        gate.closeRequestedAt = null; // one re-send only
+        if (gate.hold === "open" || gate.onOpen.length || this.gateBusy(gate.name) || !gate.operable) continue;
+        this.note("warn", `${gate.name} did not confirm closing, re-sending close`);
+        if (await this.cmd("close", () => this.sim.closeGate(gate.name), [gate.name])) gate.moveSentReal = null;
       }
     }
   }
@@ -1060,7 +1106,7 @@ export class Controller {
       // #region agent log
       fetch('http://127.0.0.1:7502/ingest/5b601716-2241-46fc-9c1b-1aa5e55ae0bd',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'6f1c01'},body:JSON.stringify({sessionId:'6f1c01',hypothesisId:'E',location:'controller.ts:closeGateIfIdle',message:'closing idle gate',data:{name:gate.name,state:gate.state,busy:this.gateBusy(gate.name),onOpen:gate.onOpen.length,timeScale:this.timeScale},timestamp:Date.now()})}).catch(()=>{});
       // #endregion
-      if (await this.cmd("close", () => this.sim.closeGate(gate.name), [gate.name])) gate.state = GateState.Closing;
+      await this.requestClose(gate);
     }
   }
 
@@ -1079,25 +1125,48 @@ export class Controller {
   // housekeeping
   // ---------------------------------------------------------------------------
   async tick(): Promise<void> {
-    const now = nowS();
+    const now = this.clock.now();
     for (const t of this.timers.filter((t) => t.due <= now)) await this.runTimer(t);
     await this.checkGateTimeouts(now);
-    for (const lane of this.entryLanes.values()) await this.checkDispatchTimeout(lane, now);
+    await this.checkStuckGotos(now);
     await this.sweepGhosts(now);
-    this.sample(now);
-    const horizon = now - this.real(this.cfg.repeatExitWindowGameS);
+    this.sample(nowS());
+    const horizon = now - this.cfg.repeatExitWindowGameS;
     for (const [plate, t] of this.recentPaid) if (t < horizon) this.recentPaid.delete(plate);
   }
 
-  private async checkDispatchTimeout(lane: EntryLane, now: number) {
-    const car = lane.current ? this.cars.get(lane.current) : undefined;
-    if (!car?.dispatchedReal || now - car.dispatchedReal <= this.real(this.cfg.entryDispatchTimeoutGameS)) return;
-    if (car.dispatchRetries < this.cfg.maxDispatchRetries) {
-      car.dispatchRetries++;
-      car.dispatchedReal = now;
-      this.note("warn", `${car.plate} has not left ${lane.spot}, re-sending goto ${car.spot}`);
-      return this.sendToSpot(car.plate, lane);
+  /**
+   * The simulator acknowledges every goto but silently drops some - mostly ones that land
+   * while another car's event fires. The car then just sits on its sensor: at an entry it
+   * holds the lane (every car behind it waits, then all go at once), at an exit it holds
+   * the open gate. A car that has not driven off gotoConfirmGameS after its goto gets it
+   * again; a car told to go to the same place twice simply keeps going.
+   */
+  private async checkStuckGotos(now: number) {
+    for (const car of [...this.cars.values()]) {
+      if (car.gotoG === null || now - car.gotoG < this.cfg.gotoConfirmGameS) continue;
+      const entry = car.entry_lane ? this.entryLanes.get(car.entry_lane) : undefined;
+      const onEntry = car.status === "dispatched" && entry?.current === car.plate;
+      if (!onEntry && car.status !== "released" && car.status !== "turned_away") continue;
+      const where = car.status === "released" ? car.exit_lane : car.entry_lane;
+      const dest = onEntry ? car.spot : Destination.LeavePark;
+      if (car.gotoResends >= this.cfg.maxGotoResends) {
+        car.gotoG = null; // stop re-sending
+        if (onEntry) await this.giveUpOnEntry(car, entry!);
+        else this.note("error", `${car.plate} still has not left ${where} after ${car.gotoResends} re-sent gotos`);
+        continue;
+      }
+      car.gotoResends++;
+      this.note("warn", `${car.plate} has not moved off ${where} ${(now - car.gotoG).toFixed(1)} game-s after goto ${dest} - ` +
+        `re-sending (${car.gotoResends}/${this.cfg.maxGotoResends})`);
+      car.gotoG = now; // not re-checked until the next confirm window, even if the re-send fails
+      if (onEntry) await this.sendToSpot(car.plate, entry!);
+      else if (car.status === "turned_away") await this.leavePark(car);
+      else await this.release(car);
     }
+  }
+
+  private async giveUpOnEntry(car: Car, lane: EntryLane) {
     this.note("error", `${car.plate} stuck at ${lane.spot}, releasing the lane`);
     const spot = car.spot ? this.spots.get(car.spot) : undefined;
     if (spot?.reserved_for === car.plate) spot.reserved_for = null;
@@ -1108,15 +1177,25 @@ export class Controller {
   }
 
   /**
-   * Run fn after delayS. While running, each timer fires on its own setTimeout (through
-   * the serial queue) so gate closes are on time rather than rounded up to the next
-   * tick; tick() still sweeps anything due, which is also how tests advance time.
+   * Run fn after delayGameS game seconds. While running, each timer fires on its own
+   * setTimeout (through the serial queue) so gate closes are on time rather than rounded
+   * up to the next tick; if the game speed dropped meanwhile it is re-armed for the rest.
+   * tick() still sweeps anything due, which is also how tests advance time.
    */
-  later(delayS: number, label: string, fn: Callback): void {
+  later(delayGameS: number, label: string, fn: Callback): void {
     if (this.replaying) return; // reconcile() re-arms whatever is still relevant after a replay
-    const timer: Timer = { due: nowS() + delayS, label, fn, done: false };
+    const timer: Timer = { due: this.clock.now() + delayGameS, label, fn, done: false };
     this.timers.push(timer);
-    if (this.started) setTimeout(() => this.queue.push(() => this.runTimer(timer)), delayS * 1000);
+    this.arm(timer);
+  }
+
+  private arm(timer: Timer) {
+    if (!this.started || timer.done) return;
+    setTimeout(() => this.queue.push(async () => {
+      if (timer.done) return;
+      if (this.clock.now() < timer.due - 1e-3) this.arm(timer); // game time ran slower than planned
+      else await this.runTimer(timer);
+    }), this.clock.realUntil(timer.due) * 1000);
   }
 
   private async runTimer(t: Timer) {
@@ -1171,20 +1250,24 @@ export class Controller {
   private async sweepGhosts(now: number) {
     const gatesToClose = new Set<string>();
     const retiredBefore = this.counters.ghosts_retired;
+    // All in game time: a speed change or a paused game does not age anyone early.
     for (const car of [...this.cars.values()]) {
-      const quietFor = now - (car.lastSeenReal ?? car.arrivedReal ?? now);
-      if (car.status === "released" && car.releasedReal && now - car.releasedReal > this.real(this.cfg.releaseTimeoutGameS)) {
+      const quietFor = now - (car.lastSeenG ?? car.arrivedG ?? now);
+      if (car.status === "released" && car.releasedG !== null && now - car.releasedG > this.cfg.releaseTimeoutGameS) {
         const gate = car.exit_lane ? this.exitLanes.get(car.exit_lane)?.gate : null;
         this.retire(car, `was released at ${car.exit_lane} but never reported leaving`, "gone");
         if (gate) gatesToClose.add(gate);
       } else if (car.status === "parked") {
-        const since = car.parkedReal ?? car.lastSeenReal;
-        const allowed = this.real((car.planned_minutes ?? 0) * 60 + this.cfg.parkedOverstayGameS);
-        if (since && now - since > allowed) this.retire(car, `is still recorded in ${car.spot} well past its planned ${car.planned_minutes}m`);
+        const since = car.parkedG ?? car.lastSeenG;
+        const allowed = (car.planned_minutes ?? 0) * 60 + this.cfg.parkedOverstayGameS;
+        if (since !== null && now - since > allowed) this.retire(car, `is still recorded in ${car.spot} well past its planned ${car.planned_minutes}m`);
       } else if (car.status === "queued") {
-        if (now - (car.arrivedReal ?? now) > this.real(this.cfg.entryPatienceGameS + 60)) this.retire(car, `is still queued at ${car.entry_lane} past the give-up time`);
-      } else if (["to_exit", "at_exit", "invoiced", "payment_mismatch", "entering", "unknown"].includes(car.status)) {
-        if (quietFor > this.real(this.cfg.staleCarGameS)) this.retire(car, `has had no events for ${Math.round(quietFor)}s (status ${car.status})`);
+        if (now - (car.arrivedG ?? now) > this.cfg.entryPatienceGameS + 60) this.retire(car, `is still queued at ${car.entry_lane} past the give-up time`);
+      } else if (["to_exit", "at_exit", "invoiced", "payment_mismatch", "entering", "unknown", "turned_away"].includes(car.status)) {
+        if (quietFor > this.cfg.staleCarGameS) {
+          this.retire(car, `has had no events for ${Math.round(quietFor)} game-s (status ${car.status})`,
+            car.status === "turned_away" ? "turned_away" : "lost");
+        }
       }
     }
     for (const gate of gatesToClose) await this.closeGateIfIdle(gate);
@@ -1196,7 +1279,7 @@ export class Controller {
   private finish(car: Car, e: EventRecord) {
     car.left_at = e.ServerDateTime ?? null;
     if (!["neglected", "turned_away", "lost"].includes(car.status)) car.status = "gone";
-    if (car.payment_ok) this.recentPaid.set(car.plate, nowS());
+    if (car.payment_ok) this.recentPaid.set(car.plate, this.clock.now());
     const session: SessionView = { ...publicCar(car), parked_seconds: simSecondsBetween(car.parked_at, car.left_spot_at) };
     this.completed.push(session);
     if (this.completed.length > this.cfg.completedSessionsSize) this.completed.shift();
@@ -1261,6 +1344,7 @@ export class Controller {
           ? await this.cmd("open", () => this.sim.openGate(name), [name], actor)
           : await this.cmd("close", () => this.sim.closeGate(name), [name], actor);
         if (!sent) { gate.hold = null; return fail(`the simulator rejected ${action} ${name}`); }
+        gate.moveSentReal = gate.closeRequestedAt = null; // not an automatic move: no timing sample, no re-send
         if (action === "open" && gate.state !== GateState.Open) gate.state = GateState.Opening;
         if (action === "close") gate.state = GateState.Closing;
         this.note("warn", `${actor} holds ${name} ${gate.hold}`);
