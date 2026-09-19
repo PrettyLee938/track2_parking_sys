@@ -10,6 +10,7 @@ export interface GatewayHealth {
 
 export interface CommandAcceptance {
   accepted: boolean;
+  outcome: 'accepted' | 'rejected' | 'unknown';
   externalId: string | undefined;
   error: string | undefined;
 }

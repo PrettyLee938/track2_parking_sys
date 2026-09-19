@@ -6,6 +6,7 @@ import { AuditService } from './services/audit.js';
 import { CommandService } from './services/command-service.js';
 import { EquipmentService } from './services/equipment-service.js';
 import { EventService } from './services/event-service.js';
+import { EventController } from './services/event-controller.js';
 import { ParkingService } from './services/parking-service.js';
 import { PaymentService } from './services/payment-service.js';
 import { RecoveryService } from './services/recovery-service.js';
@@ -46,6 +47,7 @@ export function buildApp(options: AppOptions = {}): { app: FastifyInstance; cont
   const parking = new ParkingService(db, commands, audit);
   const payments = new PaymentService(db, commands, auth, audit);
   const equipment = new EquipmentService(db, commands, audit);
+  const eventController = new EventController(equipment, parking, payments, commands);
   const recovery = new RecoveryService(db, gateway, parking, audit);
   const context = { db, gateway, auth, audit, events, commands, parking, payments, equipment, recovery };
   const app = Fastify({ logger: false });
@@ -54,15 +56,16 @@ export function buildApp(options: AppOptions = {}): { app: FastifyInstance; cont
 
   registerAuthRoutes(app, auth, audit);
   registerSystemRoutes(app, auth, gateway, events, commands, audit, recovery);
-  registerWebhookRoutes(app, events, equipment, commands, parking, payments);
+  registerWebhookRoutes(app, events, eventController);
   registerParkingRoutes(app, auth, parking, payments);
   registerEquipmentRoutes(app, auth, equipment);
-  registerRecoveryRoutes(app, auth, recovery);
+  registerRecoveryRoutes(app, auth, recovery, commands);
   app.addHook('onReady', async () => {
     await auth.seedAdmin(config.adminUsername, config.adminInitialPassword);
+    recovery.startAutomaticResume();
     try { await gateway.login(); await parking.refreshSnapshot(await gateway.discover()); }
     catch (error) { audit.record('simulator-connect-failed', 'simulator', undefined, { error: error instanceof Error ? error.message : String(error) }); }
   });
-  app.addHook('onClose', async () => { auth.invalidateAll(); if (ownsDb) db.close(); });
+  app.addHook('onClose', async () => { recovery.stopAutomaticResume(); auth.invalidateAll(); if (ownsDb) db.close(); });
   return { app, context };
 }

@@ -12,7 +12,8 @@ export class PaymentService {
   private currentSession(sessionId: string) {
     const session = this.db.get<{ id: string; plate: string; status: string; run_id: string | null }>('SELECT id, plate, status, run_id FROM parking_sessions WHERE id = :id', { ':id': sessionId });
     const runId = this.db.get<{ value: string }>('SELECT value FROM meta WHERE key = :key', { ':key': 'run_id' })?.value;
-    if (!session || session.run_id !== runId) throw new Error('session-not-current-run');
+    const runStatus = this.db.get<{ value: string }>('SELECT value FROM meta WHERE key = :key', { ':key': 'run_status' })?.value;
+    if (!session || session.run_id !== runId || runStatus !== 'active') throw new Error('session-not-current-run');
     return session;
   }
 
@@ -20,8 +21,10 @@ export class PaymentService {
     this.currentSession(sessionId);
     const total = calculateInvoice(input);
     const id = randomUUID();
-    this.db.run('INSERT INTO invoices (id, session_id, parking_cents, electricity_cents, total_cents, status, created_at) VALUES (:id, :session, :parking, :electricity, :total, :status, :created)', { ':id': id, ':session': sessionId, ':parking': total.parkingCents, ':electricity': total.electricityCents, ':total': total.totalCents, ':status': 'open', ':created': new Date(this.clock()).toISOString() });
-    this.audit.record('invoice-created', 'invoice', id, { sessionId, ...total });
+    this.db.transaction(() => {
+      this.db.run('INSERT INTO invoices (id, session_id, parking_cents, electricity_cents, total_cents, status, created_at) VALUES (:id, :session, :parking, :electricity, :total, :status, :created)', { ':id': id, ':session': sessionId, ':parking': total.parkingCents, ':electricity': total.electricityCents, ':total': total.totalCents, ':status': 'open', ':created': new Date(this.clock()).toISOString() });
+      this.audit.record('invoice-created', 'invoice', id, { sessionId, ...total });
+    });
     return { id, sessionId, ...total, status: 'open' as const };
   }
 
@@ -32,7 +35,12 @@ export class PaymentService {
     const duplicate = this.db.get('SELECT id FROM payments WHERE session_id = :session AND status = :status', { ':session': sessionId, ':status': 'valid' });
     const status = duplicate ? 'invalid' : amountCents === invoice.total_cents ? 'valid' : 'invalid';
     const reason = duplicate ? 'duplicate-payment' : status === 'valid' ? undefined : 'amount-mismatch';
-    this.db.run('INSERT INTO payments (id, session_id, amount_cents, status, received_at) VALUES (:id, :session, :amount, :status, :received)', { ':id': paymentId, ':session': sessionId, ':amount': amountCents, ':status': status, ':received': new Date(this.clock()).toISOString() });
+    const receivedAt = new Date(this.clock()).toISOString();
+    this.db.transaction(() => {
+      this.db.run('INSERT OR IGNORE INTO payment_notifications (id, session_id, amount_cents, received_at, raw_json) VALUES (:id, :session, :amount, :received, :raw)', { ':id': paymentId, ':session': sessionId, ':amount': amountCents, ':received': receivedAt, ':raw': JSON.stringify({ paymentId, sessionId, amountCents }) });
+      this.db.run('INSERT INTO payment_validations (id, notification_id, status, reason, validated_at) VALUES (:id, :notification, :status, :reason, :validated)', { ':id': randomUUID(), ':notification': paymentId, ':status': status, ':reason': reason || null, ':validated': receivedAt });
+      this.db.run('INSERT OR IGNORE INTO payments (id, session_id, amount_cents, status, received_at) VALUES (:id, :session, :amount, :status, :received)', { ':id': paymentId, ':session': sessionId, ':amount': amountCents, ':status': status, ':received': receivedAt });
+    });
     if (status === 'valid') this.db.run('UPDATE overrides SET status = :invalidated WHERE session_id = :session AND status = :active', { ':invalidated': 'invalidated', ':session': sessionId, ':active': 'active' });
     this.audit.record('payment-recorded', 'payment', paymentId, { sessionId, amountCents, status, reason });
     return { id: paymentId, status: status as 'valid' | 'invalid', reason };
@@ -51,12 +59,12 @@ export class PaymentService {
       this.db.transaction(() => {
         if (this.db.get('SELECT id FROM overrides WHERE session_id = :session AND status = :status', { ':session': sessionId, ':status': 'active' })) throw new Error('override-already-active');
         this.db.run('INSERT INTO overrides (id, session_id, admin_user_id, reason, status, created_at) VALUES (:id, :session, :admin, :reason, :status, :created)', { ':id': id, ':session': sessionId, ':admin': actor.id, ':reason': reason.trim(), ':status': 'active', ':created': new Date(this.clock()).toISOString() });
+        this.audit.record('unpaid-release-authorized', 'override', id, { sessionId, reason: reason.trim() }, actor.id);
       });
     } catch (error) {
       if (String(error).includes('UNIQUE')) throw new Error('override-already-active');
       throw error;
     }
-    this.audit.record('unpaid-release-authorized', 'override', id, { sessionId, reason: reason.trim() }, actor.id);
     return { id, sessionId, status: 'active' as const };
   }
 
@@ -92,7 +100,8 @@ export class PaymentService {
     if (type === 'car_spot_action') {
       const plate = String(payload.CarName || payload.carName || payload.Plate || payload.plate || '');
       const destination = String(payload.SpotName || payload.spotName || payload.Destination || payload.destination || '').toLowerCase();
-      const session = this.db.get<{ id: string; status: string }>('SELECT id, status FROM parking_sessions WHERE plate = :plate ORDER BY started_at DESC LIMIT 1', { ':plate': plate });
+      const runId = this.db.get<{ value: string }>('SELECT value FROM meta WHERE key = :key', { ':key': 'run_id' })?.value;
+      const session = this.db.get<{ id: string; status: string }>('SELECT id, status FROM parking_sessions WHERE plate = :plate AND run_id = :run ORDER BY started_at DESC LIMIT 1', { ':plate': plate, ':run': runId || '' });
       if (session?.status === 'departure-pending' && destination.includes('exit')) await this.confirmDeparture(session.id);
     }
   }

@@ -19,6 +19,7 @@ export class ParkingService {
     this.db.transaction(() => {
       this.db.run('INSERT INTO meta (key, value) VALUES (:key, :value) ON CONFLICT(key) DO UPDATE SET value = excluded.value', { ':key': 'run_id', ':value': snapshot.runId });
       this.db.run('INSERT INTO meta (key, value) VALUES (:key, :value) ON CONFLICT(key) DO UPDATE SET value = excluded.value', { ':key': 'run_status', ':value': 'active' });
+      this.db.run('INSERT INTO meta (key, value) VALUES (:key, :value) ON CONFLICT(key) DO UPDATE SET value = excluded.value', { ':key': 'topology', ':value': JSON.stringify(snapshot.topology || []) });
       for (const spot of snapshot.spots) this.db.run('INSERT INTO spots (id, type, accessible, occupied, reserved, broken, under_maintenance, reachable, zone_safe, rank, run_id) VALUES (:id, :type, :accessible, :occupied, :reserved, :broken, :maintenance, :reachable, :safe, :rank, :run) ON CONFLICT(id) DO UPDATE SET type=excluded.type, accessible=excluded.accessible, occupied=excluded.occupied, broken=excluded.broken, under_maintenance=excluded.under_maintenance, reachable=excluded.reachable, zone_safe=excluded.zone_safe, rank=excluded.rank, run_id=excluded.run_id', { ':id': spot.id, ':type': spot.type, ':accessible': +spot.accessible, ':occupied': +spot.occupied, ':reserved': +spot.reserved, ':broken': +spot.broken, ':maintenance': +spot.underMaintenance, ':reachable': +spot.reachable, ':safe': +spot.zoneSafe, ':rank': spot.rank, ':run': snapshot.runId });
       const devices = [...(snapshot.components || []), ...(snapshot.barriers || []), ...(snapshot.lights || []), ...(snapshot.fans || []), ...(snapshot.alarms || [])];
       for (const device of devices) {
@@ -60,7 +61,8 @@ export class ParkingService {
     const plate = String(payload.CarName || payload.carName || payload.Plate || payload.plate || '');
     const spot = String(payload.SpotName || payload.spotName || payload.Destination || payload.destination || '');
     if (!plate) return;
-    const session = this.db.get<{ id: string; spot_id: string | null }>('SELECT id, spot_id FROM parking_sessions WHERE plate = :plate ORDER BY started_at DESC LIMIT 1', { ':plate': plate });
+    const runId = this.db.get<{ value: string }>('SELECT value FROM meta WHERE key = :key', { ':key': 'run_id' })?.value;
+    const session = this.db.get<{ id: string; spot_id: string | null }>('SELECT id, spot_id FROM parking_sessions WHERE plate = :plate AND run_id = :run ORDER BY started_at DESC LIMIT 1', { ':plate': plate, ':run': runId || '' });
     if (!session) return;
     if (spot.toLowerCase().includes('exit')) {
       const current = this.db.get<{ status: string }>('SELECT status FROM parking_sessions WHERE id = :id', { ':id': session.id });

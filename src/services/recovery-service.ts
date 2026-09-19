@@ -5,7 +5,23 @@ import { AuditService } from './audit.js';
 import type { ParkingService } from './parking-service.js';
 
 export class RecoveryService {
+  private timer: ReturnType<typeof setInterval> | undefined;
+  private reconciling = false;
+
   constructor(private readonly db: Database, private readonly gateway: SimulatorGateway, private readonly parking: ParkingService, private readonly audit = new AuditService(db)) {}
+
+  startAutomaticResume(intervalMs = 1000) {
+    if (this.timer) return;
+    this.timer = setInterval(() => {
+      if (this.meta('run_status') === 'reconciling' && !this.reconciling) {
+        this.reconciling = true;
+        void this.reconcile().finally(() => { this.reconciling = false; });
+      }
+    }, intervalMs);
+    this.timer.unref?.();
+  }
+
+  stopAutomaticResume() { if (this.timer) clearInterval(this.timer); this.timer = undefined; }
 
   private meta(key: string) { return this.db.get<{ value: string }>('SELECT value FROM meta WHERE key = :key', { ':key': key })?.value; }
   private setMeta(key: string, value: string) { this.db.run('INSERT INTO meta (key, value) VALUES (:key, :value) ON CONFLICT(key) DO UPDATE SET value = excluded.value', { ':key': key, ':value': value }); }
@@ -22,6 +38,8 @@ export class RecoveryService {
         return { status: 'ambiguous' as const, runId: snapshot.runId };
       }
       await this.parking.refreshSnapshot(snapshot);
+      if (!current) this.setMeta('run_id', snapshot.runId);
+      this.setMeta('run_status', 'active');
       this.audit.record('run-reconciled', 'simulator-run', snapshot.runId, {});
       return { status: 'resumed' as const, runId: snapshot.runId };
     } catch (error) {
@@ -33,8 +51,7 @@ export class RecoveryService {
 
   closeRun(actorId: string) {
     const runId = this.meta('run_id');
-    this.setMeta('run_status', 'closed');
-    this.audit.record('run-closed', 'simulator-run', runId, {}, actorId);
+    this.db.transaction(() => { this.setMeta('run_status', 'closed'); this.audit.record('run-closed', 'simulator-run', runId, {}, actorId); });
     return { status: 'closed' as const, runId };
   }
 
@@ -50,18 +67,23 @@ export class RecoveryService {
       }
       this.setMeta('run_id', runId);
       this.setMeta('run_status', 'active');
+      this.setMeta('last_sequence', '0');
+      this.setMeta('pending_run_id', '');
     });
-    this.audit.record('run-started', 'simulator-run', runId, { previousRunId: previous }, actorId);
+    this.db.transaction(() => this.audit.record('run-started', 'simulator-run', runId, { previousRunId: previous }, actorId));
     return { status: 'active' as const, runId };
   }
 
   continueRun(actorId: string) {
     if (this.meta('run_status') !== 'ambiguous') throw new Error('run-not-ambiguous');
     const runId = this.meta('pending_run_id') || this.meta('run_id');
-    this.setMeta('run_id', runId || 'unknown');
-    this.setMeta('pending_run_id', '');
-    this.setMeta('run_status', 'active');
-    this.audit.record('run-continued', 'simulator-run', runId, {}, actorId);
+    this.db.transaction(() => {
+      this.setMeta('run_id', runId || 'unknown');
+      this.setMeta('pending_run_id', '');
+      this.setMeta('last_sequence', '0');
+      this.setMeta('run_status', 'active');
+      this.audit.record('run-continued', 'simulator-run', runId, {}, actorId);
+    });
     return { status: 'active' as const, runId };
   }
 

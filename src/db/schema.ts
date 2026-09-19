@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE TABLE IF NOT EXISTS events (
   event_id TEXT PRIMARY KEY, type TEXT NOT NULL, sequence_id INTEGER NOT NULL,
   run_id TEXT, received_at TEXT NOT NULL, signature_valid INTEGER NOT NULL,
+  signature_digest TEXT NOT NULL,
   raw_json TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS events_sequence_idx ON events(sequence_id);
@@ -43,6 +44,14 @@ CREATE TABLE IF NOT EXISTS invoices (
 CREATE TABLE IF NOT EXISTS payments (
   id TEXT PRIMARY KEY, session_id TEXT NOT NULL, amount_cents INTEGER NOT NULL,
   status TEXT NOT NULL, received_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS payment_notifications (
+  id TEXT PRIMARY KEY, session_id TEXT NOT NULL, amount_cents INTEGER NOT NULL,
+  received_at TEXT NOT NULL, raw_json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS payment_validations (
+  id TEXT PRIMARY KEY, notification_id TEXT NOT NULL, status TEXT NOT NULL,
+  reason TEXT, validated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS overrides (
   id TEXT PRIMARY KEY, session_id TEXT NOT NULL, admin_user_id TEXT NOT NULL,

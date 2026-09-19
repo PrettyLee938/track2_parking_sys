@@ -68,11 +68,12 @@ export class HttpSimulatorGateway implements SimulatorGateway {
       if (!this.token) await this.login();
       const target = command.target.startsWith('/') ? command.target : `/api/v1/${command.target}`;
       const result = await this.request<{ id?: string }>(target, { method: 'POST', body: JSON.stringify(command.payload) });
-      return { accepted: true, externalId: result?.id, error: undefined };
+      return { accepted: true, outcome: 'accepted', externalId: result?.id, error: undefined };
     } catch (error) {
       const lastError = error instanceof Error ? error.message : String(error);
       this.state = { connected: false, runId: undefined, lastError, checkedAt: new Date().toISOString() };
-      return { accepted: false, externalId: undefined, error: lastError };
+      const rejected = lastError.startsWith('simulator-http-4');
+      return { accepted: false, outcome: rejected ? 'rejected' : 'unknown', externalId: undefined, error: lastError };
     }
   }
 

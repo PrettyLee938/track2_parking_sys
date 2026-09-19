@@ -13,6 +13,7 @@ describe('webhook event boundary', () => {
     expect(service.ingest(first).ordering).toBe('duplicate');
     const gap = signed({ EventId: 'e-3', SequenceId: '3', Type: 'test_webhook' });
     expect(service.ingest(gap).ordering).toBe('gap');
+    expect((service.list()[0] as { signature_digest: string }).signature_digest).toBe(signatureDigest(gap));
   });
 
   it('rejects invalid signatures before persistence', () => {

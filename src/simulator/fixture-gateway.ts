@@ -24,9 +24,9 @@ export class FixtureGateway implements SimulatorGateway {
   }
 
   async send(command: SimulatorCommand): Promise<CommandAcceptance> {
-    if (!this.connected) return { accepted: false, externalId: undefined, error: 'simulator-not-connected' };
+    if (!this.connected) return { accepted: false, outcome: 'unknown', externalId: undefined, error: 'simulator-not-connected' };
     this.commands.push(command);
-    return { accepted: true, externalId: `fixture-${command.id}`, error: undefined };
+    return { accepted: true, outcome: 'accepted', externalId: `fixture-${command.id}`, error: undefined };
   }
 
   async reconcile() {

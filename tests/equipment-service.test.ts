@@ -13,11 +13,11 @@ describe('equipment and environment controller', () => {
     const audit = new AuditService(db);
     const service = new EquipmentService(db, new CommandService(db, gateway, audit), audit);
     db.run("INSERT INTO meta (key, value) VALUES ('run_id', 'run-1'), ('run_status', 'active')");
-    service.applyEvent({ type: 'component_broken', payload: { ComponentId: 'fan-1', ComponentType: 'fan' } });
+    await service.applyEvent({ type: 'component_broken', payload: { ComponentId: 'fan-1', ComponentType: 'fan' } });
     expect((service.list()[0] as { status: string }).status).toBe('broken');
     const repair = await service.requestRepair('fan-1');
-    expect(repair.status).toBe('under-maintenance');
-    service.applyEvent({ type: 'component_fixed', payload: { ComponentId: 'fan-1' } });
+    expect(repair.status).toBe('repair-requested');
+    await service.applyEvent({ type: 'component_fixed', payload: { ComponentId: 'fan-1' } });
     expect((service.list()[0] as { status: string }).status).toBe('healthy');
   });
 
@@ -27,7 +27,7 @@ describe('equipment and environment controller', () => {
     const audit = new AuditService(db);
     const service = new EquipmentService(db, new CommandService(db, gateway, audit), audit, () => Date.now(), 50);
     db.run("INSERT INTO meta (key, value) VALUES ('run_id', 'run-1'), ('run_status', 'active')");
-    service.applyEvent({ type: 'carbon_monoxide_event', payload: { ZoneId: 'z1', CoLevel: 80 } });
+    await service.applyEvent({ type: 'carbon_monoxide_event', payload: { ZoneId: 'z1', CoLevel: 80 } });
     await expect(service.setFan('fan-1', false)).rejects.toThrow('fan-required-for-co');
   });
 });
