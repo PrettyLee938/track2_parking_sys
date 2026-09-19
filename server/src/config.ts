@@ -65,6 +65,9 @@ const schema = z.object({
   // ...and of each extra gate on the way to a zone further down the road (ENTRY1 -> ZONE2
   // also opens gate3): a gate cycle of wear and a longer drive.
   zoneRouteGateCost: num().nonnegative().default(0.15),
+  // A car on its way down the road holds the gates it still has to pass open for at most this
+  // long (GAME seconds) - the drive takes seconds; longer means its parking event was lost.
+  transitMaxGameS: num().positive().default(60),
 
   // ---- billing (spec: 1 per minute, x2 if electric) -------------------------
   // "planned" matched the simulator's own expected amount in 14/14 rejected bills at
@@ -156,6 +159,8 @@ const schema = z.object({
   // unless set here (0 = learn).
   preventiveMaintenance: bool().default(true),
   preventiveIdleRatio: num().min(0).max(1).default(0.8),
+  // A spot is only repaired early (before it is due) while its zone keeps more free spots than this.
+  spotRepairMinFree: num().int().min(0).default(3),
   // A worn-out gate is not opened until repaired. If no repair has started after this long
   // (GAME seconds) while cars wait, it is opened anyway: a breakdown beats a dead lane.
   wornWaitMaxGameS: num().positive().default(20),

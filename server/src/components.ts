@@ -255,10 +255,17 @@ export class ComponentRegistry implements Subsystem {
     }
   }
 
-  /** Whether cars are waiting on this part right now. */
+  /** Whether cars need this part right now (so an early repair would hurt). */
   private demand(p: Part): boolean {
-    if (p.kind !== "gate") return false;
     const { engine } = this;
+    if (p.kind === "spot") {
+      // Spots are "idle" whenever empty - but taking one out while its zone is nearly full
+      // turns cars away (04:02 run: a dozen spots in early repair while 70 cars/min were sent off).
+      const zone = engine.spots.get(p.name)?.zone;
+      const free = [...engine.spots.values()].filter((s) => s.zone === zone && s.available).length;
+      return free <= engine.cfg.spotRepairMinFree;
+    }
+    if (p.kind !== "gate") return false;
     return [...engine.entryLanes.values()].some((l) => l.gate === p.name && (l.queue.length > 0 || l.current !== null)) ||
       [...engine.exitLanes.values()].some((l) => l.gate === p.name && (l.releasing.size > 0 ||
         [...engine.cars.values()].some((c) => c.exit_lane === l.spot && ["at_exit", "invoiced"].includes(c.status))));

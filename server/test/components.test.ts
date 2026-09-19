@@ -183,6 +183,19 @@ describe("component health", () => {
     expect(sim.last()).toEqual(["open", "gateA"]);
   });
 
+  it("does not repair spots early while their zone is nearly full", async () => {
+    // 04:02 run: a dozen empty spots went into early repair while 70 cars/min were turned away.
+    const { c, sim } = await make({ cfg: { spotUseLimit: 12, spotRepairMinFree: 1 } });
+    for (let i = 0; i < 10; i++) await feed(c, carEv(`V${i}`, "S1", "CarIn", "10:00:00"), carEv(`V${i}`, "S1", "CarOut", "10:01:00"));
+    await c.handle(carEv("P", "S2", "CarIn", "10:02:00")); // S1 (10/12, empty) and S3 free: 2 free
+    c.spots.get("S3")!.reserved_for = "Q"; // now only S1 is free
+    await c.tick();
+    expect(repairs(sim)).toEqual([]); // the zone needs it
+    c.spots.get("S3")!.reserved_for = null;
+    await c.tick();
+    expect(repairs(sim)).toEqual([["repair", "S1"]]); // spare room again: repair it early
+  });
+
   it("lets out paid cars that waited through an exit gate's preventive repair", async () => {
     // 2026-09-20 03:03: gate2 went into preventive repair while idle; three cars paid during
     // it and were never let out once it was fixed - they left on their own minutes later.

@@ -193,7 +193,16 @@ pm run report:routes -w server); controller opens ALL route gates in order befor
   the stuck-goto "unreachable" learning now only fires if all route gates were open.
   **Fans reworked (user):** on at CO >= 50, off below 50 per zone; level read via list-zones every 15 game-s
   only while traffic or a fan runs (the sim sent ZERO carbon_monoxide_event webhooks in all runs); CO penalty
-  forces fans on until a clean reading. 118 tests. NEXT: live run with zone_balanced - expect ZONE2/3 to fill,
+  forces fans on until a clean reading.
+  **Run 03:56-04:12 (x5.8 speed) found + fixed:** the stuck-goto "unreachable" guess wrote ZONE2/3 off (0.7 real s
+  confirm window at x5.8) -> 291 turned away; now disabled when topology.routes exist. gate3/gate5 left open ->
+  closeForgottenGates() in tick closes any idle open lane gate after its hold; transit holds a gate max
+  GPA_TRANSIT_MAX_GAME_S. Spots were repaired early in batches while the zone was full -> early spot repair only
+  while the zone has > GPA_SPOT_REPAIR_MIN_FREE free. **Distribution decision (data):** keep zone_balanced, NOT
+  fill-zone-1-first: gate1 (shared entry) had 169 openings for 802 cars (held open across streams) but gate2 (ZONE1
+  EXIT) 247 openings / 31 repairs for 463 exits - exits close after every car, so the per-car wear is on exit gates;
+  spreading cars spreads exits over gate2/gate4/gate6. gate3/gate5 cost ~nothing (4-5 openings). Fill-first is
+  available as GPA_ALLOCATION_STRATEGY=lane_zone_then_any. 121 tests. NEXT: live run with zone_balanced - expect ZONE2/3 to fill,
   gate3/gate5 cycling (preventive repairs), fans switching by CO, 0 CO penalties. Lights (day/night) TODO.
   Then (was: live run to verify),
   then zone distribution (user wants a smarter spread across zones: full/broken-gate zones,
