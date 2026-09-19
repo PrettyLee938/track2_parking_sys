@@ -11,7 +11,7 @@ export function registerAuthRoutes(app: FastifyInstance, auth: AuthService, audi
       const result = await auth.login(body.username || '', body.password || '');
       audit.record('login', 'user', result.user.id, {}, result.user.id);
       reply.header('set-cookie', [`session=${result.token}; HttpOnly; SameSite=Strict; Path=/`, `csrf=${result.csrfToken}; SameSite=Strict; Path=/`]);
-      return { token: result.token, user: result.user };
+      return { user: result.user };
     } catch (error) {
       return reply.code(401).send({ error: error instanceof Error ? error.message : 'invalid-credentials' });
     }

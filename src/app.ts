@@ -62,9 +62,9 @@ export function buildApp(options: AppOptions = {}): { app: FastifyInstance; cont
   registerRecoveryRoutes(app, auth, recovery, commands);
   app.addHook('onReady', async () => {
     await auth.seedAdmin(config.adminUsername, config.adminInitialPassword);
+    recovery.beginStartupReconciliation();
     recovery.startAutomaticResume();
-    try { await gateway.login(); await parking.refreshSnapshot(await gateway.discover()); }
-    catch (error) { audit.record('simulator-connect-failed', 'simulator', undefined, { error: error instanceof Error ? error.message : String(error) }); }
+    if (recovery.status().status === 'reconciling') await recovery.reconcile();
   });
   app.addHook('onClose', async () => { recovery.stopAutomaticResume(); auth.invalidateAll(); if (ownsDb) db.close(); });
   return { app, context };

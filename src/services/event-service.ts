@@ -4,6 +4,7 @@ import { AuditService } from './audit.js';
 import { WebhookBoundary } from '../simulator/webhook-boundary.js';
 
 type Ordering = 'in-order' | 'duplicate' | 'gap' | 'out-of-order' | 'reset';
+export interface IngestResult { accepted: boolean; ordering: Ordering; event?: NormalizedEvent; readyEvents?: NormalizedEvent[]; reason?: string; }
 export class EventService {
   private readonly audit: AuditService;
 
@@ -11,7 +12,7 @@ export class EventService {
     this.audit = audit || new AuditService(db, clock);
   }
 
-  ingest(payload: Record<string, unknown>): { accepted: boolean; ordering: Ordering; event?: NormalizedEvent; reason?: string } {
+  ingest(payload: Record<string, unknown>): IngestResult {
     const envelope = this.boundary.accept(payload);
     const eventId = envelope.eventId;
     if (!envelope.valid) { const reason = envelope.reason || 'invalid-signature'; this.audit.record('webhook-rejected', 'event', eventId, { reason, calculatedDigest: envelope.calculatedDigest, payload }); return { accepted: false, ordering: 'out-of-order', reason }; }
@@ -24,17 +25,44 @@ export class EventService {
     const previousRun = this.db.get<{ value: string }>('SELECT value FROM meta WHERE key = :key', { ':key': 'run_id' })?.value;
     const previousSequence = previous ? Number(previous.value) : 0;
     const ordering: Ordering = runText && previousRun && runText !== previousRun ? 'reset' : sequenceId === 0 || previousSequence === 0 || sequenceId === previousSequence + 1 ? 'in-order' : sequenceId > previousSequence + 1 ? 'gap' : 'out-of-order';
-    this.db.run('INSERT INTO events (event_id, type, sequence_id, run_id, received_at, signature_valid, signature_digest, raw_json) VALUES (:id, :type, :sequence, :run, :received, 1, :digest, :raw)', { ':id': eventId, ':type': type, ':sequence': sequenceId, ':run': runText || null, ':received': receivedAt, ':digest': envelope.calculatedDigest, ':raw': JSON.stringify(payload) });
-    if (ordering === 'in-order') {
-      this.db.run('INSERT INTO meta (key, value) VALUES (:key, :value) ON CONFLICT(key) DO UPDATE SET value = excluded.value', { ':key': 'last_sequence', ':value': String(sequenceId) });
-      if (runText && !previousRun) this.db.run('INSERT INTO meta (key, value) VALUES (:key, :value) ON CONFLICT(key) DO UPDATE SET value = excluded.value', { ':key': 'run_id', ':value': runText });
+    const event = { eventId, type, sequenceId, runId: runText, receivedAt, payload };
+    this.db.transaction(() => {
+      this.db.run('INSERT INTO events (event_id, type, sequence_id, run_id, received_at, signature_valid, signature_digest, raw_json) VALUES (:id, :type, :sequence, :run, :received, 1, :digest, :raw)', { ':id': eventId, ':type': type, ':sequence': sequenceId, ':run': runText || null, ':received': receivedAt, ':digest': envelope.calculatedDigest, ':raw': JSON.stringify(payload) });
+      if (ordering === 'in-order') {
+        this.db.run('INSERT INTO meta (key, value) VALUES (:key, :value) ON CONFLICT(key) DO UPDATE SET value = excluded.value', { ':key': 'last_sequence', ':value': String(sequenceId) });
+        if (runText && !previousRun) this.db.run('INSERT INTO meta (key, value) VALUES (:key, :value) ON CONFLICT(key) DO UPDATE SET value = excluded.value', { ':key': 'run_id', ':value': runText });
+      }
+      if (ordering === 'reset') {
+        this.db.run('INSERT INTO meta (key, value) VALUES (:key, :value) ON CONFLICT(key) DO UPDATE SET value = excluded.value', { ':key': 'pending_run_id', ':value': runText || '' });
+        this.db.run('INSERT INTO meta (key, value) VALUES (:key, :value) ON CONFLICT(key) DO UPDATE SET value = excluded.value', { ':key': 'run_status', ':value': 'ambiguous' });
+      }
+      if (ordering === 'gap' || ordering === 'out-of-order') {
+        this.db.run('INSERT INTO meta (key, value) VALUES (:key, :value) ON CONFLICT(key) DO UPDATE SET value = excluded.value', { ':key': 'run_status', ':value': 'reconciling' });
+        this.db.run('INSERT INTO meta (key, value) VALUES (:key, :value) ON CONFLICT(key) DO UPDATE SET value = excluded.value', { ':key': 'reconcile_reason', ':value': 'sequence-gap' });
+      }
+      this.audit.record('webhook-accepted', 'event', eventId, { type, sequenceId, ordering });
+    });
+    if (ordering !== 'in-order') return { accepted: true, ordering, event };
+    const readyEvents = this.collectReady(event);
+    if (this.db.get<{ value: string }>('SELECT value FROM meta WHERE key = :key', { ':key': 'reconcile_reason' })?.value === 'sequence-gap') {
+      this.db.run('INSERT INTO meta (key, value) VALUES (:key, :value) ON CONFLICT(key) DO UPDATE SET value = excluded.value', { ':key': 'run_status', ':value': 'active' });
+      this.db.run('DELETE FROM meta WHERE key = :key', { ':key': 'reconcile_reason' });
     }
-    if (ordering === 'reset') {
-      this.db.run('INSERT INTO meta (key, value) VALUES (:key, :value) ON CONFLICT(key) DO UPDATE SET value = excluded.value', { ':key': 'pending_run_id', ':value': runText || '' });
-      this.db.run('INSERT INTO meta (key, value) VALUES (:key, :value) ON CONFLICT(key) DO UPDATE SET value = excluded.value', { ':key': 'run_status', ':value': 'ambiguous' });
+    return { accepted: true, ordering, event, readyEvents };
+  }
+
+  private collectReady(current: NormalizedEvent) {
+    if (current.sequenceId <= 0) return [current];
+    const rows = this.db.all<{ event_id: string; type: string; sequence_id: number; run_id: string | null; received_at: string; raw_json: string }>('SELECT event_id, type, sequence_id, run_id, received_at, raw_json FROM events WHERE sequence_id > :sequence AND ((run_id = :run) OR (:run IS NULL AND run_id IS NULL)) ORDER BY sequence_id', { ':sequence': current.sequenceId, ':run': current.runId || null });
+    const ready = [current];
+    let cursor = current.sequenceId;
+    for (const row of rows) {
+      if (row.sequence_id !== cursor + 1) break;
+      ready.push({ eventId: row.event_id, type: row.type, sequenceId: row.sequence_id, runId: row.run_id || undefined, receivedAt: row.received_at, payload: JSON.parse(row.raw_json) as Record<string, unknown> });
+      cursor = row.sequence_id;
     }
-    this.audit.record('webhook-accepted', 'event', eventId, { type, sequenceId, ordering });
-    return { accepted: true, ordering, event: { eventId, type, sequenceId, runId: runText, receivedAt, payload } };
+    if (cursor !== current.sequenceId) this.db.run('INSERT INTO meta (key, value) VALUES (:key, :value) ON CONFLICT(key) DO UPDATE SET value = excluded.value', { ':key': 'last_sequence', ':value': String(cursor) });
+    return ready;
   }
 
   list(limit = 100) { return this.db.all('SELECT * FROM events ORDER BY sequence_id DESC LIMIT :limit', { ':limit': limit }); }

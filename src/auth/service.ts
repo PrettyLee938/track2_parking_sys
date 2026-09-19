@@ -28,6 +28,8 @@ export class AuthService {
     return true;
   }
 
+  hasAdmin() { return Boolean(this.db.get('SELECT id FROM users WHERE role = :role AND active = 1', { ':role': 'admin' })); }
+
   verifyPassword(user: User, password: string) {
     const row = this.db.get<{ password_hash: string }>('SELECT password_hash FROM users WHERE id = :id AND active = 1', { ':id': user.id });
     return Boolean(row && verifyPassword(password, row.password_hash));

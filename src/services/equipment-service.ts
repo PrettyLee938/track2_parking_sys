@@ -17,7 +17,10 @@ export class EquipmentService {
       const level = Number(pick(event.payload, 'CoLevel', 'coLevel', 'CarbonMonoxide') || 0);
       this.save(`zone:${id}`, 'zone', 'observed', level, now, id);
       const fanId = pick(event.payload, 'FanId', 'fanId');
-      if (fanId) await this.setFan(String(fanId), level >= this.coThreshold);
+      if (fanId) {
+        try { await this.setFan(String(fanId), level >= this.coThreshold); }
+        catch (error) { this.audit.record('equipment-command-deferred', 'component', String(fanId), { reason: error instanceof Error ? error.message : String(error), coLevel: level }); }
+      }
     }
   }
 

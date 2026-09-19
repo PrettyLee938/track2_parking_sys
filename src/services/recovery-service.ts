@@ -23,6 +23,11 @@ export class RecoveryService {
 
   stopAutomaticResume() { if (this.timer) clearInterval(this.timer); this.timer = undefined; }
 
+  beginStartupReconciliation() {
+    const status = this.meta('run_status');
+    if (!status || status === 'active' || status === 'reconciling') this.setMeta('run_status', 'reconciling');
+  }
+
   private meta(key: string) { return this.db.get<{ value: string }>('SELECT value FROM meta WHERE key = :key', { ':key': key })?.value; }
   private setMeta(key: string, value: string) { this.db.run('INSERT INTO meta (key, value) VALUES (:key, :value) ON CONFLICT(key) DO UPDATE SET value = excluded.value', { ':key': key, ':value': value }); }
 
@@ -69,8 +74,8 @@ export class RecoveryService {
       this.setMeta('run_status', 'active');
       this.setMeta('last_sequence', '0');
       this.setMeta('pending_run_id', '');
+      this.audit.record('run-started', 'simulator-run', runId, { previousRunId: previous }, actorId);
     });
-    this.db.transaction(() => this.audit.record('run-started', 'simulator-run', runId, { previousRunId: previous }, actorId));
     return { status: 'active' as const, runId };
   }
 

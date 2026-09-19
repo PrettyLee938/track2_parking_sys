@@ -12,10 +12,12 @@ export function registerEquipmentRoutes(app: FastifyInstance, auth: AuthService,
   });
   app.post('/api/v1/equipment/:id/fan', { schema: schema.equipment }, async (request, reply) => {
     const user = await currentUser(request, reply, auth); if (!user) return;
-    return equipment.setFan((request.params as { id: string }).id, Boolean((request.body as { enabled?: boolean }).enabled), user.id);
+    try { return await equipment.setFan((request.params as { id: string }).id, Boolean((request.body as { enabled?: boolean }).enabled), user.id); }
+    catch (error) { return reply.code(409).send({ error: error instanceof Error ? error.message : 'fan-command-rejected' }); }
   });
   app.post('/api/v1/equipment/:id/light', { schema: schema.equipment }, async (request, reply) => {
     const user = await currentUser(request, reply, auth); if (!user) return;
-    return equipment.setLight((request.params as { id: string }).id, Boolean((request.body as { enabled?: boolean }).enabled), user.id);
+    try { return await equipment.setLight((request.params as { id: string }).id, Boolean((request.body as { enabled?: boolean }).enabled), user.id); }
+    catch (error) { return reply.code(409).send({ error: error instanceof Error ? error.message : 'light-command-rejected' }); }
   });
 }

@@ -9,11 +9,11 @@ import type { CommandService } from './command-service.js';
 export class PaymentService {
   constructor(private readonly db: Database, private readonly commands: CommandService, private readonly auth: AuthService, private readonly audit = new AuditService(db), private readonly clock = () => Date.now()) {}
 
-  private currentSession(sessionId: string) {
+  private currentSession(sessionId: string, allowReconciling = false) {
     const session = this.db.get<{ id: string; plate: string; status: string; run_id: string | null }>('SELECT id, plate, status, run_id FROM parking_sessions WHERE id = :id', { ':id': sessionId });
     const runId = this.db.get<{ value: string }>('SELECT value FROM meta WHERE key = :key', { ':key': 'run_id' })?.value;
     const runStatus = this.db.get<{ value: string }>('SELECT value FROM meta WHERE key = :key', { ':key': 'run_status' })?.value;
-    if (!session || session.run_id !== runId || runStatus !== 'active') throw new Error('session-not-current-run');
+    if (!session || session.run_id !== runId || (!allowReconciling && runStatus !== 'active')) throw new Error('session-not-current-run');
     return session;
   }
 
@@ -28,8 +28,8 @@ export class PaymentService {
     return { id, sessionId, ...total, status: 'open' as const };
   }
 
-  async recordPayment(sessionId: string, amountCents: number, paymentId: string = randomUUID()) {
-    this.currentSession(sessionId);
+  async recordPayment(sessionId: string, amountCents: number, paymentId: string = randomUUID(), allowReconciling = false) {
+    this.currentSession(sessionId, allowReconciling);
     const invoice = this.db.get<{ id: string; total_cents: number }>('SELECT id, total_cents FROM invoices WHERE session_id = :session ORDER BY created_at DESC LIMIT 1', { ':session': sessionId });
     if (!invoice) throw new Error('invoice-missing');
     const duplicate = this.db.get('SELECT id FROM payments WHERE session_id = :session AND status = :status', { ':session': sessionId, ':status': 'valid' });
@@ -40,9 +40,9 @@ export class PaymentService {
       this.db.run('INSERT OR IGNORE INTO payment_notifications (id, session_id, amount_cents, received_at, raw_json) VALUES (:id, :session, :amount, :received, :raw)', { ':id': paymentId, ':session': sessionId, ':amount': amountCents, ':received': receivedAt, ':raw': JSON.stringify({ paymentId, sessionId, amountCents }) });
       this.db.run('INSERT INTO payment_validations (id, notification_id, status, reason, validated_at) VALUES (:id, :notification, :status, :reason, :validated)', { ':id': randomUUID(), ':notification': paymentId, ':status': status, ':reason': reason || null, ':validated': receivedAt });
       this.db.run('INSERT OR IGNORE INTO payments (id, session_id, amount_cents, status, received_at) VALUES (:id, :session, :amount, :status, :received)', { ':id': paymentId, ':session': sessionId, ':amount': amountCents, ':status': status, ':received': receivedAt });
+      if (status === 'valid') this.db.run('UPDATE overrides SET status = :invalidated WHERE session_id = :session AND status = :active', { ':invalidated': 'invalidated', ':session': sessionId, ':active': 'active' });
+      this.audit.record('payment-recorded', 'payment', paymentId, { sessionId, amountCents, status, reason });
     });
-    if (status === 'valid') this.db.run('UPDATE overrides SET status = :invalidated WHERE session_id = :session AND status = :active', { ':invalidated': 'invalidated', ':session': sessionId, ':active': 'active' });
-    this.audit.record('payment-recorded', 'payment', paymentId, { sessionId, amountCents, status, reason });
     return { id: paymentId, status: status as 'valid' | 'invalid', reason };
   }
 
@@ -75,12 +75,16 @@ export class PaymentService {
     const override = this.db.get('SELECT id FROM overrides WHERE session_id = :session AND status = :status', { ':session': sessionId, ':status': 'active' });
     if (!paid && !override) throw new Error('payment-required');
     const command = await this.commands.issue({ kind: 'car.depart', target: `/api/v1/car/${encodeURIComponent(session.plate)}/goto/Exit`, payload: { plate: session.plate, destination: 'Exit', sessionId } }, actorId);
-    this.db.run('UPDATE parking_sessions SET status = :status WHERE id = :id', { ':status': 'departure-pending', ':id': sessionId });
+    if (command.status === 'rejected') throw new Error('departure-command-rejected');
+    this.db.transaction(() => {
+      this.db.run('UPDATE parking_sessions SET status = :status WHERE id = :id', { ':status': 'departure-pending', ':id': sessionId });
+      this.audit.record('departure-requested', 'parking-session', sessionId, { commandId: command.id }, actorId);
+    });
     return { sessionId, status: 'departure-pending' as const, commandId: command.id };
   }
 
-  async confirmDeparture(sessionId: string) {
-    this.currentSession(sessionId);
+  async confirmDeparture(sessionId: string, allowReconciling = false) {
+    this.currentSession(sessionId, allowReconciling);
     const endedAt = new Date(this.clock()).toISOString();
     this.db.transaction(() => {
       const session = this.db.get<{ spot_id: string | null }>('SELECT spot_id FROM parking_sessions WHERE id = :id', { ':id': sessionId });
@@ -95,14 +99,14 @@ export class PaymentService {
     if (type === 'payment_made') {
       const sessionId = String(payload.SessionId || payload.sessionId || '');
       const amount = Number(payload.AmountCents || payload.amountCents || payload.Amount || 0);
-      if (sessionId && Number.isFinite(amount)) await this.recordPayment(sessionId, amount, String(payload.EventId || payload.eventId || randomUUID()));
+      if (sessionId && Number.isFinite(amount)) await this.recordPayment(sessionId, amount, String(payload.EventId || payload.eventId || randomUUID()), true);
     }
     if (type === 'car_spot_action') {
       const plate = String(payload.CarName || payload.carName || payload.Plate || payload.plate || '');
       const destination = String(payload.SpotName || payload.spotName || payload.Destination || payload.destination || '').toLowerCase();
       const runId = this.db.get<{ value: string }>('SELECT value FROM meta WHERE key = :key', { ':key': 'run_id' })?.value;
       const session = this.db.get<{ id: string; status: string }>('SELECT id, status FROM parking_sessions WHERE plate = :plate AND run_id = :run ORDER BY started_at DESC LIMIT 1', { ':plate': plate, ':run': runId || '' });
-      if (session?.status === 'departure-pending' && destination.includes('exit')) await this.confirmDeparture(session.id);
+      if (session?.status === 'departure-pending' && destination.includes('exit')) await this.confirmDeparture(session.id, true);
     }
   }
 }

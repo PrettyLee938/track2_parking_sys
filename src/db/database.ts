@@ -2,6 +2,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { schema } from './schema.js';
+import { runMigrations } from './migrations.js';
 
 type Bindings = Record<string, unknown> | unknown[];
 
@@ -12,8 +13,7 @@ export class Database {
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
     this.connection = new DatabaseSync(path);
     this.connection.exec(schema);
-    const columns = this.connection.prepare('PRAGMA table_info(events)').all() as Array<{ name: string }>;
-    if (!columns.some((column) => column.name === 'signature_digest')) this.connection.exec('ALTER TABLE events ADD COLUMN signature_digest TEXT');
+    runMigrations(this.connection);
     this.connection.exec('PRAGMA foreign_keys = ON');
   }
 

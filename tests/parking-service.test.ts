@@ -16,9 +16,10 @@ describe('parking arrival controller', () => {
     const session = await parking.createArrival({ plate: 'ABC-123', type: 'electric', accessible: false, needsCharging: true });
     expect(session.spotId).toBe('E-1');
     expect(session.status).toBe('entry-pending');
-    expect((db.get<{ reserved: number }>('SELECT reserved FROM spots WHERE id = :id', { ':id': 'E-1' }))?.reserved).toBe(0);
+    expect((db.get<{ reserved: number }>('SELECT reserved FROM spots WHERE id = :id', { ':id': 'E-1' }))?.reserved).toBe(1);
     expect(gateway.commands[0]?.kind).toBe('car.goto');
     parking.applyEvent('car_spot_action', { Plate: 'ABC-123', Destination: 'E-1' });
     expect((parking.getSession(session.id) as { status: string }).status).toBe('parked');
+    expect((db.get<{ reserved: number }>('SELECT reserved FROM spots WHERE id = :id', { ':id': 'E-1' }))?.reserved).toBe(0);
   });
 });

@@ -14,6 +14,8 @@ describe('webhook event boundary', () => {
     const gap = signed({ EventId: 'e-3', SequenceId: '3', Type: 'test_webhook' });
     expect(service.ingest(gap).ordering).toBe('gap');
     expect((service.list()[0] as { signature_digest: string }).signature_digest).toBe(signatureDigest(gap));
+    const recovered = service.ingest(signed({ EventId: 'e-2', SequenceId: '2', Type: 'test_webhook' }));
+    expect(recovered.readyEvents?.map((event) => event.eventId)).toEqual(['e-2', 'e-3']);
   });
 
   it('rejects invalid signatures before persistence', () => {

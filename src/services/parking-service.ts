@@ -37,17 +37,29 @@ export class ParkingService {
     const currentRun = this.db.get<{ value: string }>('SELECT value FROM meta WHERE key = :key', { ':key': 'run_id' });
     const rows = this.db.all<Record<string, unknown>>('SELECT * FROM spots WHERE run_id = :run', { ':run': currentRun?.value || '' });
     const choice = chooseSpot({ carType: input.type, accessible: input.accessible, needsCharging: input.needsCharging, spots: rows.map(spotFromRow) });
-    if (!choice.spotId) throw new Error(choice.reason);
+    if (!choice.spotId) { this.audit.record('arrival-rejected', 'car', input.plate, { reason: choice.reason }); throw new Error(choice.reason); }
     const sessionId = randomUUID();
     const now = new Date(this.clock()).toISOString();
-    this.db.transaction(() => {
-      this.db.run('INSERT INTO cars (plate, type, accessible, created_at) VALUES (:plate, :type, :accessible, :created) ON CONFLICT(plate) DO UPDATE SET type=excluded.type, accessible=excluded.accessible', { ':plate': input.plate, ':type': input.type, ':accessible': +input.accessible, ':created': now });
-      const assigned = this.db.get('SELECT id FROM parking_sessions WHERE spot_id = :spot AND status IN (\'entry-pending\', \'parked\', \'at-exit\', \'departure-pending\')', { ':spot': choice.spotId });
-      if (assigned) throw new Error('spot-unavailable');
-      this.db.run('INSERT INTO parking_sessions (id, plate, status, spot_id, needs_charging, started_at, run_id) VALUES (:id, :plate, :status, :spot, :charging, :started, (SELECT value FROM meta WHERE key = :run))', { ':id': sessionId, ':plate': input.plate, ':status': 'entry-pending', ':spot': choice.spotId, ':charging': +input.needsCharging, ':started': now, ':run': 'run_id' });
-    });
-    const command = await this.commands.issue({ kind: 'car.goto', target: `/api/v1/car/${encodeURIComponent(input.plate)}/goto/${encodeURIComponent(choice.spotId)}`, payload: { plate: input.plate, destination: choice.spotId } }, actorId);
-    this.audit.record('arrival-allocated', 'parking-session', sessionId, { plate: input.plate, spotId: choice.spotId, commandId: command.id }, actorId);
+    try {
+      this.db.transaction(() => {
+        this.db.run('INSERT INTO cars (plate, type, accessible, created_at) VALUES (:plate, :type, :accessible, :created) ON CONFLICT(plate) DO UPDATE SET type=excluded.type, accessible=excluded.accessible', { ':plate': input.plate, ':type': input.type, ':accessible': +input.accessible, ':created': now });
+        const assigned = this.db.get('SELECT id FROM parking_sessions WHERE spot_id = :spot AND run_id = (SELECT value FROM meta WHERE key = :runKey) AND status IN (\'entry-pending\', \'parked\', \'at-exit\', \'departure-pending\')', { ':spot': choice.spotId, ':runKey': 'run_id' });
+        if (assigned) throw new Error('spot-unavailable');
+        this.db.run('INSERT INTO parking_sessions (id, plate, status, spot_id, needs_charging, started_at, run_id) VALUES (:id, :plate, :status, :spot, :charging, :started, (SELECT value FROM meta WHERE key = :run))', { ':id': sessionId, ':plate': input.plate, ':status': 'entry-pending', ':spot': choice.spotId, ':charging': +input.needsCharging, ':started': now, ':run': 'run_id' });
+        this.db.run('UPDATE spots SET reserved = 1 WHERE id = :spot AND run_id = (SELECT value FROM meta WHERE key = :runKey)', { ':spot': choice.spotId, ':runKey': 'run_id' });
+      });
+    } catch (error) { this.audit.record('arrival-rejected', 'car', input.plate, { reason: error instanceof Error ? error.message : String(error) }, actorId); throw error; }
+    let command;
+    try { command = await this.commands.issue({ kind: 'car.goto', target: `/api/v1/car/${encodeURIComponent(input.plate)}/goto/${encodeURIComponent(choice.spotId)}`, payload: { plate: input.plate, destination: choice.spotId } }, actorId); }
+    catch (error) {
+      this.db.transaction(() => { this.db.run('UPDATE parking_sessions SET status = :status WHERE id = :id', { ':status': 'entry-rejected', ':id': sessionId }); this.db.run('UPDATE spots SET reserved = 0 WHERE id = :spot', { ':spot': choice.spotId }); this.audit.record('arrival-rejected', 'parking-session', sessionId, { reason: error instanceof Error ? error.message : String(error) }, actorId); });
+      throw error;
+    }
+    if (command.status === 'rejected') {
+      this.db.transaction(() => { this.db.run('UPDATE parking_sessions SET status = :status WHERE id = :id', { ':status': 'entry-rejected', ':id': sessionId }); this.db.run('UPDATE spots SET reserved = 0 WHERE id = :spot', { ':spot': choice.spotId }); this.audit.record('arrival-rejected', 'parking-session', sessionId, { reason: 'simulator-command-rejected', commandId: command.id }, actorId); });
+      throw new Error('entry-command-rejected');
+    }
+    this.audit.record(command.status === 'unknown' ? 'arrival-command-unknown' : 'arrival-allocated', 'parking-session', sessionId, { plate: input.plate, spotId: choice.spotId, commandId: command.id }, actorId);
     return { id: sessionId, plate: input.plate, spotId: choice.spotId, status: 'entry-pending' as const, commandId: command.id };
   }
 

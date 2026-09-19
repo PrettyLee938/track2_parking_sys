@@ -7,7 +7,7 @@ export function registerWebhookRoutes(app: FastifyInstance, events: EventService
     const payload = (request.body || {}) as Record<string, unknown>;
     const result = events.ingest(payload);
     if (!result.accepted) return reply.code(401).send({ error: result.reason });
-    if (result.event && result.ordering === 'in-order') await controller.apply(result.event);
+    if (result.readyEvents) for (const event of result.readyEvents) await controller.apply(event);
     return reply.code(result.ordering === 'duplicate' ? 200 : 202).send({ accepted: true, ordering: result.ordering, replayRequired: result.ordering !== 'in-order' && result.ordering !== 'duplicate', eventId: result.event?.eventId });
   });
 }

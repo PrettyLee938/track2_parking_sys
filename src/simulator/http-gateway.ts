@@ -41,22 +41,28 @@ export class HttpSimulatorGateway implements SimulatorGateway {
   }
 
   async discover(): Promise<SimulatorSnapshot> {
-    if (!this.token) await this.login();
-    const [spots, barriers, lights, fans, alarms, zones, topology] = await Promise.all([
-      this.list<SpotCandidate>('/api/v1/parking-spots'),
-      this.optionalList<Record<string, unknown>>('/api/v1/barriers'),
-      this.optionalList<Record<string, unknown>>('/api/v1/lights'),
-      this.optionalList<Record<string, unknown>>('/api/v1/fans'),
-      this.optionalList<Record<string, unknown>>('/api/v1/alarms'),
-      this.optionalList<Record<string, unknown>>('/api/v1/zones'),
-      this.optionalList<Record<string, unknown>>('/api/v1/topology')
-    ]);
-    const status = await this.optionalStatus();
-    const runId = String(status?.runId || status?.RunId || 'unknown-run');
-    const components = [...barriers, ...lights, ...fans, ...alarms];
-    const snapshot = { runId, levelId: String(status?.levelId || status?.LevelId || 'lvl1'), spots, components, zones, barriers, lights, fans, alarms, topology };
+    try {
+      if (!this.token) await this.login();
+      const [spots, barriers, lights, fans, alarms, zones, topology] = await Promise.all([
+        this.list<SpotCandidate>('/api/v1/parking-spots'),
+        this.optionalList<Record<string, unknown>>('/api/v1/barriers'),
+        this.optionalList<Record<string, unknown>>('/api/v1/lights'),
+        this.optionalList<Record<string, unknown>>('/api/v1/fans'),
+        this.optionalList<Record<string, unknown>>('/api/v1/alarms'),
+        this.optionalList<Record<string, unknown>>('/api/v1/zones'),
+        this.optionalList<Record<string, unknown>>('/api/v1/topology')
+      ]);
+      const status = await this.optionalStatus();
+      const runId = String(status?.runId || status?.RunId || 'unknown-run');
+      const components = [...barriers, ...lights, ...fans, ...alarms];
+      const snapshot = { runId, levelId: String(status?.levelId || status?.LevelId || 'lvl1'), spots, components, zones, barriers, lights, fans, alarms, topology };
       this.state = { connected: true, runId, lastError: undefined, checkedAt: new Date().toISOString() };
-    return snapshot;
+      return snapshot;
+    } catch (error) {
+      const lastError = error instanceof Error ? error.message : String(error);
+      this.state = { connected: false, runId: undefined, lastError, checkedAt: new Date().toISOString() };
+      throw error;
+    }
   }
 
   private async optionalStatus() {

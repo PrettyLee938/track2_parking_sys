@@ -21,7 +21,8 @@ export function registerParkingRoutes(app: FastifyInstance, auth: AuthService, p
   app.post('/api/v1/parking/sessions/:id/payments', { schema: schema.payment }, async (request, reply) => {
     const user = await currentUser(request, reply, auth); if (!user) return;
     const body = request.body as { amountCents?: number; paymentId?: string }; const amountCents = body.amountCents; if (typeof amountCents !== 'number' || !Number.isInteger(amountCents)) return reply.code(400).send({ error: 'amountCents-required' });
-    return payments.recordPayment((request.params as { id: string }).id, amountCents, body.paymentId);
+    try { return await payments.recordPayment((request.params as { id: string }).id, amountCents, body.paymentId); }
+    catch (error) { return reply.code(409).send({ error: error instanceof Error ? error.message : 'payment-rejected' }); }
   });
 
   app.post('/api/v1/parking/sessions/:id/departure', { schema: schema.idParams }, async (request, reply) => {
