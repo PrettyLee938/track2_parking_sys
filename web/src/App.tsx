@@ -1,108 +1,92 @@
 /**
- * Starter dashboard (workstream 4 builds on this). Everything is typed against
- * @gpa/shared, so a change to the server's /api/state shape breaks the build here.
+ * Dashboard shell: sign-in gate, navigation by role, and the live state every page reads.
+ * Roles are enforced by the server; the UI only hides what a role cannot use.
  */
-import type { GateView, SpotView, StateSnapshot } from "@gpa/shared";
-import { useLiveState } from "./api";
+import { useEffect, useState } from "react";
+import { Badge, ToastProvider } from "./components/ui";
+import { AuthProvider, useAuth } from "./lib/auth";
+import { useLiveState } from "./lib/live";
+import { Admin } from "./pages/Admin";
+import { Login } from "./pages/Login";
+import { Logs } from "./pages/Logs";
+import { Operations } from "./pages/Operations";
+import { Overview } from "./pages/Overview";
+import { Stats } from "./pages/Stats";
+
+type Route = "overview" | "operations" | "logs" | "stats" | "admin";
+const ROUTES: { id: Route; label: string; adminOnly?: boolean }[] = [
+  { id: "overview", label: "Overview" },
+  { id: "operations", label: "Operations" },
+  { id: "logs", label: "Logs" },
+  { id: "stats", label: "Statistics" },
+  { id: "admin", label: "Admin", adminOnly: true },
+];
+
+/** The page in the URL hash (#/stats), so pages can be bookmarked and survive a reload. */
+function useHashRoute(): Route {
+  const read = () => (location.hash.replace(/^#\/?/, "") as Route) || "overview";
+  const [route, setRoute] = useState<Route>(read);
+  useEffect(() => {
+    const on = () => setRoute(read());
+    addEventListener("hashchange", on);
+    return () => removeEventListener("hashchange", on);
+  }, []);
+  return route;
+}
 
 export function App() {
-  const { state, error } = useLiveState();
   return (
-    <main>
-      <header>
-        <h1>Grand Park Auto</h1>
-        {state && (
-          <span className="meta">
-            {state.topology?.name ?? "no level loaded"} · game speed ×{state.time_scale.toFixed(2)} ({state.time_scale_source})
-            {" · "}{state.synced ? "synced" : "syncing…"}
-          </span>
-        )}
-      </header>
-      {error && <p className="banner">Server unreachable: {error}</p>}
-      {state ? <Dashboard s={state} /> : !error && <p className="muted">Loading…</p>}
-    </main>
+    <ToastProvider>
+      <AuthProvider>
+        <Root />
+      </AuthProvider>
+    </ToastProvider>
   );
 }
 
-function Dashboard({ s }: { s: StateSnapshot }) {
-  const c = s.counters;
-  const parkSpots = s.spots.filter((x) => x.purpose === "Park");
+function Root() {
+  const { user, loading } = useAuth();
+  if (loading) return <main className="splash muted">Loading…</main>;
+  return user ? <Shell /> : <Login />;
+}
+
+function Shell() {
+  const { user, signOut, can } = useAuth();
+  const route = useHashRoute();
+  const { state, connected } = useLiveState();
+  const visible = ROUTES.filter((r) => !r.adminOnly || can("admin"));
+  const current = visible.some((r) => r.id === route) ? route : "overview";
+
   return (
     <>
-      <section className="tiles">
-        <Tile label="Arrived" value={c.arrived} />
-        <Tile label="Admitted" value={c.admitted} />
-        <Tile label="Exited" value={c.exited} />
-        <Tile label="Revenue" value={c.revenue.toFixed(2)} />
-        <Tile label="Turned away" value={c.turned_away} warn={c.turned_away > 0} />
-        <Tile label="Gave up" value={c.neglected} warn={c.neglected > 0} />
-        <Tile label="Penalties" value={c.penalties} warn={c.penalties > 0} />
-      </section>
-
-      <section className="grid2">
-        <div className="card">
-          <h2>Zones</h2>
-          {Object.entries(s.zones).map(([name, z]) => (
-            <div key={name} className="zone">
-              <div className="zone-head"><strong>{name}</strong><span>{z.free} free / {z.total}</span></div>
-              <div className="bar">
-                <span className="occ" style={{ width: `${(z.occupied / z.total) * 100}%` }} />
-                <span className="res" style={{ width: `${(z.reserved / z.total) * 100}%` }} />
-                <span className="oos" style={{ width: `${(z.out_of_service / z.total) * 100}%` }} />
-              </div>
-            </div>
+      <header className="topbar">
+        <div className="brand">Grand Park Auto</div>
+        <nav>
+          {visible.map((r) => (
+            <a key={r.id} href={`#/${r.id}`} className={current === r.id ? "on" : ""} aria-current={current === r.id ? "page" : undefined}>{r.label}</a>
           ))}
+        </nav>
+        <div className="topbar-right">
+          {state && <span className="muted small">{state.topology?.name ?? "no level"} · ×{state.time_scale.toFixed(2)}</span>}
+          <Badge tone={connected ? "good" : "critical"} title={connected ? "Receiving live updates" : "Live updates interrupted - reconnecting"}>
+            {connected ? "Live" : "Offline"}
+          </Badge>
+          <span className="user">{user!.username} <Badge tone="info">{user!.role}</Badge></span>
+          <button className="btn ghost small" onClick={signOut}>Sign out</button>
         </div>
-        <div className="card">
-          <h2>Gates & lanes</h2>
-          <table>
-            <tbody>
-              {s.entry_lanes.map((l) => (
-                <tr key={l.spot}><td>Entry {l.spot}</td><td><GateBadge g={s.gates.find((g) => g.name === l.gate)} /></td>
-                  <td className="muted">{l.current ? `→ ${l.current}` : ""}{l.queue.length ? ` · ${l.queue.length} waiting` : ""}</td></tr>
-              ))}
-              {s.exit_lanes.map((l) => (
-                <tr key={l.spot}><td>Exit {l.spot}</td><td><GateBadge g={s.gates.find((g) => g.name === l.gate)} /></td>
-                  <td className="muted">{l.releasing.length ? `releasing ${l.releasing.join(", ")}` : ""}</td></tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </section>
-
-      <section className="card">
-        <h2>Spots</h2>
-        <div className="spots">{parkSpots.map((sp) => <SpotCell key={sp.name} sp={sp} />)}</div>
-      </section>
-
-      <section className="card">
-        <h2>Activity</h2>
-        <ol className="feed">
-          {[...s.feed].reverse().slice(0, 40).map((f, i) => (
-            <li key={i} className={f.level}><time>{new Date(f.at).toLocaleTimeString()}</time>{f.msg}</li>
-          ))}
-        </ol>
-      </section>
+      </header>
+      <main className="content">
+        {!state ? <p className="muted">Connecting to the control centre…</p> : (
+          <>
+            {!state.synced && <p className="banner">Waiting for the simulator - start it and load a level.</p>}
+            {current === "overview" && <Overview s={state} />}
+            {current === "operations" && <Operations s={state} />}
+            {current === "logs" && <Logs />}
+            {current === "stats" && <Stats spots={state.spots} />}
+            {current === "admin" && <Admin />}
+          </>
+        )}
+      </main>
     </>
-  );
-}
-
-const Tile = ({ label, value, warn }: { label: string; value: number | string; warn?: boolean }) => (
-  <div className={`tile${warn ? " warn" : ""}`}><span>{label}</span><strong>{value}</strong></div>
-);
-
-function GateBadge({ g }: { g?: GateView }) {
-  if (!g) return <span className="badge">no gate</span>;
-  const cls = g.broken || g.maintenance ? "bad" : g.state === "Open" ? "open" : "";
-  return <span className={`badge ${cls}`}>{g.name}: {g.broken ? "broken" : g.maintenance ? "maintenance" : g.state}</span>;
-}
-
-function SpotCell({ sp }: { sp: SpotView }) {
-  const cls = sp.broken || sp.maintenance ? "oos" : sp.occupant ? "occ" : sp.reserved_for ? "res" : "free";
-  const who = sp.occupant && sp.occupant !== "?" ? sp.occupant : sp.reserved_for ?? "";
-  return (
-    <div className={`spot ${cls}`} title={`${sp.name} (${sp.car_type}) ${who}`}>
-      <b>{sp.name}</b>{sp.car_type !== "Any" && <i>{sp.car_type[0]}</i>}
-    </div>
   );
 }

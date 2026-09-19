@@ -105,12 +105,41 @@ const schema = z.object({
   // looping (every ~2 game-minutes), not a new one: never bill it twice.
   repeatExitWindowGameS: num().nonnegative().default(600),
 
+  // ---- lost webhooks (GAME seconds) -------------------------------------------------
+  // Delivery is at-most-once (1 of 3,406 events lost in a Level 1 run) and a simulator
+  // restart makes cars vanish silently. A car record whose closing event never arrives
+  // is retired after these limits, so it cannot hold a spot, a lane or a gate forever.
+  // A paid, released car normally leaves ~1.5 game-s later. Until its exit CarOut
+  // arrives the exit gate is held open for it.
+  releaseTimeoutGameS: num().positive().default(20),
+  // A parked car normally leaves at its planned time; this much longer means we missed it.
+  parkedOverstayGameS: num().positive().default(300),
+  // Any other car (driving to or waiting at an exit) with no event for this long.
+  staleCarGameS: num().positive().default(600),
+
   // ---- our own timing (REAL seconds) ------------------------------------------------
   tickIntervalS: num().positive().default(0.5),
   maxChargeAttempts: num().int().min(1).default(3),
   maxDispatchRetries: num().int().min(0).default(1),
   // Close any open gate nobody is using when syncing (levels start with exit gates open).
   closeIdleGatesOnSync: bool().default(true),
+
+  // ---- dashboard accounts ----------------------------------------------------------
+  // On first start (no users yet) an admin account is created with this name. Its
+  // password is GPA_ADMIN_PASSWORD, or - if unset - generated and printed once in the log.
+  adminUsername: z.string().regex(/^[A-Za-z0-9_.-]{3,32}$/).default("admin"),
+  // Any length is accepted here (a short one gets a startup warning); accounts created in
+  // the dashboard need at least 8 characters.
+  adminPassword: z.string().min(1).optional(),
+  sessionTtlH: num().positive().default(12),
+  // Throttle guessing: after this many failed logins a username is locked for a while.
+  loginMaxFailures: num().int().min(1).default(5),
+  loginLockoutS: num().positive().default(60),
+  // Occupancy is sampled this often for the dashboard's time-series (kept in memory).
+  statsSampleS: num().positive().default(10),
+  statsSampleKeep: num().int().positive().default(720), // 2 hours at 10 s
+  // How often the live stream pushes a fresh snapshot to connected dashboards.
+  streamIntervalS: num().positive().default(1),
 
   // ---- storage & recovery ------------------------------------------------------
   dataDir: repoPath().default(path.resolve(REPO_ROOT, "data")),

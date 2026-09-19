@@ -1,10 +1,6 @@
-import Fastify from "fastify";
 import { describe, expect, it } from "vitest";
-import { registerRoutes } from "../src/app";
-import { Controller } from "../src/controller";
-import { Store } from "../src/store";
 import { computeSignature, Intake, parseRaw, signatureStatus } from "../src/webhook";
-import { FakeSim, LVL1, RecordingQueue, silentLog, testSettings } from "./helpers";
+import { testServer } from "./helpers";
 
 // The worked example from the simulator's webhook documentation.
 const SPEC_EXAMPLE = `{"EventClass":"car_spot_action","CarPlateNumber":"WAW 228","SpotName":"ENTRY1","SpotType":"EntrySpot",
@@ -45,14 +41,9 @@ describe("intake", () => {
 
 describe("HTTP", () => {
   async function server() {
-    const cfg = testSettings({ closeIdleGatesOnSync: false });
-    const store = new Store(":memory:");
-    const queue = new RecordingQueue();
-    const controller = new Controller({ sim: FakeSim.lvl1(), cfg, store, log: silentLog, topologies: [LVL1], queue });
-    await controller.sync();
-    const app = Fastify();
-    registerRoutes(app, { cfg, controller, store });
-    return { app, store, queue };
+    const { app, store, queue, signIn } = await testServer();
+    const cookie = await signIn("admin", "admin-password");
+    return { app, store, queue, cookie };
   }
 
   it("records a webhook, hands it to the controller and answers 200", async () => {
@@ -72,8 +63,8 @@ describe("HTTP", () => {
   });
 
   it("serves the dashboard state", async () => {
-    const { app } = await server();
-    const state = (await app.inject({ url: "/api/state" })).json();
+    const { app, cookie } = await server();
+    const state = (await app.inject({ url: "/api/state", headers: { cookie } })).json();
     expect(state).toMatchObject({ synced: true, topology: { name: "test-lvl1" } });
     expect(state.zones.ZONE1).toEqual({ total: 3, occupied: 0, reserved: 0, free: 3, out_of_service: 0 });
   });

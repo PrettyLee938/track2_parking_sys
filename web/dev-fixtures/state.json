@@ -1,0 +1,477 @@
+{
+ "synced": true,
+ "time_scale": 1.7,
+ "time_scale_source": "simulator settings",
+ "topology": {
+  "name": "lvl1",
+  "source": "C:\\Users\\Miro Or Kam Fat\\Downloads\\Smart Parking System\\track2_parking_sys\\topology\\lvl1.json"
+ },
+ "zones": {
+  "ZONE1": {
+   "total": 30,
+   "occupied": 12,
+   "reserved": 0,
+   "free": 17,
+   "out_of_service": 1
+  }
+ },
+ "spots": [
+  {
+   "name": "ENTRY1",
+   "zone": "",
+   "purpose": "EntrySpot",
+   "car_type": "Any",
+   "broken": false,
+   "maintenance": false,
+   "occupant": null,
+   "reserved_for": null,
+   "detected": 0,
+   "available": false
+  },
+  {
+   "name": "EXIT_EXIT",
+   "zone": "ZONE1",
+   "purpose": "ExitSpot",
+   "car_type": "Any",
+   "broken": false,
+   "maintenance": false,
+   "occupant": null,
+   "reserved_for": null,
+   "detected": 0,
+   "available": false
+  },
+  {
+   "name": "S1",
+   "zone": "ZONE1",
+   "purpose": "Park",
+   "car_type": "Any",
+   "broken": false,
+   "maintenance": false,
+   "occupant": null,
+   "reserved_for": null,
+   "detected": 0,
+   "available": true
+  },
+  {
+   "name": "S2",
+   "zone": "ZONE1",
+   "purpose": "Park",
+   "car_type": "Any",
+   "broken": false,
+   "maintenance": false,
+   "occupant": "?",
+   "reserved_for": null,
+   "detected": 1,
+   "available": false
+  },
+  {
+   "name": "S3",
+   "zone": "ZONE1",
+   "purpose": "Park",
+   "car_type": "Any",
+   "broken": false,
+   "maintenance": false,
+   "occupant": "?",
+   "reserved_for": null,
+   "detected": 1,
+   "available": false
+  },
+  {
+   "name": "S4",
+   "zone": "ZONE1",
+   "purpose": "Park",
+   "car_type": "Any",
+   "broken": false,
+   "maintenance": false,
+   "occupant": null,
+   "reserved_for": null,
+   "detected": 0,
+   "available": true
+  },
+  {
+   "name": "S5",
+   "zone": "ZONE1",
+   "purpose": "Park",
+   "car_type": "Any",
+   "broken": false,
+   "maintenance": false,
+   "occupant": "?",
+   "reserved_for": null,
+   "detected": 1,
+   "available": false
+  },
+  {
+   "name": "S6",
+   "zone": "ZONE1",
+   "purpose": "Park",
+   "car_type": "Any",
+   "broken": false,
+   "maintenance": false,
+   "occupant": null,
+   "reserved_for": null,
+   "detected": 0,
+   "available": true
+  },
+  {
+   "name": "S7",
+   "zone": "ZONE1",
+   "purpose": "Park",
+   "car_type": "Any",
+   "broken": false,
+   "maintenance": false,
+   "occupant": null,
+   "reserved_for": null,
+   "detected": 0,
+   "available": true
+  },
+  {
+   "name": "S8",
+   "zone": "ZONE1",
+   "purpose": "Park",
+   "car_type": "Any",
+   "broken": false,
+   "maintenance": false,
+   "occupant": "?",
+   "reserved_for": null,
+   "detected": 1,
+   "available": false
+  },
+  {
+   "name": "S9",
+   "zone": "ZONE1",
+   "purpose": "Park",
+   "car_type": "Any",
+   "broken": false,
+   "maintenance": false,
+   "occupant": "?",
+   "reserved_for": null,
+   "detected": 1,
+   "available": false
+  },
+  {
+   "name": "S10",
+   "zone": "ZONE1",
+   "purpose": "Park",
+   "car_type": "Any",
+   "broken": false,
+   "maintenance": false,
+   "occupant": null,
+   "reserved_for": null,
+   "detected": 0,
+   "available": true
+  },
+  {
+   "name": "S11",
+   "zone": "ZONE1",
+   "purpose": "Park",
+   "car_type": "Any",
+   "broken": false,
+   "maintenance": false,
+   "occupant": null,
+   "reserved_for": null,
+   "detected": 0,
+   "available": true
+  },
+  {
+   "name": "S12",
+   "zone": "ZONE1",
+   "purpose": "Park",
+   "car_type": "Any",
+   "broken": false,
+   "maintenance": false,
+   "occupant": "?",
+   "reserved_for": null,
+   "detected": 1,
+   "available": false
+  },
+  {
+   "name": "S13",
+   "zone": "ZONE1",
+   "purpose": "Park",
+   "car_type": "Any",
+   "broken": false,
+   "maintenance": false,
+   "occupant": null,
+   "reserved_for": null,
+   "detected": 0,
+   "available": true
+  },
+  {
+   "name": "S14",
+   "zone": "ZONE1",
+   "purpose": "Park",
+   "car_type": "Any",
+   "broken": false,
+   "maintenance": false,
+   "occupant": "?",
+   "reserved_for": null,
+   "detected": 1,
+   "available": false
+  },
+  {
+   "name": "S15",
+   "zone": "ZONE1",
+   "purpose": "Park",
+   "car_type": "Any",
+   "broken": false,
+   "maintenance": false,
+   "occupant": null,
+   "reserved_for": null,
+   "detected": 0,
+   "available": true
+  },
+  {
+   "name": "S16",
+   "zone": "ZONE1",
+   "purpose": "Park",
+   "car_type": "Any",
+   "broken": false,
+   "maintenance": false,
+   "occupant": null,
+   "reserved_for": null,
+   "detected": 0,
+   "available": true
+  },
+  {
+   "name": "S17",
+   "zone": "ZONE1",
+   "purpose": "Park",
+   "car_type": "Any",
+   "broken": false,
+   "maintenance": false,
+   "occupant": "?",
+   "reserved_for": null,
+   "detected": 1,
+   "available": false
+  },
+  {
+   "name": "S18",
+   "zone": "ZONE1",
+   "purpose": "Park",
+   "car_type": "Any",
+   "broken": false,
+   "maintenance": false,
+   "occupant": null,
+   "reserved_for": null,
+   "detected": 0,
+   "available": true
+  },
+  {
+   "name": "S19",
+   "zone": "ZONE1",
+   "purpose": "Park",
+   "car_type": "Any",
+   "broken": false,
+   "maintenance": false,
+   "occupant": null,
+   "reserved_for": null,
+   "detected": 0,
+   "available": true
+  },
+  {
+   "name": "S20",
+   "zone": "ZONE1",
+   "purpose": "Park",
+   "car_type": "Any",
+   "broken": false,
+   "maintenance": false,
+   "occupant": "?",
+   "reserved_for": null,
+   "detected": 1,
+   "available": false
+  },
+  {
+   "name": "S21",
+   "zone": "ZONE1",
+   "purpose": "Park",
+   "car_type": "Any",
+   "broken": false,
+   "maintenance": false,
+   "occupant": "?",
+   "reserved_for": null,
+   "detected": 1,
+   "available": false
+  },
+  {
+   "name": "S22",
+   "zone": "ZONE1",
+   "purpose": "Park",
+   "car_type": "Any",
+   "broken": false,
+   "maintenance": false,
+   "occupant": null,
+   "reserved_for": null,
+   "detected": 0,
+   "available": true
+  },
+  {
+   "name": "S23",
+   "zone": "ZONE1",
+   "purpose": "Park",
+   "car_type": "Any",
+   "broken": false,
+   "maintenance": true,
+   "occupant": null,
+   "reserved_for": null,
+   "detected": 0,
+   "available": false
+  },
+  {
+   "name": "S24",
+   "zone": "ZONE1",
+   "purpose": "Park",
+   "car_type": "Any",
+   "broken": false,
+   "maintenance": false,
+   "occupant": null,
+   "reserved_for": null,
+   "detected": 0,
+   "available": true
+  },
+  {
+   "name": "S25",
+   "zone": "ZONE1",
+   "purpose": "Park",
+   "car_type": "Any",
+   "broken": false,
+   "maintenance": false,
+   "occupant": "?",
+   "reserved_for": null,
+   "detected": 1,
+   "available": false
+  },
+  {
+   "name": "S26",
+   "zone": "ZONE1",
+   "purpose": "Park",
+   "car_type": "Any",
+   "broken": false,
+   "maintenance": false,
+   "occupant": null,
+   "reserved_for": null,
+   "detected": 0,
+   "available": true
+  },
+  {
+   "name": "S27",
+   "zone": "ZONE1",
+   "purpose": "Park",
+   "car_type": "Any",
+   "broken": false,
+   "maintenance": false,
+   "occupant": null,
+   "reserved_for": null,
+   "detected": 0,
+   "available": true
+  },
+  {
+   "name": "S28",
+   "zone": "ZONE1",
+   "purpose": "Park",
+   "car_type": "Any",
+   "broken": false,
+   "maintenance": false,
+   "occupant": "?",
+   "reserved_for": null,
+   "detected": 1,
+   "available": false
+  },
+  {
+   "name": "S29",
+   "zone": "ZONE1",
+   "purpose": "Park",
+   "car_type": "Any",
+   "broken": false,
+   "maintenance": false,
+   "occupant": null,
+   "reserved_for": null,
+   "detected": 0,
+   "available": true
+  },
+  {
+   "name": "S30",
+   "zone": "ZONE1",
+   "purpose": "Park",
+   "car_type": "Any",
+   "broken": false,
+   "maintenance": false,
+   "occupant": null,
+   "reserved_for": null,
+   "detected": 0,
+   "available": true
+  }
+ ],
+ "gates": [
+  {
+   "name": "gateA",
+   "zone": "ZONE1",
+   "state": "Closed",
+   "broken": false,
+   "maintenance": false,
+   "hold": null
+  },
+  {
+   "name": "gateB",
+   "zone": "ZONE1",
+   "state": "Closed",
+   "broken": false,
+   "maintenance": false,
+   "hold": null
+  },
+  {
+   "name": "gateC",
+   "zone": "",
+   "state": "Open",
+   "broken": false,
+   "maintenance": false,
+   "hold": null
+  }
+ ],
+ "entry_lanes": [
+  {
+   "spot": "ENTRY1",
+   "gate": "gateA",
+   "zone": "ZONE1",
+   "queue": [],
+   "current": null,
+   "closed": false
+  }
+ ],
+ "exit_lanes": [
+  {
+   "spot": "EXIT_EXIT",
+   "gate": "gateB",
+   "zone": "ZONE1",
+   "releasing": []
+  }
+ ],
+ "active_cars": [],
+ "recent_sessions": [],
+ "counters": {
+  "arrived": 0,
+  "admitted": 0,
+  "turned_away": 0,
+  "neglected": 0,
+  "exited": 0,
+  "revenue": 0,
+  "payment_mismatches": 0,
+  "repeat_exits": 0,
+  "ghosts_retired": 0,
+  "escaped": 0,
+  "penalties": 0,
+  "fines": 0,
+  "command_errors": 0
+ },
+ "feed": [
+  {
+   "at": "2026-09-19T09:51:31.361Z",
+   "level": "info",
+   "msg": "Synced 'lvl1': 1 entries, 1 exits, 30 park spots (17 free); tracking 0 cars; game speed 1.70 (simulator settings)"
+  },
+  {
+   "at": "2026-09-19T09:51:40.632Z",
+   "level": "info",
+   "msg": "admin created operator oper"
+  }
+ ]
+}

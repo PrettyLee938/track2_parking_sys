@@ -20,6 +20,8 @@ export interface SimApi {
   closeGate(name: string): Promise<void>;
   carGoto(plate: string, destination: string): Promise<void>;
   carCharge(plate: string, parkingCost: number, chargingCost: number): Promise<void>;
+  repairGate(name: string): Promise<void>;
+  repairSpot(name: string): Promise<void>;
 }
 
 export class SimClient implements SimApi {

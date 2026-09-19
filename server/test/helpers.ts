@@ -1,5 +1,8 @@
 /** Test doubles and event builders shared by the controller tests. */
+import Fastify from "fastify";
 import type { SimBarrier, SimParkingSpot } from "@gpa/shared";
+import { registerRoutes } from "../src/app";
+import { AuthService, hashPassword } from "../src/auth";
 import { loadSettings, type Settings } from "../src/config";
 import { Controller, type Logger } from "../src/controller";
 import type { Task, TaskQueue } from "../src/serialQueue";
@@ -26,6 +29,8 @@ export class FakeSim implements SimApi {
   async closeGate(n: string) { this.calls.push(["close", n]); }
   async carGoto(p: string, d: string) { this.calls.push(["goto", p, d]); }
   async carCharge(p: string, pc: number, cc: number) { this.calls.push(["charge", p, pc, cc]); }
+  async repairGate(n: string) { this.calls.push(["repair", n]); }
+  async repairSpot(n: string) { this.calls.push(["repair", n]); }
 
   charges() { return this.calls.filter((c) => c[0] === "charge"); }
   gotos() { return this.calls.filter((c) => c[0] === "goto"); }
@@ -36,6 +41,8 @@ export class FakeSim implements SimApi {
 export class RecordingQueue implements TaskQueue {
   tasks: Task[] = [];
   push(task: Task) { this.tasks.push(task); }
+  /** Manual commands run straight away: tests await them directly. */
+  run<T>(fn: () => Promise<T> | T): Promise<T> { return Promise.resolve(fn()); }
 }
 
 export function spot(name: string, purpose = "Park", zone = "ZONE1", carType = "Any", detected = 0): SimParkingSpot {
@@ -106,6 +113,33 @@ export async function make(opts: { sim?: FakeSim; topo?: Topology; topologies?: 
   const c = new Controller({ sim, cfg, store, queue, log: silentLog, topologies: opts.topologies ?? [opts.topo ?? LVL1] });
   await c.sync();
   return { c, sim, store, queue };
+}
+
+/**
+ * A Fastify app with routes, a synced controller and two accounts:
+ * admin / admin-password and oper / oper-password.
+ */
+export async function testServer(opts: { cfg?: Partial<Settings>; sim?: FakeSim } = {}) {
+  const cfg = testSettings({ closeIdleGatesOnSync: false, adminPassword: "admin-password", ...opts.cfg });
+  const store = new Store(":memory:");
+  const queue = new RecordingQueue();
+  const sim = opts.sim ?? FakeSim.lvl1();
+  const controller = new Controller({ sim, cfg, store, log: silentLog, topologies: [LVL1], queue });
+  await controller.sync();
+  const auth = new AuthService(store, cfg);
+  await auth.bootstrap();
+  store.createUser("oper", await hashPassword("oper-password"), "operator");
+  const app = Fastify();
+  registerRoutes(app, { cfg, controller, store, auth });
+
+  /** Sign in and return the Cookie header to send with later requests. */
+  const signIn = async (username: string, password: string) => {
+    const res = await app.inject({ method: "POST", url: "/api/auth/login", payload: JSON.stringify({ username, password }),
+      headers: { "content-type": "application/json" } });
+    if (res.statusCode !== 200) throw new Error(`sign-in failed: ${res.statusCode} ${res.body}`);
+    return String(res.headers["set-cookie"]).split(";")[0];
+  };
+  return { app, store, queue, sim, controller, auth, signIn };
 }
 
 /** Run every pending timer now, regardless of its delay. */

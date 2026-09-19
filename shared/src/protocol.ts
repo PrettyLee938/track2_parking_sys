@@ -67,10 +67,17 @@ export const PenaltyReason = {
   ChargeNotAtExit: "charged at the exit",
   // "Car is being charged wrongly with amount: (2.00). Car type is (Normal) so charge should be: (4.00)"
   ChargedWrongly: "charged wrongly",
+  // "Car:(ARA 545) attempted to park in an occupied spot:(S12)."
+  OccupiedSpot: "occupied spot",
+  // "Car has already paid for parking."
+  AlreadyPaid: "already paid",
 } as const;
 
 /** Extracts the correct amount from a ChargedWrongly penalty reason. */
 export const CORRECT_AMOUNT_PATTERN = /should be:\s*\(([\d.]+)\)/;
+
+/** Extracts the spot name from an OccupiedSpot penalty reason. */
+export const OCCUPIED_SPOT_PATTERN = /spot:\s*\(([^)]+)\)/i;
 
 // ---------------------------------------------------------------------------
 // Webhook payloads. Values are kept as the exact text the simulator sent (numbers

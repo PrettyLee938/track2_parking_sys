@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx watch src/main.ts",
+    "dev": "tsx src/main.ts",
+    "dev:watch": "tsx watch src/main.ts",
     "start": "tsx src/main.ts",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -14,7 +15,13 @@
     "single-car": "tsx tools/singleCarTest.ts",
     "report:timeline": "tsx tools/inspectRun.ts",
     "report:gates": "tsx tools/gateTimings.ts",
-    "report:turnaways": "tsx tools/turnAways.ts"
+    "report:turnaways": "tsx tools/turnAways.ts",
+    "report:plate": "tsx tools/plateHistory.ts",
+    "report:gaps": "tsx tools/gaps.ts",
+    "report:penalties": "tsx tools/penalties.ts",
+    "report:window": "tsx tools/window.ts",
+    "user:password": "tsx tools/setPassword.ts",
+    "fake-sim": "tsx tools/fakeSim.ts"
   },
   "dependencies": {
     "@gpa/shared": "^0.1.0",

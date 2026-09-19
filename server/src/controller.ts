@@ -23,17 +23,18 @@
  * so snapshot() can hand them to the dashboard as they are.
  */
 import {
-  CORRECT_AMOUNT_PATTERN, CarType, ComponentType, Destination, Direction, EventClass, GateState, PenaltyReason,
+  CORRECT_AMOUNT_PATTERN, OCCUPIED_SPOT_PATTERN, CarType, ComponentType, Destination, Direction, EventClass, GateState, PenaltyReason,
   SpotPurpose,
-  type CarStatus, type CarView, type Counters, type FeedItem, type FeedLevel, type SessionView, type SimParkingSpot,
-  type StateSnapshot, type TimeScaleSource, type ZoneSummary,
+  type CarStatus, type CarView, type ControlResult, type Counters, type FeedItem, type FeedLevel, type GateAction,
+  type GateHold, type SessionView, type SimParkingSpot, type StateSnapshot, type TimeScaleSource, type TimeseriesPoint,
+  type ZoneSummary,
 } from "@gpa/shared";
 import { getAllocator, spotNumber, type Allocator, type AllocSpot } from "./allocation";
 import { chargingCost, parkingCost } from "./billing";
 import { readSimGameSpeed, type Settings } from "./config";
 import { SerialQueue, type TaskQueue } from "./serialQueue";
 import type { SimApi } from "./simClient";
-import type { EventRecord, Store } from "./store";
+import type { ActionRecord, EventRecord, Store } from "./store";
 import { matches, resolve as resolveTopology, type Topology } from "./topology";
 
 export interface Logger {
@@ -70,21 +71,36 @@ const median = (xs: number[]) => {
 
 const str = (e: EventRecord, k: string) => (e[k] as string | undefined) ?? undefined;
 
+const ok = (message: string): ControlResult => ({ ok: true, message });
+const fail = (message: string): ControlResult => ({ ok: false, message });
+
 // =============================================================================
 // state
 // =============================================================================
 export class Spot implements AllocSpot {
   broken = false;
   maintenance = false;
-  occupant: string | null = null;     // plate physically in the spot ("?" = unknown car)
+  /**
+   * Plates physically in the spot ("?" = a car we cannot name). Normally 0 or 1 - but the
+   * simulator lets a second car park in an occupied spot (it only fines it), and if we kept
+   * a single plate, the first car leaving would mark the spot free while the other is
+   * still in it: every car sent there next is fined too.
+   */
+  readonly occupants = new Set<string>();
   reserved_for: string | null = null; // plate sent here but not arrived yet
   detected = 0;                       // car count from the last list-parking-spots
 
   constructor(readonly name: string, public zone: string, readonly purpose: string, readonly car_type: string) {}
 
+  /** A named occupant if there is one, "?" for an unknown car, null when empty. */
+  get occupant(): string | null {
+    for (const p of this.occupants) if (p !== "?") return p;
+    return this.occupants.size ? "?" : null;
+  }
+
   get available(): boolean {
     return this.purpose === SpotPurpose.Park && !this.broken && !this.maintenance &&
-      this.occupant === null && this.reserved_for === null;
+      this.occupants.size === 0 && this.reserved_for === null;
   }
 
   accepts(carType: string): boolean {
@@ -99,6 +115,7 @@ export class Gate {
   broken = false;
   maintenance = false;
   onOpen: Callback[] = [];              // run once the gate reports Open
+  hold: GateHold = null;                // operator override: held open/closed until back to automatic
   openRequestedAt: number | null = null;
   openRetries = 0;
 
@@ -115,6 +132,7 @@ export interface EntryLane {
   zone: string;
   queue: string[];         // plates waiting, FIFO
   current: string | null;  // plate dispatched, not yet off the sensor
+  closed: boolean;         // closed by an admin: arriving cars are turned away
 }
 
 export interface ExitLane {
@@ -130,6 +148,8 @@ export interface Car extends CarView {
   dispatchedReal: number | null;
   parkedReal: number | null;
   leftSpotReal: number | null;
+  releasedReal: number | null;   // when the exit gate was opened for it
+  lastSeenReal: number | null;   // last event about this plate
   dispatchRetries: number;
   chargeScheduled: boolean;
 }
@@ -140,14 +160,15 @@ function newCar(plate: string, carType: string, planned: number | null, status: 
     entry_lane: null, exit_lane: null, arrived_at: null, spot: null, parked_at: null, left_spot_at: null,
     exit_at: null, charge_parking: null, charge_electric: null, charge_attempts: 0, charge_override: null,
     paid: null, payment_ok: null, left_at: null,
-    arrivedReal: null, dispatchedReal: null, parkedReal: null, leftSpotReal: null, dispatchRetries: 0,
-    chargeScheduled: false,
+    arrivedReal: null, dispatchedReal: null, parkedReal: null, leftSpotReal: null, releasedReal: null,
+    lastSeenReal: null, dispatchRetries: 0, chargeScheduled: false,
     ...extra,
   };
 }
 
 export function publicCar(c: Car): CarView {
-  const { arrivedReal, dispatchedReal, parkedReal, leftSpotReal, dispatchRetries, chargeScheduled, ...view } = c;
+  const { arrivedReal, dispatchedReal, parkedReal, leftSpotReal, releasedReal, lastSeenReal, dispatchRetries, chargeScheduled,
+    ...view } = c;
   return view;
 }
 
@@ -207,7 +228,7 @@ export class Controller {
   feed: FeedItem[] = [];
   counters: Counters = {
     arrived: 0, admitted: 0, turned_away: 0, neglected: 0, exited: 0, revenue: 0, payment_mismatches: 0,
-    repeat_exits: 0, escaped: 0, penalties: 0, fines: 0, command_errors: 0,
+    repeat_exits: 0, ghosts_retired: 0, escaped: 0, penalties: 0, fines: 0, command_errors: 0,
   };
 
   constructor(deps: ControllerDeps) {
@@ -326,7 +347,7 @@ export class Controller {
         topologyDir: this.cfg.topologyDir, simLevelsDir: this.cfg.simLevelsDir,
         maxGateDistance: this.cfg.topologyMaxGateDistance, candidates: this.topologyCandidates, log: this.log,
       });
-      this.entryLanes = new Map(this.topology.entry_lanes.map((l) => [l.spot, { ...l, queue: [], current: null }]));
+      this.entryLanes = new Map(this.topology.entry_lanes.map((l) => [l.spot, { ...l, queue: [], current: null, closed: false }]));
       this.exitLanes = new Map(this.topology.exit_lanes.map((l) => [l.spot, { ...l, releasing: new Set<string>() }]));
     }
 
@@ -387,22 +408,78 @@ export class Controller {
     this.exitLanes = new Map();
   }
 
-  /** Feed recent logged events back through the handlers with commands disabled. */
+  /**
+   * Rebuild state after a restart: recent webhooks AND the commands we sent, merged in time
+   * order. Events go through the handlers (what happened); our own decisions are taken from
+   * the recorded commands (where a car was sent, what it was charged, when it was released),
+   * never re-made - replaying events alone forgot every charge, so cars that had already
+   * paid were billed again ("Car has already paid for parking").
+   */
   async replay(): Promise<void> {
-    const records = this.store.eventsSince(Date.now() - this.cfg.replayWindowS * 1000);
-    const newest = records.reduce((m, r) => Math.max(m, tsOf(r._received_at) ?? 0), 0);
+    const since = Date.now() - this.cfg.replayWindowS * 1000;
+    const events = this.store.eventsSince(since);
+    const newest = events.reduce((m, r) => Math.max(m, tsOf(r._received_at) ?? 0), 0);
     if (nowS() - newest > this.cfg.replayMaxGapS) {
       this.log.info(`event log is ${newest ? `${Math.round(nowS() - newest)}s` : "empty/too"} old - ` +
         "simulator likely restarted since; starting fresh");
       return;
     }
+    const actions = this.store.actionsSince(since).filter((a) => a.ok && (a.cmd === "goto" || a.cmd === "charge"));
+    const timeline = [
+      ...events.map((e) => ({ t: tsOf(e._received_at) ?? 0, event: e as EventRecord | null, action: null as ActionRecord | null })),
+      ...actions.map((a) => ({ t: tsOf(a.at) ?? 0, event: null, action: a })),
+    ].sort((a, b) => a.t - b.t);
     this.replaying = true;
     try {
-      for (const r of records) await this.handle(r);
+      for (const item of timeline) {
+        if (item.event) await this.handle(item.event);
+        else this.applyRecordedAction(item.action!);
+      }
     } finally {
       this.replaying = false;
     }
-    this.log.info(`replayed ${records.length} events`);
+    this.log.info(`replayed ${events.length} events and ${actions.length} commands`);
+  }
+
+  /** Re-apply a decision we made before the restart, exactly as it was made. */
+  private applyRecordedAction(a: ActionRecord) {
+    const plate = a.args[0];
+    const car = this.cars.get(plate);
+    if (!car) return;
+    const t = tsOf(a.at);
+    if (a.cmd === "charge") { // args: plate, parkingCost, chargingCost
+      car.charge_parking = Number(a.args[1]);
+      car.charge_electric = Number(a.args[2]) || 0;
+      car.charge_attempts++;
+      if (!["released", "payment_mismatch", "gone"].includes(car.status)) car.status = "invoiced";
+      return;
+    }
+    const target = a.args[1]; // goto args: plate, destination
+    const lane = car.entry_lane ? this.entryLanes.get(car.entry_lane) : undefined;
+    const notYetIn = car.status === "queued" || car.status === "dispatching";
+    if (target === Destination.LeavePark) {
+      if (notYetIn) { // turned away at the entry
+        if (lane) lane.queue = lane.queue.filter((p) => p !== plate);
+        car.status = "turned_away";
+        this.counters.turned_away++;
+      } else { // released at an exit
+        car.status = "released";
+        car.releasedReal = t;
+        if (car.exit_lane) this.exitLanes.get(car.exit_lane)?.releasing.add(plate);
+      }
+    } else if (target !== Destination.Exit) { // sent to a parking spot
+      if (lane) {
+        lane.queue = lane.queue.filter((p) => p !== plate);
+        if (notYetIn || car.status === "dispatched") lane.current = plate;
+      }
+      const previous = car.spot ? this.spots.get(car.spot) : undefined;
+      if (previous?.reserved_for === plate) previous.reserved_for = null;
+      const spot = this.spots.get(target);
+      if (spot && !spot.occupants.has(plate)) spot.reserved_for = plate;
+      car.spot = target;
+      if (notYetIn) { car.status = "dispatched"; this.counters.admitted++; }
+      car.dispatchedReal = t;
+    }
   }
 
   /** Make replayed/remembered state agree with what the sensors report right now.
@@ -411,12 +488,14 @@ export class Controller {
     if (startup) this.reconcileLanes();
     for (const s of this.spots.values()) {
       if (s.purpose !== SpotPurpose.Park) continue;
-      if (s.detected && !s.occupant) {
-        s.occupant = "?";
-      } else if (!s.detected && s.occupant) {
-        const car = this.cars.get(s.occupant);
-        if (car && car.status === "parked") this.cars.delete(car.plate);
-        s.occupant = null;
+      if (s.detected && !s.occupants.size) {
+        s.occupants.add("?");
+      } else if (!s.detected && s.occupants.size) {
+        for (const p of s.occupants) {
+          const car = this.cars.get(p);
+          if (car && car.status === "parked") this.cars.delete(car.plate);
+        }
+        s.occupants.clear();
       }
     }
     for (const car of [...this.cars.values()]) {
@@ -430,14 +509,19 @@ export class Controller {
 
   private reconcileLanes() {
     const now = nowS();
-    for (const s of this.spots.values()) s.reserved_for = null; // nobody is mid-dispatch after a (re)start
+    // A car sent to a spot just before a restart is still driving there: keep its
+    // reservation. (Clearing it let the next car be sent to the same spot - two cars in
+    // one spot, and a fine for every car sent there after.)
+    const onTheWay = (plate: string | null) => {
+      const car = plate ? this.cars.get(plate) : undefined;
+      return !!car && (MID_ENTRY.includes(car.status) || car.status === "entering");
+    };
+    for (const s of this.spots.values()) {
+      if (s.reserved_for && (!onTheWay(s.reserved_for) || this.cars.get(s.reserved_for)?.spot !== s.name)) s.reserved_for = null;
+    }
     for (const lane of this.entryLanes.values()) {
       const sensor = this.spots.get(lane.spot);
-      if (lane.current) {
-        const car = this.cars.get(lane.current);
-        if (car && MID_ENTRY.includes(car.status)) this.cars.delete(car.plate);
-        lane.current = null;
-      }
+      if (lane.current && !onTheWay(lane.current)) lane.current = null;
       lane.queue = lane.queue.filter((plate) => {
         const car = this.cars.get(plate);
         const alive = !!car && !!sensor?.detected &&
@@ -468,13 +552,16 @@ export class Controller {
     }
 
     switch (e.EventClass) {
-      case EventClass.CarSpotAction: return this.routeCarEvent(e);
-      case EventClass.GateAction: return this.onGate(e);
-      case EventClass.PaymentMade: return this.onPayment(e);
-      case EventClass.ComponentBroken: return this.onComponent(e, true);
-      case EventClass.ComponentFixed: return this.onComponent(e, false);
-      case EventClass.Penalty: return this.onPenalty(e);
+      case EventClass.CarSpotAction: await this.routeCarEvent(e); break;
+      case EventClass.GateAction: await this.onGate(e); break;
+      case EventClass.PaymentMade: await this.onPayment(e); break;
+      case EventClass.ComponentBroken: await this.onComponent(e, true); break;
+      case EventClass.ComponentFixed: await this.onComponent(e, false); break;
+      case EventClass.Penalty: await this.onPenalty(e); break;
     }
+    // Stale-record detection (sweepGhosts) measures silence from here.
+    const car = this.cars.get(str(e, "CarPlateNumber") ?? "");
+    if (car) car.lastSeenReal = tsOf(e._received_at) ?? nowS();
   }
 
   private async routeCarEvent(e: EventRecord): Promise<void> {
@@ -542,6 +629,12 @@ export class Controller {
     });
     this.cars.set(plate, car);
     this.counters.arrived++;
+    this.recentPaid.delete(plate); // came in through an entry: a new visit, billed normally
+    if (this.replaying) { // what happened next is in the recorded commands
+      lane.queue.push(plate);
+      return;
+    }
+    if (lane.closed) return this.turnAway(car, `entrance ${lane.spot} is closed`);
 
     // Spots are reserved at dispatch time, so every car already queued for the same
     // pool of spots still needs one.
@@ -557,7 +650,7 @@ export class Controller {
 
   /** Dispatch the head of the lane's queue if the lane is free. */
   async pumpEntry(lane: EntryLane): Promise<void> {
-    if (lane.current || !lane.queue.length) return;
+    if (this.replaying || lane.current || !lane.queue.length) return; // replay: decisions come from the log
     const gate = lane.gate ? this.gates.get(lane.gate) : undefined;
     if (lane.gate && (!gate || !gate.operable)) return; // held; onComponent() pumps again once fixed
     const plate = lane.queue.shift()!;
@@ -567,6 +660,9 @@ export class Controller {
       await this.turnAway(car, "no suitable spot");
       return this.pumpEntry(lane);
     }
+    // #region agent log
+    fetch('http://127.0.0.1:7502/ingest/5b601716-2241-46fc-9c1b-1aa5e55ae0bd',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'6f1c01'},body:JSON.stringify({sessionId:'6f1c01',hypothesisId:'A',location:'controller.ts:pumpEntry',message:'dispatch reserve',data:{plate,spot:spot.name,available:spot.available,occupants:[...spot.occupants],reserved_for:spot.reserved_for,detected:spot.detected,lane:lane.spot,queueLen:lane.queue.length,current:lane.current,timeScale:this.timeScale,qDepth:(this.queue as {depth?:number}).depth},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
     spot.reserved_for = plate;
     car.spot = spot.name;
     car.status = "dispatching";
@@ -621,6 +717,10 @@ export class Controller {
     const plate = str(e, "CarPlateNumber")!, name = str(e, "SpotName")!;
     let spot = this.spots.get(name);
     if (!spot) this.spots.set(name, (spot = new Spot(name, "", SpotPurpose.Park, CarType.Any)));
+    // Another car already in this spot does NOT mean it left: the simulator lets a second
+    // car park on top (and fines it). Both stay recorded until each one's CarOut.
+    const others = [...spot.occupants].filter((p) => p !== plate && p !== "?");
+    if (others.length) this.note("error", `${plate} parked in ${name}, which still holds ${others.join(", ")}`);
     const car = this.cars.get(plate) ?? this.adopt(e);
     if (car.spot && car.spot !== name) {
       this.note("warn", `${plate} parked in ${name}, was sent to ${car.spot}`);
@@ -628,7 +728,7 @@ export class Controller {
       if (other?.reserved_for === plate) other.reserved_for = null;
     }
     if (spot.reserved_for === plate) spot.reserved_for = null;
-    spot.occupant = plate;
+    spot.occupants.add(plate);
     car.spot = name;
     car.status = "parked";
     car.parked_at = e.ServerDateTime ?? null;
@@ -645,7 +745,10 @@ export class Controller {
   private async onSpotOut(e: EventRecord) {
     const plate = str(e, "CarPlateNumber")!, name = str(e, "SpotName")!;
     const spot = this.spots.get(name);
-    if (spot && (spot.occupant === plate || spot.occupant === "?")) spot.occupant = null;
+    if (spot) {
+      if (spot.occupants.has(plate)) spot.occupants.delete(plate);
+      else spot.occupants.delete("?"); // the car we could not name has left
+    }
     const car = this.cars.get(plate) ?? this.adopt(e);
     car.left_spot_at = e.ServerDateTime ?? null;
     car.leftSpotReal = tsOf(e._received_at);
@@ -661,11 +764,40 @@ export class Controller {
   // ---------------------------------------------------------------------------
   // exit & payment
   // ---------------------------------------------------------------------------
+  /**
+   * Spots beyond the exit sensor (S15, S30 on Level 1) are reached by driving over it: a
+   * car on its way IN fires exit CarIn/CarOut and parks in the same second. Treating that
+   * as leaving closed its record ("left without being released"), so its real exit later
+   * looked like a paid car looping and it was let out unbilled - an escape penalty.
+   */
+  private drivingIn(plate: string): boolean {
+    const car = this.cars.get(plate);
+    return !!car && (MID_ENTRY.includes(car.status) || car.status === "entering");
+  }
+
   private async onExitIn(e: EventRecord, lane: ExitLane) {
     const plate = str(e, "CarPlateNumber")!;
+    if (this.drivingIn(plate)) {
+      const inbound = this.cars.get(plate);
+      // #region agent log
+      fetch('http://127.0.0.1:7502/ingest/5b601716-2241-46fc-9c1b-1aa5e55ae0bd',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'6f1c01'},body:JSON.stringify({sessionId:'6f1c01',hypothesisId:'D',location:'controller.ts:onExitIn',message:'ignored exit CarIn while driving in',data:{plate,status:inbound?.status??null,spot:inbound?.spot??null,lane:lane.spot},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
+      return;
+    }
     const car = this.cars.get(plate) ?? this.adopt(e);
+    // #region agent log
+    fetch('http://127.0.0.1:7502/ingest/5b601716-2241-46fc-9c1b-1aa5e55ae0bd',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'6f1c01'},body:JSON.stringify({sessionId:'6f1c01',hypothesisId:'D',location:'controller.ts:onExitIn',message:'exit CarIn',data:{plate,status:car.status,spot:car.spot,charge_parking:car.charge_parking,lane:lane.spot,recentPaid:this.recentPaid.has(plate),timeScale:this.timeScale},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
     car.exit_lane = lane.spot;
     car.exit_at = e.ServerDateTime ?? null;
+    // A car at the exit is no longer in its spot, whether or not we saw it leave. (From a
+    // spot next to the exit the spot CarOut simply arrives ~0.2s later; if it was lost,
+    // this is what frees the spot.)
+    const held = car.spot ? this.spots.get(car.spot) : undefined;
+    if (held?.occupants.has(plate)) {
+      held.occupants.delete(plate);
+      for (const l of this.entryLanes.values()) await this.pumpEntry(l);
+    }
     if (car.charge_parking !== null) return; // already invoiced: charging twice is a penalty
     if (car.entry_lane === null && this.recentPaid.has(plate)) {
       // Paid moments ago and never came back through an entry: the same session looping
@@ -705,6 +837,9 @@ export class Controller {
       basis = `planned ${car.planned_minutes}m, measured ${gameS !== null ? (gameS / 60).toFixed(2) : "?"} game-min`;
     }
     const electric = chargingCost(car.car_type, this.cfg);
+    // #region agent log
+    fetch('http://127.0.0.1:7502/ingest/5b601716-2241-46fc-9c1b-1aa5e55ae0bd',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'6f1c01'},body:JSON.stringify({sessionId:'6f1c01',hypothesisId:'B',location:'controller.ts:charge',message:'issuing charge',data:{plate,status:car.status,attempts:car.charge_attempts,planned:car.planned_minutes,gameS,parking,electric,basis,timeScale:this.timeScale,timeScaleSrc:this.timeScaleInfo.source,exitAt:car.exit_at,carType:car.car_type,qDepth:(this.queue as {depth?:number}).depth},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
     if (await this.cmd("charge", () => this.sim.carCharge(plate, parking, electric), [plate, parking, electric])) {
       car.charge_parking = parking;
       car.charge_electric = electric;
@@ -746,7 +881,9 @@ export class Controller {
   }
 
   async release(car: Car): Promise<void> {
+    if (this.replaying) return; // whether it was released is in the recorded commands
     car.status = "released";
+    car.releasedReal = nowS();
     const lane = car.exit_lane ? this.exitLanes.get(car.exit_lane) : undefined;
     lane?.releasing.add(car.plate);
     const gate = lane?.gate ? this.gates.get(lane.gate) : undefined;
@@ -761,10 +898,14 @@ export class Controller {
 
   private async onExitOut(e: EventRecord, lane: ExitLane) {
     const plate = str(e, "CarPlateNumber")!;
+    if (this.drivingIn(plate)) return; // passing over the exit sensor on the way to its spot
     const car = this.cars.get(plate) ?? this.adopt(e);
     if (car.status !== "released") {
       this.counters.escaped++;
       this.note("error", `${plate} left without being released (status ${car.status})`);
+      // #region agent log
+      fetch('http://127.0.0.1:7502/ingest/5b601716-2241-46fc-9c1b-1aa5e55ae0bd',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'6f1c01'},body:JSON.stringify({sessionId:'6f1c01',hypothesisId:'D',location:'controller.ts:onExitOut',message:'escaped unpaid',data:{plate,status:car.status,spot:car.spot,charge_parking:car.charge_parking,payment_ok:car.payment_ok,lane:lane.spot},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
     }
     lane.releasing.delete(plate);
     this.counters.exited++;
@@ -775,15 +916,28 @@ export class Controller {
   // ---------------------------------------------------------------------------
   // penalties, gates & components
   // ---------------------------------------------------------------------------
-  private onPenalty(e: EventRecord) {
+  private async onPenalty(e: EventRecord) {
     this.counters.penalties++;
     this.counters.fines += Number(e.FineAmount) || 0;
     const reason = str(e, "Reason") ?? "";
     this.note("error", `PENALTY ${e.FineAmount}: ${reason} (${e.ComponentName})`);
+    const carForLog = this.carByComponent(str(e, "ComponentName"));
+    const spotNameForLog = OCCUPIED_SPOT_PATTERN.exec(reason)?.[1]?.trim();
+    const spotForLog = spotNameForLog ? this.spots.get(spotNameForLog) : (carForLog?.spot ? this.spots.get(carForLog.spot) : undefined);
+    // #region agent log
+    fetch('http://127.0.0.1:7502/ingest/5b601716-2241-46fc-9c1b-1aa5e55ae0bd',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'6f1c01'},body:JSON.stringify({sessionId:'6f1c01',hypothesisId:'A',location:'controller.ts:onPenalty',message:'penalty received',data:{reason,component:str(e,"ComponentName"),fine:e.FineAmount,carStatus:carForLog?.status??null,carSpot:carForLog?.spot??null,charge_parking:carForLog?.charge_parking??null,charge_attempts:carForLog?.charge_attempts??null,spotName:spotForLog?.name??null,occupants:spotForLog?[...spotForLog.occupants]:null,reserved_for:spotForLog?.reserved_for??null,detected:spotForLog?.detected??null,timeScale:this.timeScale,qDepth:(this.queue as {depth?:number}).depth},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
 
     const car = this.carByComponent(str(e, "ComponentName"));
-    if (!car || car.status !== "invoiced") return;
     const lowered = reason.toLowerCase();
+    if (lowered.includes(PenaltyReason.OccupiedSpot)) return this.onOccupiedSpotPenalty(reason, car);
+    if (car && lowered.includes(PenaltyReason.AlreadyPaid) && ["at_exit", "invoiced", "payment_mismatch"].includes(car.status)) {
+      // Our record missed its payment (e.g. across a restart); the simulator knows it paid.
+      this.note("warn", `${car.plate} has already paid according to the simulator - releasing`);
+      car.payment_ok = true;
+      return this.release(car);
+    }
+    if (!car || car.status !== "invoiced") return;
     if (lowered.includes(PenaltyReason.ChargeNotAtExit)) {
       // Rejected for timing: the car is still at the exit without an invoice.
       this.rebill(car, null);
@@ -793,6 +947,33 @@ export class Controller {
       const m = CORRECT_AMOUNT_PATTERN.exec(reason);
       if (m) this.rebill(car, Number(m[1]));
     }
+  }
+
+  /**
+   * "Car:(ARA 545) attempted to park in an occupied spot:(S12)." - the simulator is telling
+   * us S12 holds a car we lost track of. Record that, and send the car somewhere free
+   * straight away: re-sending it (dispatch retry) and then sending the next car there is
+   * how one wrong spot became 83 penalties.
+   */
+  private async onOccupiedSpotPenalty(reason: string, car: Car | undefined) {
+    const spotName = OCCUPIED_SPOT_PATTERN.exec(reason)?.[1]?.trim();
+    const spot = spotName ? this.spots.get(spotName) : undefined;
+    if (!spot) return;
+    if (!spot.occupants.size) spot.occupants.add("?"); // cleared by that spot's next CarOut
+    if (spot.reserved_for === car?.plate) spot.reserved_for = null;
+    if (this.replaying || !car || car.spot !== spot.name || !(MID_ENTRY.includes(car.status) || car.status === "entering")) return;
+    const lane = car.entry_lane ? this.entryLanes.get(car.entry_lane) : undefined;
+    const alt = this.allocator.choose(car.car_type, lane?.zone ?? "", this.spots.values());
+    if (!alt) {
+      this.note("error", `${car.plate}: ${spot.name} is taken and no other spot is free`);
+      return;
+    }
+    alt.reserved_for = car.plate;
+    car.spot = alt.name;
+    car.dispatchRetries = 0;
+    car.dispatchedReal = nowS();
+    this.note("warn", `${spot.name} is occupied - redirecting ${car.plate} to ${alt.name}`);
+    await this.cmd("goto", () => this.sim.carGoto(car.plate, alt.name), [car.plate, alt.name]);
   }
 
   private rebill(car: Car, override: number | null) {
@@ -817,7 +998,7 @@ export class Controller {
     gate.state = str(e, "Action")!;
     if (gate.state === GateState.Open) {
       await this.gateOpened(gate);
-    } else if (gate.state === GateState.Closed && gate.onOpen.length) {
+    } else if (gate.state === GateState.Closed && gate.onOpen.length && gate.hold !== "closed") {
       // An "open" sent while the gate was still closing is silently dropped by the
       // simulator: ask again now that it has finished closing.
       await this.requestOpen(gate);
@@ -838,6 +1019,7 @@ export class Controller {
       return;
     }
     gate.onOpen.push(fn);
+    if (gate.hold === "closed") return; // an operator holds it shut: the car waits until it is released
     if (gate.state !== GateState.Opening) await this.requestOpen(gate);
     else if (gate.openRequestedAt === null) gate.openRequestedAt = nowS(); // opening per sync: still arm the timeout
   }
@@ -873,8 +1055,11 @@ export class Controller {
 
   async closeGateIfIdle(name: string | null): Promise<void> {
     const gate = name ? this.gates.get(name) : undefined;
-    if (gate && gate.operable && !this.gateBusy(gate.name) && !gate.onOpen.length &&
+    if (gate && gate.operable && gate.hold !== "open" && !this.gateBusy(gate.name) && !gate.onOpen.length &&
         (gate.state === GateState.Open || gate.state === GateState.Opening)) {
+      // #region agent log
+      fetch('http://127.0.0.1:7502/ingest/5b601716-2241-46fc-9c1b-1aa5e55ae0bd',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'6f1c01'},body:JSON.stringify({sessionId:'6f1c01',hypothesisId:'E',location:'controller.ts:closeGateIfIdle',message:'closing idle gate',data:{name:gate.name,state:gate.state,busy:this.gateBusy(gate.name),onOpen:gate.onOpen.length,timeScale:this.timeScale},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
       if (await this.cmd("close", () => this.sim.closeGate(gate.name), [gate.name])) gate.state = GateState.Closing;
     }
   }
@@ -898,6 +1083,8 @@ export class Controller {
     for (const t of this.timers.filter((t) => t.due <= now)) await this.runTimer(t);
     await this.checkGateTimeouts(now);
     for (const lane of this.entryLanes.values()) await this.checkDispatchTimeout(lane, now);
+    await this.sweepGhosts(now);
+    this.sample(now);
     const horizon = now - this.real(this.cfg.repeatExitWindowGameS);
     for (const [plate, t] of this.recentPaid) if (t < horizon) this.recentPaid.delete(plate);
   }
@@ -948,14 +1135,62 @@ export class Controller {
     return car;
   }
 
-  /** Remove a car record and anything it still holds (spot, lanes). */
-  private forget(car: Car) {
+  /** Let go of everything a car record holds: spot, reservation, lanes. */
+  private detach(car: Car) {
     for (const s of this.spots.values()) {
-      if (s.occupant === car.plate) s.occupant = null;
+      s.occupants.delete(car.plate);
       if (s.reserved_for === car.plate) s.reserved_for = null;
     }
+    for (const lane of this.entryLanes.values()) {
+      lane.queue = lane.queue.filter((p) => p !== car.plate);
+      if (lane.current === car.plate) lane.current = null;
+    }
     for (const lane of this.exitLanes.values()) lane.releasing.delete(car.plate);
+  }
+
+  /** Remove a stale record without keeping it (the plate is reused by a new car). */
+  private forget(car: Car) {
+    this.detach(car);
     this.cars.delete(car.plate);
+  }
+
+  /** Close a car record whose closing event never arrived, and store it as a session. */
+  private retire(car: Car, why: string, status: CarStatus = "lost") {
+    this.note("warn", `${car.plate} ${why} - closing its record (event lost or simulator restarted)`);
+    this.detach(car);
+    car.status = status;
+    this.counters.ghosts_retired++;
+    this.finish(car, { EventClass: "", _received_at: new Date().toISOString() });
+  }
+
+  /**
+   * Retire car records that should have ended by now. Webhooks are at-most-once and a
+   * simulator restart makes cars vanish, so a record can miss its closing event; left
+   * alone it would hold a lane, a spot count or - worst - keep an exit gate open.
+   */
+  private async sweepGhosts(now: number) {
+    const gatesToClose = new Set<string>();
+    const retiredBefore = this.counters.ghosts_retired;
+    for (const car of [...this.cars.values()]) {
+      const quietFor = now - (car.lastSeenReal ?? car.arrivedReal ?? now);
+      if (car.status === "released" && car.releasedReal && now - car.releasedReal > this.real(this.cfg.releaseTimeoutGameS)) {
+        const gate = car.exit_lane ? this.exitLanes.get(car.exit_lane)?.gate : null;
+        this.retire(car, `was released at ${car.exit_lane} but never reported leaving`, "gone");
+        if (gate) gatesToClose.add(gate);
+      } else if (car.status === "parked") {
+        const since = car.parkedReal ?? car.lastSeenReal;
+        const allowed = this.real((car.planned_minutes ?? 0) * 60 + this.cfg.parkedOverstayGameS);
+        if (since && now - since > allowed) this.retire(car, `is still recorded in ${car.spot} well past its planned ${car.planned_minutes}m`);
+      } else if (car.status === "queued") {
+        if (now - (car.arrivedReal ?? now) > this.real(this.cfg.entryPatienceGameS + 60)) this.retire(car, `is still queued at ${car.entry_lane} past the give-up time`);
+      } else if (["to_exit", "at_exit", "invoiced", "payment_mismatch", "entering", "unknown"].includes(car.status)) {
+        if (quietFor > this.real(this.cfg.staleCarGameS)) this.retire(car, `has had no events for ${Math.round(quietFor)}s (status ${car.status})`);
+      }
+    }
+    for (const gate of gatesToClose) await this.closeGateIfIdle(gate);
+    if (this.counters.ghosts_retired > retiredBefore) {
+      for (const lane of this.entryLanes.values()) await this.pumpEntry(lane); // spots/lanes freed
+    }
   }
 
   private finish(car: Car, e: EventRecord) {
@@ -969,7 +1204,7 @@ export class Controller {
     this.cars.delete(car.plate);
   }
 
-  private async cmd(what: string, fn: () => Promise<void>, args: (string | number)[]): Promise<boolean> {
+  private async cmd(what: string, fn: () => Promise<void>, args: (string | number)[], actor: string | null = null): Promise<boolean> {
     if (this.replaying) return true; // the command was sent the first time round
     const t0 = performance.now();
     let ok = true, error: string | null = null;
@@ -980,10 +1215,13 @@ export class Controller {
       error = (ex as Error).message ?? String(ex);
       this.counters.command_errors++;
       this.note("error", `command ${what}(${args.join(", ")}) failed: ${error}`);
+      // #region agent log
+      fetch('http://127.0.0.1:7502/ingest/5b601716-2241-46fc-9c1b-1aa5e55ae0bd',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'6f1c01'},body:JSON.stringify({sessionId:'6f1c01',hypothesisId:'F',location:'controller.ts:cmd',message:'command failed',data:{what,args,error,ms:Math.round(performance.now()-t0),qDepth:(this.queue as {depth?:number}).depth},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
     }
     this.store.recordAction({
       at: new Date().toISOString(), cmd: what, args: args.map(String), ok, error,
-      ms: Math.round((performance.now() - t0) * 10) / 10,
+      ms: Math.round((performance.now() - t0) * 10) / 10, actor,
     });
     return ok;
   }
@@ -996,9 +1234,101 @@ export class Controller {
   }
 
   // ---------------------------------------------------------------------------
+  // manual control from the dashboard - always run through exclusive()
+  // ---------------------------------------------------------------------------
+  /** Run fn in turn with webhooks and ticks, so it never sees half-updated state. */
+  exclusive<T>(fn: () => Promise<T> | T): Promise<T> {
+    return this.queue.run(fn);
+  }
+
+  /**
+   * open / close: hold the gate that way (the automation will not override it) until
+   * "auto" hands it back. repair: start maintenance. Refuses anything the spec penalises:
+   * operating a broken or under-maintenance gate, or working on a gate a car is using.
+   */
+  async manualGate(name: string, action: GateAction, actor: string): Promise<ControlResult> {
+    const gate = this.gates.get(name);
+    if (!gate) return fail(`unknown gate ${name}`);
+    const unusable = gate.broken ? "broken" : gate.maintenance ? "under maintenance" : null;
+    const inUse = this.gateBusy(name) || gate.onOpen.length > 0;
+    switch (action) {
+      case "open":
+      case "close": {
+        if (unusable) return fail(`${name} is ${unusable} - operating it now is a penalty`);
+        if (action === "close" && inUse) return fail(`${name} is letting a car through right now - try again in a moment`);
+        gate.hold = action === "open" ? "open" : "closed";
+        const sent = action === "open"
+          ? await this.cmd("open", () => this.sim.openGate(name), [name], actor)
+          : await this.cmd("close", () => this.sim.closeGate(name), [name], actor);
+        if (!sent) { gate.hold = null; return fail(`the simulator rejected ${action} ${name}`); }
+        if (action === "open" && gate.state !== GateState.Open) gate.state = GateState.Opening;
+        if (action === "close") gate.state = GateState.Closing;
+        this.note("warn", `${actor} holds ${name} ${gate.hold}`);
+        return ok(`${name} held ${gate.hold} until returned to automatic`);
+      }
+      case "auto": {
+        gate.hold = null;
+        if (gate.onOpen.length && gate.operable) await this.requestOpen(gate); // cars were waiting on it
+        else await this.closeGateIfIdle(name);
+        this.note("info", `${actor} returned ${name} to automatic`);
+        return ok(`${name} is automatic again`);
+      }
+      case "repair": {
+        if (gate.maintenance) return fail(`${name} is already under maintenance`);
+        if (inUse) return fail(`${name} is in use - repairing it now is a penalty`);
+        if (!(await this.cmd("repair", () => this.sim.repairGate(name), [name], actor))) return fail(`the simulator rejected repair ${name}`);
+        gate.maintenance = true;
+        this.note("warn", `${actor} started maintenance on ${name}`);
+        return ok(`maintenance started on ${name}`);
+      }
+    }
+  }
+
+  async manualSpotRepair(name: string, actor: string): Promise<ControlResult> {
+    const spot = this.spots.get(name);
+    if (!spot || spot.purpose !== SpotPurpose.Park) return fail(`unknown parking spot ${name}`);
+    if (spot.maintenance) return fail(`${name} is already under maintenance`);
+    const who = spot.occupant ?? spot.reserved_for;
+    if (who) return fail(`${name} is ${spot.occupant ? "occupied" : "reserved"}${who !== "?" ? ` by ${who}` : ""} - repairing it now is a penalty`);
+    if (!(await this.cmd("repair", () => this.sim.repairSpot(name), [name], actor))) return fail(`the simulator rejected repair ${name}`);
+    spot.maintenance = true; // not offered to cars until the simulator reports it fixed
+    this.note("warn", `${actor} started maintenance on ${name}`);
+    return ok(`maintenance started on ${name}`);
+  }
+
+  /** Close an entrance (arriving cars are turned away; queued cars are still served) or reopen it. */
+  async setEntryOpen(spot: string, open: boolean, actor: string): Promise<ControlResult> {
+    const lane = this.entryLanes.get(spot);
+    if (!lane) return fail(`unknown entrance ${spot}`);
+    lane.closed = !open;
+    this.note("warn", `${actor} ${open ? "reopened" : "closed"} entrance ${spot}`);
+    if (open) await this.pumpEntry(lane);
+    return ok(`entrance ${spot} ${open ? "open" : "closed - arriving cars are turned away"}`);
+  }
+
+  // ---------------------------------------------------------------------------
+  // occupancy time series (for the dashboard's charts)
+  // ---------------------------------------------------------------------------
+  timeseries: TimeseriesPoint[] = [];
+  private lastSampleReal = 0;
+
+  private sample(now: number) {
+    if (!this.synced || now - this.lastSampleReal < this.cfg.statsSampleS) return;
+    this.lastSampleReal = now;
+    const total = { occupied: 0, reserved: 0, free: 0, out_of_service: 0, capacity: 0 };
+    for (const z of Object.values(this.zoneSummaries())) {
+      total.occupied += z.occupied; total.reserved += z.reserved; total.free += z.free;
+      total.out_of_service += z.out_of_service; total.capacity += z.total;
+    }
+    const queued = [...this.entryLanes.values()].reduce((n, l) => n + l.queue.length, 0);
+    this.timeseries.push({ t: new Date(now * 1000).toISOString(), ...total, queued });
+    if (this.timeseries.length > this.cfg.statsSampleKeep) this.timeseries.shift();
+  }
+
+  // ---------------------------------------------------------------------------
   // read model for the web layer
   // ---------------------------------------------------------------------------
-  snapshot(): StateSnapshot {
+  private zoneSummaries(): Record<string, ZoneSummary> {
     const zones: Record<string, ZoneSummary> = {};
     for (const s of this.spots.values()) {
       if (s.purpose !== SpotPurpose.Park) continue;
@@ -1009,11 +1339,16 @@ export class Controller {
       else if (s.reserved_for) z.reserved++;
       else z.free++;
     }
+    return zones;
+  }
+
+  snapshot(): StateSnapshot {
+    const zones = this.zoneSummaries();
     const spots = [...this.spots.values()]
       .sort((a, b) => a.purpose.localeCompare(b.purpose) || spotNumber(a.name) - spotNumber(b.name))
       .map((s) => ({
         name: s.name, zone: s.zone, purpose: s.purpose, car_type: s.car_type, broken: s.broken,
-        maintenance: s.maintenance, occupant: s.occupant, reserved_for: s.reserved_for, detected: s.detected,
+        maintenance: s.maintenance, occupant: s.occupant, occupants: [...s.occupants], reserved_for: s.reserved_for, detected: s.detected,
         available: s.available,
       }));
     return {
@@ -1023,8 +1358,8 @@ export class Controller {
       topology: this.topology ? { name: this.topology.name, source: this.topology.source ?? "" } : null,
       zones,
       spots,
-      gates: [...this.gates.values()].map((g) => ({ name: g.name, zone: g.zone, state: g.state, broken: g.broken, maintenance: g.maintenance })),
-      entry_lanes: [...this.entryLanes.values()].map((l) => ({ spot: l.spot, gate: l.gate, zone: l.zone, queue: [...l.queue], current: l.current })),
+      gates: [...this.gates.values()].map((g) => ({ name: g.name, zone: g.zone, state: g.state, broken: g.broken, maintenance: g.maintenance, hold: g.hold })),
+      entry_lanes: [...this.entryLanes.values()].map((l) => ({ spot: l.spot, gate: l.gate, zone: l.zone, queue: [...l.queue], current: l.current, closed: l.closed })),
       exit_lanes: [...this.exitLanes.values()].map((l) => ({ spot: l.spot, gate: l.gate, zone: l.zone, releasing: [...l.releasing].sort() })),
       active_cars: [...this.cars.values()].map(publicCar),
       recent_sessions: this.completed.slice(-50),
