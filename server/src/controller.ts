@@ -215,6 +215,8 @@ export class Controller implements Engine {
   synced = false;
   replaying = false; // rebuilding state from the event log: no commands, no timers
   private replayPending = false;
+  /** Why the parts on site are new (simulator restarted, level changed), until usage is reset. */
+  private freshSite: string | null = null;
   private started = false; // real timers only once running (tests drive time by hand)
   private readonly replayedIds = new Set<string>();
   private lastResyncRequest = 0;
@@ -360,10 +362,12 @@ export class Controller implements Engine {
       this.topology = null;
       this.synced = true;
       this.note("warn", "simulator has no level loaded yet - waiting for it");
+      this.freshSite = "the level was (re)started from the simulator's menu";
       return;
     }
     const levelChanged = this.topology !== null && !matches(this.topology, entry, exit);
     const freshLayout = !this.topology || levelChanged;
+    if (levelChanged) this.freshSite = "the level changed";
     if (freshLayout) {
       if (levelChanged) {
         this.note("warn", "site layout changed (new level?) - resetting state");
@@ -399,6 +403,13 @@ export class Controller implements Engine {
       `${park.length} park spots (${park.filter((s) => s.available).length} free); tracking ${this.cars.size} cars; ` +
       `game speed ${speed.value.toFixed(2)} (${speed.source})`);
     await this.each("onSync", (s) => s.onSync?.()); // components first: starts repairs of parts found broken
+    if (this.freshSite) {
+      // A restarted level starts with new parts (Level 2 is not saved): counts from before
+      // would make healthy gates look worn out and block them. 2026-09-20 02:26: gate1 was
+      // "11 openings" from before a simulator restart - no car got in.
+      this.components.resetUsage(this.freshSite);
+      this.freshSite = null;
+    }
     for (const lane of this.entryLanes.values()) await this.pumpEntry(lane);
     if (this.cfg.closeIdleGatesOnSync) {
       const names = new Set([...this.entryLanes.values(), ...this.exitLanes.values()].map((l) => l.gate).filter(Boolean));
@@ -445,6 +456,7 @@ export class Controller implements Engine {
     if (nowS() - newest > this.cfg.replayMaxGapS) {
       this.log.info(`event log is ${newest ? `${Math.round(nowS() - newest)}s` : "empty/too"} old - ` +
         "simulator likely restarted since; starting fresh");
+      if (newest) this.freshSite = `no events for ${Math.round(nowS() - newest)}s - the simulator was likely restarted`;
       return;
     }
     const actions = this.store.actionsSince(since).filter((a) => a.ok && (a.cmd === "goto" || a.cmd === "charge"));
@@ -1102,7 +1114,7 @@ export class Controller implements Engine {
     // Operating a broken or under-repair gate is a penalty, and opening a worn-out one
     // breaks it (Level 2 gates break on their 10th opening). Whoever waits on it stays in
     // onOpen; preventive maintenance repairs a worn gate, resume() asks again once fixed.
-    if (!gate.operable || this.components.wornOut("gate", gate.name)) return;
+    if (!gate.operable || await this.components.holdForRepair("gate", gate.name)) return;
     const clean = gate.state === GateState.Closed, sent = this.clock.real();
     if (await this.cmd("open", () => this.sim.openGate(gate.name), [gate.name])) {
       gate.state = GateState.Opening;
@@ -1133,7 +1145,12 @@ export class Controller implements Engine {
   private async checkGateTimeouts(now: number) {
     for (const gate of this.gates.values()) {
       if (!gate.operable) continue; // broken or being repaired: never touch it
-      if (gate.onOpen.length && gate.openRequestedAt !== null && now - gate.openRequestedAt >= this.cfg.gateConfirmGameS) {
+      if (gate.onOpen.length && gate.openRequestedAt === null && gate.hold !== "closed" &&
+          gate.state !== GateState.Open && gate.state !== GateState.Opening) {
+        // Cars wait on a gate we held back (worn out): ask again - repairs it, or after
+        // wornWaitMaxGameS opens it anyway.
+        await this.requestOpen(gate);
+      } else if (gate.onOpen.length && gate.openRequestedAt !== null && now - gate.openRequestedAt >= this.cfg.gateConfirmGameS) {
         if (gate.openRetries === 0) {
           gate.openRetries = 1;
           this.note("warn", `${gate.name} did not confirm opening, re-sending open`);
@@ -1179,10 +1196,9 @@ export class Controller implements Engine {
       target.broken = broken;
       if (!broken) target.maintenance = false;
     }
-    if (!broken) {
-      this.note("info", `${kind} ${name} fixed`);
-      await this.resume();
-    }
+    // Waiting cars are resumed by the components subsystem once it has reset the part's
+    // usage - resuming here, first, would find the gate still "worn out" and repair it again.
+    if (!broken) this.note("info", `${kind} ${name} fixed`);
   }
 
   /** Why a gate cannot be worked on right now: a car is driving through it. */

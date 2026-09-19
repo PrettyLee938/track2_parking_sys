@@ -149,6 +149,9 @@ const schema = z.object({
   // unless set here (0 = learn).
   preventiveMaintenance: bool().default(true),
   preventiveIdleRatio: num().min(0).max(1).default(0.8),
+  // A worn-out gate is not opened until repaired. If no repair has started after this long
+  // (GAME seconds) while cars wait, it is opened anyway: a breakdown beats a dead lane.
+  wornWaitMaxGameS: num().positive().default(20),
   gateCycleLimit: num().int().min(0).default(0),
   spotUseLimit: num().int().min(0).default(0),
   fanHourLimit: num().min(0).default(0),

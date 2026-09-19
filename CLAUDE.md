@@ -146,7 +146,17 @@ Open / next:
   exit DO drive out through an open gate); bad-signature payment_made -> app.ts
   controller.submitRejected() -> counted (counters.fake_payments), never released, car
   asked to pay once more (GPA_RECHARGE_AFTER_FAKE_PAYMENT; watch for a "charged twice"
-  penalty in the next run - if so set it false). 103 tests. NEXT: live run to verify,
+  penalty in the next run - if so set it false). BUG found live 02:26 + fixed: the simulator
+  restarts Level 2 with NEW parts (lvl2.json is never saved) but our persisted gate uses (11)
+  survived -> gate1 looked worn out and was never opened. Fix: usage reset when the sim/level
+  starts fresh (menu -> level, level change, event log older than replayMaxGapS; history and
+  learned limits kept); a blocked worn gate gets its repair immediately, and is used anyway if the
+  repair is refused or none starts within GPA_WORN_WAIT_MAX_GAME_S (never a dead lane);
+  controller no longer resumes on component_fixed before components reset the count.
+  Diagnose a live run with 
+pm run report:live -w server (GET /debug/controller, loopback).
+  Also verified: 0 of 2,165 turned-away cars parked without our goto (open entry gate safe).
+  105 tests. NEXT: live run to verify,
   then zone distribution (user wants a smarter spread across zones: full/broken-gate zones,
   balance wear so one zone's gates/spots don't take all the maintenance).
   Team split (4 people): A = core engine/repairs/maintenance (Miro + Claude), B = environment
