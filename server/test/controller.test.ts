@@ -399,6 +399,20 @@ describe("multi-lane sites", () => {
       expect(c.counters.turned_away).toBe(0);
     });
 
+    it("learns a zone is out of reach when a car sent there does not move, and sends it home", async () => {
+      // 2026-09-20 03:21: 13 of 13 ENTRY1 cars sent to ZONE2 never moved - no penalty, the
+      // simulator just ignores the goto - and each one blocked the only entrance.
+      const { c, sim, advance } = await setup({ gameSpeed: 1 });
+      c.spots.get("S1")!.reserved_for = "X"; // ZONE1 half busy: A goes to ZONE2
+      await feed(c, carEv("A", "ENTRY1", "CarIn", "10:00:00"));
+      expect(sim.last()).toEqual(["goto", "A", "S3"]);
+      advance(c.cfg.gotoConfirmGameS + 0.5);
+      await c.tick();
+      expect(sim.last()).toEqual(["goto", "A", "S2"]); // home zone
+      expect(c.unreachable.has("ENTRY1>ZONE2")).toBe(true);
+      expect(c.spots.get("S3")!.reserved_for).toBeNull();
+    });
+
     it("avoids a zone whose exit gate is out of service", async () => {
       const { c, sim } = await setup();
       c.gates.get("g2")!.maintenance = true; // ZONE1's exit
@@ -752,7 +766,11 @@ describe("dropped gotos", () => {
       wait(advance, c, c.cfg.gotoConfirmGameS + 0.5);
       await c.tick();
     }
-    expect(sim.gotos().filter((g) => g[1] === "A")).toHaveLength(3);
+    expect(sim.gotos().filter((g) => g[1] === "A" && g[2] === "S1")).toHaveLength(3);
+    // A still sits on the entry sensor, so B cannot pass it: turn A away first (03:21 run:
+    // skipping it only left B stuck behind it), and send B once A has driven off.
+    expect(sim.gotos().at(-1)).toEqual(["goto", "A", "leavepark"]);
+    await c.handle(carEv("A", "ENTRY1", "CarOut", "10:00:30"));
     expect(sim.gotos().at(-1)).toEqual(["goto", "B", "S1"]); // A's spot went to B
   });
 
@@ -803,7 +821,7 @@ describe("dropped gotos", () => {
 // lost webhooks & vanished cars
 // ---------------------------------------------------------------------------
 describe("lost webhooks", () => {
-  const back = (c: Controller, plate: string, field: "releasedG" | "parkedG" | "arrivedG" | "lastSeenG", gameS: number) => {
+  const back = (c: Controller, plate: string, field: "releasedG" | "parkedG" | "arrivedG" | "lastSeenG" | "gotoG", gameS: number) => {
     c.cars.get(plate)![field]! -= gameS + 1;
   };
 
@@ -838,7 +856,9 @@ describe("lost webhooks", () => {
     expect(c.gateBusy("gateB")).toBe(true);
     await c.tick();
     expect(sim.calls).not.toContainEqual(["close", "gateB"]); // not yet: it may still be driving out
-    back(c, "A", "releasedG", c.cfg.releaseTimeoutGameS);
+    back(c, "A", "releasedG", c.cfg.releaseTimeoutGameS); // told to leave that long ago...
+    back(c, "A", "gotoG", c.cfg.releaseTimeoutGameS);
+    c.cars.get("A")!.gotoResends = c.cfg.maxGotoResends + 1; // ...and re-told until we gave up
     await c.tick();
     expect(sim.last()).toEqual(["close", "gateB"]); // the gate does not stay open forever
     expect(c.cars.has("A")).toBe(false);

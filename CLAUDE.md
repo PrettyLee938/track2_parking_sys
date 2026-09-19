@@ -167,7 +167,19 @@ pm run report:live -w server (GET /debug/controller, loopback).
   ties -> least-worn spot. Penalty mentioning "reach" for a car mid-entry to another zone ->
   controller.unreachable "ENTRY1>ZONE2" + redirect home. Local .env set to zone_balanced (default
   stays lane_zone_first_free). 109 tests. NEXT: live run - watch ZONE2/3 filling, turn-aways,
-  any "reach" penalties, exit gates gate4/gate6 used. Then (was: live run to verify),
+  any "reach" penalties, exit gates gate4/gate6 used.
+  **Live 03:00-03:22 with zone_balanced:** ENTRY1 cars CANNOT reach ZONE2 (13/13 gotos ignored, no
+  penalty - car sits on the entry sensor and blocks the lane); 8 x "High CO gas level detected" ZONE1
+  (30 each) with ZERO carbon_monoxide_event webhooks; a paid car written off by the ghost sweeper while
+  its exit gate was in preventive repair (~35 s > releaseTimeout) and never let out; spot S20 broke on
+  its 12th visit. **Fixed:** cross-zone goto not acted on -> unreachable learned on the first stuck check
+  + redirect home (zone_balanced then = own zone + least-worn spot); giving up on an entry car now turns it
+  away (it physically blocks the lane) and the lane moves on its CarOut; release timeout counts from the
+  leavepark actually sent; new subsystem server/src/environment.ts: fans on while cars move in a zone
+  (+60 game-s) and 300 game-s after a CO event/penalty, never switches broken fans, on-hours -> fan wear
+  (preventive by hours once a fan breakdown teaches the limit); fans table on the Operations health card
+  and in report:live. 113 tests. NEXT: live run - expect 0 CO penalties, no stuck entry. Lights (day/
+  night) still TODO in environment.ts. Then (was: live run to verify),
   then zone distribution (user wants a smarter spread across zones: full/broken-gate zones,
   balance wear so one zone's gates/spots don't take all the maintenance).
   Team split (4 people): A = core engine/repairs/maintenance (Miro + Claude), B = environment

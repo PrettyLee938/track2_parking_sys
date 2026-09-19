@@ -731,7 +731,12 @@ export class Controller implements Engine {
   private async onEntryOut(e: EventRecord, lane: EntryLane) {
     const plate = str(e, "CarPlateNumber")!;
     const car = this.cars.get(plate);
-    if (plate === lane.current) {
+    if (plate === lane.current && car?.status === "turned_away") {
+      // Given up on and turned away (giveUpOnEntry): it has cleared the sensor.
+      lane.current = null;
+      this.finish(car, e);
+      if (lane.queue.length) await this.pumpEntry(lane);
+    } else if (plate === lane.current) {
       if (car) car.status = "entering";
       lane.current = null;
       if (lane.queue.length) await this.pumpEntry(lane);
@@ -1324,10 +1329,30 @@ export class Controller implements Engine {
       if (!onEntry && car.status !== "released" && car.status !== "turned_away") continue;
       const where = car.status === "released" ? car.exit_lane : car.entry_lane;
       const dest = onEntry ? car.spot : Destination.LeavePark;
+      const spotZone = onEntry && car.spot ? this.spots.get(car.spot)?.zone : undefined;
+      if (onEntry && spotZone && entry!.zone && spotZone !== entry!.zone) {
+        // Sent to another zone and did not move: the simulator ignores a goto to a spot the
+        // car cannot reach - no penalty, the car just sits on the entry sensor and blocks
+        // the lane (2026-09-20 03:21: 13 of 13 ENTRY1 cars sent to ZONE2 never moved).
+        this.unreachable.add(`${entry!.spot}>${spotZone}`);
+        this.note("error", `cars from ${entry!.spot} cannot reach ${spotZone} (${car.plate} did not move) - keeping them in ${entry!.zone}`);
+        const old = this.spots.get(car.spot!);
+        if (old?.reserved_for === car.plate) old.reserved_for = null;
+        await this.redirect(car, `${car.spot} is out of reach`);
+        continue;
+      }
       if (car.gotoResends >= this.cfg.maxGotoResends) {
-        car.gotoG = null; // stop re-sending
-        if (onEntry) await this.giveUpOnEntry(car, entry!);
-        else this.note("error", `${car.plate} still has not left ${where} after ${car.gotoResends} re-sent gotos`);
+        if (car.gotoResends > this.cfg.maxGotoResends) continue; // given up already (gotoG kept: the release timeout runs from it)
+        car.gotoResends++;
+        if (onEntry) {
+          await this.giveUpOnEntry(car, entry!);
+        } else {
+          this.note("error", `${car.plate} still has not left ${where} after ${this.cfg.maxGotoResends} re-sent gotos`);
+          if (car.status === "turned_away" && entry?.current === car.plate) { // last resort: do not hold the lane forever
+            entry.current = null;
+            await this.pumpEntry(entry);
+          }
+        }
         continue;
       }
       car.gotoResends++;
@@ -1340,14 +1365,20 @@ export class Controller implements Engine {
     }
   }
 
+  /**
+   * A car that will not drive to its spot is still ON the entry sensor: dispatching the next
+   * car behind it achieves nothing (2026-09-20 03:21: cars given up on kept blocking ENTRY1).
+   * Turn it away instead; the lane moves on when it drives off (its entry CarOut).
+   */
   private async giveUpOnEntry(car: Car, lane: EntryLane) {
-    this.note("error", `${car.plate} stuck at ${lane.spot}, releasing the lane`);
+    this.note("error", `${car.plate} will not drive into the car park from ${lane.spot} - turning it away to clear the lane`);
     const spot = car.spot ? this.spots.get(car.spot) : undefined;
     if (spot?.reserved_for === car.plate) spot.reserved_for = null;
-    car.status = "lost";
     car.spot = null;
-    lane.current = null;
-    await this.pumpEntry(lane);
+    car.gotoResends = 0;
+    car.status = "turned_away";
+    this.counters.turned_away++;
+    await this.leavePark(car); // lane.current stays: onEntryOut moves the lane on
   }
 
   /**
@@ -1427,7 +1458,11 @@ export class Controller implements Engine {
     // All in game time: a speed change or a paused game does not age anyone early.
     for (const car of [...this.cars.values()]) {
       const quietFor = now - (car.lastSeenG ?? car.arrivedG ?? now);
-      if (car.status === "released" && car.releasedG !== null && now - car.releasedG > this.cfg.releaseTimeoutGameS) {
+      // Timed from the leavepark, not the release: a paid car waiting for its exit gate to come
+      // back from a repair (~35 s) has not been told to leave yet. Writing it off (03:04) left
+      // it stranded - nobody released it once the gate was fixed.
+      const leaveSent = car.gotoG !== null && car.releasedG !== null && car.gotoG >= car.releasedG ? car.gotoG : null;
+      if (car.status === "released" && leaveSent !== null && now - leaveSent > this.cfg.releaseTimeoutGameS) {
         const gate = car.exit_lane ? this.exitLanes.get(car.exit_lane)?.gate : null;
         this.retire(car, `was released at ${car.exit_lane} but never reported leaving`, "gone");
         if (gate) gatesToClose.add(gate);
@@ -1437,7 +1472,7 @@ export class Controller implements Engine {
         if (since !== null && now - since > allowed) this.retire(car, `is still recorded in ${car.spot} well past its planned ${car.planned_minutes}m`);
       } else if (car.status === "queued") {
         if (now - (car.arrivedG ?? now) > this.cfg.entryPatienceGameS + 60) this.retire(car, `is still queued at ${car.entry_lane} past the give-up time`);
-      } else if (["to_exit", "at_exit", "invoiced", "payment_mismatch", "entering", "unknown", "turned_away"].includes(car.status)) {
+      } else if (["to_exit", "at_exit", "invoiced", "payment_mismatch", "entering", "unknown", "turned_away", "released"].includes(car.status)) {
         if (quietFor > this.cfg.staleCarGameS) {
           this.retire(car, `has had no events for ${Math.round(quietFor)} game-s (status ${car.status})`,
             car.status === "turned_away" ? "turned_away" : "lost");

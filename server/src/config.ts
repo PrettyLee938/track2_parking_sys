@@ -160,6 +160,15 @@ const schema = z.object({
   spotUseLimit: num().int().min(0).default(0),
   fanHourLimit: num().min(0).default(0),
 
+  // ---- environment (Level 2, environment.ts) ----------------------------------------
+  // Exhaust fans follow traffic: a zone's fans run while cars move in it and this long
+  // (GAME seconds) after the last movement, and at least coAlertHoldGameS after a CO event
+  // at/above coFanThreshold or a CO penalty. No CO event arrived before the first penalty.
+  fanControl: bool().default(true),
+  fanIdleOffGameS: num().positive().default(60),
+  coFanThreshold: num().nonnegative().default(50),
+  coAlertHoldGameS: num().positive().default(300),
+
   // ---- payments --------------------------------------------------------------------
   // A payment_made with a bad signature is a fake: the car has not paid. It is never
   // released for it; ask it to pay once more (the only way it can still pay).
