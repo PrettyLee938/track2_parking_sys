@@ -12,4 +12,9 @@ describe('simulator webhook signatures', () => {
     expect(verifySignature(payload, 'd877c55aa71f577a50f390b83c450d49')).toBe(true);
     expect(verifySignature({ ...payload, SequenceId: '3' }, 'd877c55aa71f577a50f390b83c450d49')).toBe(false);
   });
+
+  it('handles a lowercase signature field from a webhook client', () => {
+    const payload = { Type: 'test_webhook', SequenceId: '2', EventId: 'e-1' };
+    expect(verifySignature({ ...payload, signature: 'd877c55aa71f577a50f390b83c450d49' }, 'd877c55aa71f577a50f390b83c450d49')).toBe(true);
+  });
 });

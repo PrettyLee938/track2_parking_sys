@@ -1,7 +1,7 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 
 export function canonicalSignature(payload: Record<string, unknown>): string {
-  return Object.keys(payload).filter((key) => key !== 'Signature').sort().map((key) => String(payload[key] ?? '')).join('|');
+  return Object.keys(payload).filter((key) => key.toLowerCase() !== 'signature').sort().map((key) => String(payload[key] ?? '')).join('|');
 }
 
 export function signatureDigest(payload: Record<string, unknown>): string {
