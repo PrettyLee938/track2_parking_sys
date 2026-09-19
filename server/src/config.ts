@@ -58,6 +58,10 @@ const schema = z.object({
   // ---- spot allocation ------------------------------------------------------
   // See allocation.ts for the available strategies.
   allocationStrategy: z.string().default("lane_zone_first_free"),
+  // zone_balanced: extra cost of a zone whose exit gate is broken/under repair, and of one
+  // whose exit gate is worn (x uses/limit) - spreading cars spreads the exit-gate wear.
+  zoneExitDownCost: num().nonnegative().default(1),
+  zoneExitWearCost: num().nonnegative().default(0.3),
 
   // ---- billing (spec: 1 per minute, x2 if electric) -------------------------
   // "planned" matched the simulator's own expected amount in 14/14 rejected bills at

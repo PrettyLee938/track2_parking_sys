@@ -382,6 +382,46 @@ describe("multi-lane sites", () => {
     expect(sim.calls).toContainEqual(["goto", "C", "S3"]);
   });
 
+  describe("zone_balanced", () => {
+    const setup = async (cfg = {}) => {
+      const made = await make({ sim: twoZoneSim(), topo: TWO_ZONES, cfg: { allocationStrategy: "zone_balanced", ...cfg } });
+      await made.c.handle(gateEv("g1", "Open"));
+      return made;
+    };
+    const admit = async (c: Controller, plate: string, carType = "Normal") =>
+      feed(c, carEv(plate, "ENTRY1", "CarIn", "10:00:00", "2", carType), carEv(plate, "ENTRY1", "CarOut", "10:00:01", "2", carType));
+
+    it("spreads cars over the zones as their own zone fills up, instead of turning them away", async () => {
+      // 2026-09-20: every car entered at ENTRY1; ZONE1 filled, ZONE2/3 stayed empty, 36% turned away.
+      const { c, sim } = await setup();
+      for (const p of ["A", "B", "C"]) await admit(c, p);
+      expect(sim.gotos()).toEqual([["goto", "A", "S1"], ["goto", "B", "S3"], ["goto", "C", "S2"]]);
+      expect(c.counters.turned_away).toBe(0);
+    });
+
+    it("avoids a zone whose exit gate is out of service", async () => {
+      const { c, sim } = await setup();
+      c.gates.get("g2")!.maintenance = true; // ZONE1's exit
+      await admit(c, "A");
+      expect(sim.gotos()).toEqual([["goto", "A", "S3"]]);
+    });
+
+    it("stops sending cars to a zone the simulator says they cannot reach", async () => {
+      const { c, sim } = await setup();
+      c.spots.get("S1")!.reserved_for = "X"; c.spots.get("S2")!.reserved_for = "Y"; // ZONE1 busy: A goes to ZONE2
+      await feed(c, carEv("A", "ENTRY1", "CarIn", "10:00:00"));
+      expect(sim.last()).toEqual(["goto", "A", "S3"]);
+      c.spots.get("S2")!.reserved_for = null;
+      await c.handle(penaltyEv("A", "Car cannot reach the destination spot."));
+      expect(sim.last()).toEqual(["goto", "A", "S2"]); // redirected home
+      expect(c.unreachable.has("ENTRY1>ZONE2")).toBe(true);
+      await c.handle(carEv("A", "ENTRY1", "CarOut", "10:00:02"));
+      await admit(c, "B");
+      // ZONE1 full now and ZONE2 off limits: turned away rather than sent where it cannot go
+      expect(sim.gotos().filter((g) => g[1] === "B")).toEqual([["goto", "B", "leavepark"]]);
+    });
+  });
+
   it("fills the lane's own zone first, then overflows to another zone", async () => {
     // Level 2 run: every car came in at ENTRY1 and ZONE2/ZONE3 sat empty.
     const { c, sim } = await make({ sim: twoZoneSim(), topo: TWO_ZONES, cfg: { allocationStrategy: "lane_zone_then_any" } });

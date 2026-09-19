@@ -71,6 +71,9 @@ export const PenaltyReason = {
   OccupiedSpot: "occupied spot",
   // "Car has already paid for parking."
   AlreadyPaid: "already paid",
+  // Spec: "If the car cannot reach the specified spot ... a penalty will be applied." Exact
+  // text not seen yet - any reason mentioning "reach" counts.
+  CannotReach: "reach",
 } as const;
 
 /** Extracts the correct amount from a ChargedWrongly penalty reason. */

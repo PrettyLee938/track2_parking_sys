@@ -160,7 +160,14 @@ pm run report:live -w server (GET /debug/controller, loopback).
   broken gate), lanes down 21-24% (was 55%), 5 fake payments all paid for real after the re-charge,
   0 penalties.** Remaining: 119/331 arrivals (36%) turned away - ZONE1 full while ZONE2/3 empty
   (all cars enter at ENTRY1). Fixed: 49 double leaveparks (stuck check used the old entry goto;
-  car.gotoG reset on release + waitingForGate). 106 tests. NEXT (was: live run to verify),
+  car.gotoG reset on release + waitingForGate).
+  **Zone distribution BUILT (untested live):** allocation strategy zone_balanced (allocation.ts)
+  scores each free spot: zone load + 0.25 if not the entrance's own zone + exit gate down (1) /
+  wear (0.3 x uses/limit) from controller.allocContext() + 0.3 if not the car's own spot type;
+  ties -> least-worn spot. Penalty mentioning "reach" for a car mid-entry to another zone ->
+  controller.unreachable "ENTRY1>ZONE2" + redirect home. Local .env set to zone_balanced (default
+  stays lane_zone_first_free). 109 tests. NEXT: live run - watch ZONE2/3 filling, turn-aways,
+  any "reach" penalties, exit gates gate4/gate6 used. Then (was: live run to verify),
   then zone distribution (user wants a smarter spread across zones: full/broken-gate zones,
   balance wear so one zone's gates/spots don't take all the maintenance).
   Team split (4 people): A = core engine/repairs/maintenance (Miro + Claude), B = environment
