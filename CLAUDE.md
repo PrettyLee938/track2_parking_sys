@@ -202,7 +202,16 @@ pm run report:routes -w server); controller opens ALL route gates in order befor
   fill-zone-1-first: gate1 (shared entry) had 169 openings for 802 cars (held open across streams) but gate2 (ZONE1
   EXIT) 247 openings / 31 repairs for 463 exits - exits close after every car, so the per-car wear is on exit gates;
   spreading cars spreads exits over gate2/gate4/gate6. gate3/gate5 cost ~nothing (4-5 openings). Fill-first is
-  available as GPA_ALLOCATION_STRATEGY=lane_zone_then_any. 121 tests. NEXT: live run with zone_balanced - expect ZONE2/3 to fill,
+  available as GPA_ALLOCATION_STRATEGY=lane_zone_then_any.
+  **lvl2.json updated by the organisers (04:17):** only exit-gate coordinates moved a little + 1 road point/3
+  connections; routes identical - nothing to change (routes are re-read at every sync).
+  **Run 04:05-04:27 penalties (25, 650 fines) found + fixed:** (1) gate-timing speed read ~x100 from gates
+  that "moved" in ~0.03 s (already in that state) -> game clock raced -> 27 parked cars written off at 04:18 ->
+  their spots got second cars (10 occupied-spot fines). Fix: gameClock ignores moves < 0.055 s, clamps speed to
+  0.2-12, needs TWO consecutive windows to change speed; overdue parked cars are only retired after
+  list-parking-spots shows the spot empty (retireOverdueParked, at most every GPA_PARKED_CHECK_GAME_S).
+  (2) 8 "should be charged at the exit" at 04:20 (speed-up overestimated by ~8% -> 1.5 game-s delay too short):
+  chargeDelay(exit) learns +0.5 game-s per such penalty per exit (max +3). 125 tests. NEXT: live run with zone_balanced - expect ZONE2/3 to fill,
   gate3/gate5 cycling (preventive repairs), fans switching by CO, 0 CO penalties. Lights (day/night) TODO.
   Then (was: live run to verify),
   then zone distribution (user wants a smarter spread across zones: full/broken-gate zones,

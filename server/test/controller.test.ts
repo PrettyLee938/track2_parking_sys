@@ -128,6 +128,16 @@ describe("exit and payment", () => {
     expect(c.counters.penalties).toBe(3);
   });
 
+  it("charges later at an exit where a charge was rejected as too early", async () => {
+    // 04:20 run: 8 "should be charged at the exit" in 35 s - the settle time just above our delay.
+    const { c } = await make();
+    await parkAndReachExit(c, "QNL 430");
+    await fireTimers(c);
+    await c.handle(penaltyEv("QNL430"));
+    expect(c.chargeDelay("EXIT_EXIT")).toBe(c.cfg.exitChargeDelayGameS + 0.5);
+    expect(c.chargeDelay("OTHER")).toBe(c.cfg.exitChargeDelayGameS); // per exit
+  });
+
   it("ignores unrelated penalties", async () => {
     const { c, sim } = await make();
     await parkAndReachExit(c);
@@ -290,12 +300,25 @@ describe("game speed", () => {
     // A move takes 0.03 s (network) + 0.5 game-s: 0.28 s at speed 2 calibrates...
     await gateCycles(c, advance, 5, 0.28);
     expect(c.timeScaleInfo).toMatchObject({ source: "learned" });
-    await gateCycles(c, advance, 3, 0.155); // ...and 0.155 s means speed 4
+    await gateCycles(c, advance, 3, 0.155); // ...and 0.155 s means speed 4 - once
+    expect(c.timeScaleInfo.source).toBe("learned"); // one window is not enough to move the clock
+    await gateCycles(c, advance, 3, 0.155); // confirmed by the next window
     expect(c.timeScaleInfo.source).toBe("gate timing");
     expect(c.timeScale).toBeCloseTo(4, 1);
     await learnSpeed(c, advance, 4, "S2"); // stays measured at the new speed take over again
     expect(c.timeScaleInfo.source).toBe("learned");
     expect(c.timeScale).toBeCloseTo(4, 6);
+  });
+
+  it("is not fooled by gates that report a move instantly (they did not really move)", async () => {
+    // 04:16 run: ~0.03 s "moves" read as x100, the clock raced and 27 parked cars were
+    // written off; their spots got second cars and occupied-spot fines.
+    const { c, advance } = await make();
+    await learnSpeed(c, advance, 2);
+    await gateCycles(c, advance, 5, 0.28);
+    await gateCycles(c, advance, 6, 0.035);
+    expect(c.timeScaleInfo).toMatchObject({ source: "learned" });
+    expect(c.timeScale).toBeCloseTo(2, 6);
   });
 
   it("stops the game clock while the game is paused, so parked cars do not look overdue", async () => {
@@ -958,6 +981,17 @@ describe("lost webhooks", () => {
     expect(sim.last()).toEqual(["close", "gateB"]); // the gate does not stay open forever
     expect(c.cars.has("A")).toBe(false);
     expect(c.completed.at(-1)).toMatchObject({ plate: "A", status: "gone", payment_ok: true });
+  });
+
+  it("keeps an overdue parked car whose spot the simulator still reports occupied", async () => {
+    // 04:16: parked cars written off on a wrong clock - their spots got second cars.
+    const { c, sim } = await make();
+    await c.handle(carEv("A", "S1", "CarIn", "10:00:05", "2"));
+    sim.spots.find((s) => s.name === "S1")!.detectedCars = 1; // really still there
+    back(c, "A", "parkedG", 120 + c.cfg.parkedOverstayGameS);
+    await c.tick();
+    expect(c.cars.get("A")!.status).toBe("parked");
+    expect(c.spots.get("S1")!.available).toBe(false);
   });
 
   it("retires a parked car well past its planned stay", async () => {

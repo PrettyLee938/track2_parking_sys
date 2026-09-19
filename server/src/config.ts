@@ -109,6 +109,8 @@ const schema = z.object({
   // exit") - the sensor needs < 1s to settle. 1.5 was verified at speed 1.0.
   exitChargeDelayGameS: num().nonnegative().default(1.5),
   exitChargeRetryGameS: num().nonnegative().default(2),
+  // Each "should be charged at the exit" penalty adds 0.5 game-s to that exit's delay, up to this.
+  exitChargeDelayMaxExtraGameS: num().nonnegative().default(3),
   // How long after a car clears the entry/exit sensor its gate is closed: enough for the
   // car to pass the barrier, short enough that nobody else follows. Cars leave the exit
   // ~1.5 game-s after paying and arrive every ~8 game-s.
@@ -145,6 +147,9 @@ const schema = z.object({
   releaseTimeoutGameS: num().positive().default(30),
   // A parked car normally leaves at its planned time; this much longer means we missed it.
   parkedOverstayGameS: num().positive().default(300),
+  // Before writing off overdue parked cars, the simulator is asked (list-parking-spots, at most
+  // this often, GAME seconds) whether their spots are really empty.
+  parkedCheckGameS: num().positive().default(60),
   // Any other car (driving to or waiting at an exit) with no event for this long.
   staleCarGameS: num().positive().default(600),
 

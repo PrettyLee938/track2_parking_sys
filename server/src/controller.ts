@@ -222,6 +222,9 @@ export class Controller implements Engine {
   private freshSite: string | null = null;
   /** "ENTRY1>ZONE2": cars from this entrance cannot reach that zone (learned from penalties). */
   readonly unreachable = new Set<string>();
+  private lastParkedCheckG = -Infinity;
+  /** Extra charge delay per exit (game s), learned from "should be charged at the exit" penalties. */
+  private readonly chargeDelayExtra = new Map<string, number>();
   private started = false; // real timers only once running (tests drive time by hand)
   private readonly replayedIds = new Set<string>();
   private lastResyncRequest = 0;
@@ -543,7 +546,7 @@ export class Controller implements Engine {
     for (const car of [...this.cars.values()]) {
       const sensor = car.exit_lane ? this.spots.get(car.exit_lane) : undefined;
       if (AT_EXIT.includes(car.status) && !sensor?.detected) this.cars.delete(car.plate);
-      else if (car.status === "at_exit") this.scheduleCharge(car.plate, this.cfg.exitChargeDelayGameS);
+      else if (car.status === "at_exit") this.scheduleCharge(car.plate, this.chargeDelay(car.exit_lane));
       else if (car.status === "released") await this.release(car);
       else if (DEAD.includes(car.status)) this.cars.delete(car.plate);
     }
@@ -906,7 +909,13 @@ export class Controller implements Engine {
     car.status = "at_exit";
     // Charging the instant the sensor fires is rejected ("Car should be charged at the
     // exit"): give the car a moment to settle on the exit spot.
-    this.scheduleCharge(plate, this.cfg.exitChargeDelayGameS);
+    this.scheduleCharge(plate, this.chargeDelay(lane.spot));
+  }
+
+  /** How long to let a car settle on this exit before charging it (game s): the configured
+   * delay plus whatever "should be charged at the exit" penalties there taught us. */
+  chargeDelay(exit: string | null): number {
+    return this.cfg.exitChargeDelayGameS + (exit ? this.chargeDelayExtra.get(exit) ?? 0 : 0);
   }
 
   scheduleCharge(plate: string, delayGameS: number): void {
@@ -1069,7 +1078,13 @@ export class Controller implements Engine {
     }
     if (!car || car.status !== "invoiced") return;
     if (lowered.includes(PenaltyReason.ChargeNotAtExit)) {
-      // Rejected for timing: the car is still at the exit without an invoice.
+      // Rejected for timing: the car had not settled on the exit yet. Charge later there from
+      // now on (04:20 run: 8 of these in 35 s, the settle time just above our delay).
+      if (car.exit_lane && !this.replaying) {
+        const extra = Math.min(this.cfg.exitChargeDelayMaxExtraGameS, (this.chargeDelayExtra.get(car.exit_lane) ?? 0) + 0.5);
+        this.chargeDelayExtra.set(car.exit_lane, extra);
+        this.note("warn", `${car.exit_lane}: charging ${this.chargeDelay(car.exit_lane).toFixed(1)} game-s after arrival from now on`);
+      }
       this.rebill(car, null);
     } else if (lowered.includes(PenaltyReason.ChargedWrongly) && this.cfg.rechargeOnWrongAmount) {
       // Rejected for amount, and the simulator says what it should be. Left alone the car
@@ -1557,6 +1572,7 @@ export class Controller implements Engine {
     const gatesToClose = new Set<string>();
     const retiredBefore = this.counters.ghosts_retired;
     // All in game time: a speed change or a paused game does not age anyone early.
+    const overdueParked: Car[] = [];
     for (const car of [...this.cars.values()]) {
       const quietFor = now - (car.lastSeenG ?? car.arrivedG ?? now);
       // Timed from the leavepark, not the release: a paid car waiting for its exit gate to come
@@ -1570,7 +1586,7 @@ export class Controller implements Engine {
       } else if (car.status === "parked") {
         const since = car.parkedG ?? car.lastSeenG;
         const allowed = (car.planned_minutes ?? 0) * 60 + this.cfg.parkedOverstayGameS;
-        if (since !== null && now - since > allowed) this.retire(car, `is still recorded in ${car.spot} well past its planned ${car.planned_minutes}m`);
+        if (since !== null && now - since > allowed) overdueParked.push(car);
       } else if (car.status === "queued") {
         if (now - (car.arrivedG ?? now) > this.cfg.entryPatienceGameS + 60) this.retire(car, `is still queued at ${car.entry_lane} past the give-up time`);
       } else if (["to_exit", "at_exit", "invoiced", "payment_mismatch", "entering", "unknown", "turned_away", "released"].includes(car.status)) {
@@ -1580,9 +1596,36 @@ export class Controller implements Engine {
         }
       }
     }
+    if (overdueParked.length) await this.retireOverdueParked(overdueParked, now);
     for (const gate of gatesToClose) await this.closeGateIfIdle(gate);
     if (this.counters.ghosts_retired > retiredBefore) {
       for (const lane of this.entryLanes.values()) await this.pumpEntry(lane); // spots/lanes freed
+    }
+  }
+
+  /**
+   * A parked car looks long overdue: its leaving event was lost - or our clock is wrong. Ask
+   * the simulator which spots are really occupied (one list call, at most every
+   * parkedCheckGameS) and only let go of cars whose spot is empty. Writing off a car that is
+   * still there frees its spot for a second car and a fine (04:16: 27 at once).
+   */
+  private async retireOverdueParked(cars: Car[], now: number) {
+    if (now - this.lastParkedCheckG < this.cfg.parkedCheckGameS) return;
+    this.lastParkedCheckG = now;
+    let occupied: Map<string, number>;
+    try {
+      occupied = new Map((await this.sim.listParkingSpots()).map((s) => [s.name, Number(s.detectedCars) || 0]));
+    } catch (err) {
+      this.note("warn", `cannot check overdue parked cars: ${(err as Error).message}`);
+      return;
+    }
+    for (const car of cars) {
+      if (!this.cars.has(car.plate) || car.status !== "parked") continue;
+      if (car.spot && (occupied.get(car.spot) ?? 0) > 0) {
+        car.parkedG = now; // still there: check again after another full allowance
+        continue;
+      }
+      this.retire(car, `is still recorded in ${car.spot} well past its planned ${car.planned_minutes}m, and the spot is empty`);
     }
   }
 
