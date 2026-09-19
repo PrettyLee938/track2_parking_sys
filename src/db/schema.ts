@@ -19,7 +19,7 @@ CREATE INDEX IF NOT EXISTS events_sequence_idx ON events(sequence_id);
 CREATE TABLE IF NOT EXISTS commands (
   id TEXT PRIMARY KEY, kind TEXT NOT NULL, target TEXT NOT NULL,
   payload_json TEXT NOT NULL, status TEXT NOT NULL, external_status TEXT, external_id TEXT,
-  created_at TEXT NOT NULL, updated_at TEXT NOT NULL, error TEXT, run_id TEXT
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL, error TEXT, run_id TEXT, source_event_id TEXT
 );
 CREATE TABLE IF NOT EXISTS cars (
   plate TEXT PRIMARY KEY, type TEXT NOT NULL, accessible INTEGER NOT NULL DEFAULT 0,

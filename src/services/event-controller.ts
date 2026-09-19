@@ -13,7 +13,7 @@ export class EventController {
   ) {}
 
   async apply(event: NormalizedEvent) {
-    await this.equipment.applyEvent({ type: event.type, payload: event.payload });
+    await this.equipment.applyEvent({ type: event.type, payload: event.payload, eventId: event.eventId });
     this.parking.applyEvent(event.type, event.payload);
     await this.payments.applyEvent(event.type, event.payload);
     this.commands.confirmFromEvent(event.payload);

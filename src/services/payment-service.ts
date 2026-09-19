@@ -29,6 +29,8 @@ export class PaymentService {
   }
 
   async recordPayment(sessionId: string, amountCents: number, paymentId: string = randomUUID(), allowReconciling = false) {
+    const existing = this.db.get<{ status: 'valid' | 'invalid'; reason: string | null }>('SELECT status, reason FROM payment_validations WHERE notification_id = :id ORDER BY validated_at DESC LIMIT 1', { ':id': paymentId });
+    if (existing) return { id: paymentId, status: existing.status, reason: existing.reason || undefined };
     this.currentSession(sessionId, allowReconciling);
     const invoice = this.db.get<{ id: string; total_cents: number }>('SELECT id, total_cents FROM invoices WHERE session_id = :session ORDER BY created_at DESC LIMIT 1', { ':session': sessionId });
     if (!invoice) throw new Error('invoice-missing');

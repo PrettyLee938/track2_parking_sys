@@ -47,9 +47,10 @@ export class RecoveryService {
       }
       await this.parking.refreshSnapshot(snapshot);
       if (!current) this.setMeta('run_id', snapshot.runId);
-      this.setMeta('run_status', 'active');
+      const waitingForEvents = this.meta('reconcile_reason') === 'sequence-gap';
+      this.setMeta('run_status', waitingForEvents ? 'reconciling' : 'active');
       this.audit.record('run-reconciled', 'simulator-run', snapshot.runId, {});
-      return { status: 'resumed' as const, runId: snapshot.runId };
+      return { status: waitingForEvents ? 'unknown' as const : 'resumed' as const, runId: snapshot.runId };
     } catch (error) {
       this.setMeta('run_status', 'reconciling');
       this.audit.record('run-reconcile-failed', 'simulator-run', this.meta('run_id'), { error: error instanceof Error ? error.message : String(error) });

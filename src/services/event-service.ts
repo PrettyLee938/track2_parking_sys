@@ -75,6 +75,8 @@ export class EventService {
     return rows.map((row) => ({ eventId: row.event_id, type: row.type, sequenceId: row.sequence_id, runId: row.run_id || undefined, receivedAt: row.received_at, payload: JSON.parse(row.raw_json) as Record<string, unknown> }));
   }
 
+  pending(runId?: string) { return this.pendingEvents(runId); }
+
   markProcessed(eventId: string) { this.db.run('UPDATE events SET processed = 1 WHERE event_id = :id', { ':id': eventId }); }
 
   list(limit = 100) { return this.db.all('SELECT * FROM events ORDER BY sequence_id DESC LIMIT :limit', { ':limit': limit }); }

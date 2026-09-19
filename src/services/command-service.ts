@@ -15,9 +15,12 @@ export class CommandService {
     if (!health.connected || !health.discoveryComplete) throw new Error('gateway-not-connected');
     if (!runId || runId.startsWith('pending-new-') || !health.runId) throw new Error('run-identity-unknown');
     if (health.runId !== runId) throw new Error('run-identity-mismatch');
+    const sourceEventId = typeof input.payload.sourceEventId === 'string' ? input.payload.sourceEventId : undefined;
+    const existing = sourceEventId && this.db.get<{ id: string; status: CommandStatus; external_status: string | null; external_id: string | null; error: string | null }>('SELECT id, status, external_status, external_id, error FROM commands WHERE source_event_id = :source AND kind = :kind AND run_id = :run', { ':source': sourceEventId, ':kind': input.kind, ':run': runId });
+    if (existing) return { ...input, id: existing.id, status: existing.status, acceptance: { accepted: existing.external_status === 'accepted', outcome: existing.status === 'rejected' ? 'rejected' as const : existing.status === 'unknown' ? 'unknown' as const : 'accepted' as const, externalId: existing.external_id || undefined, error: existing.error || undefined } };
     const command: SimulatorCommand = { ...input, id: randomUUID() };
     const now = new Date(this.clock()).toISOString();
-    this.db.run('INSERT INTO commands (id, kind, target, payload_json, status, created_at, updated_at, run_id, external_id) VALUES (:id, :kind, :target, :payload, :status, :created, :updated, :run, :external)', { ':id': command.id, ':kind': command.kind, ':target': command.target, ':payload': JSON.stringify(command.payload), ':status': 'pending', ':created': now, ':updated': now, ':run': runId, ':external': null });
+    this.db.run('INSERT INTO commands (id, kind, target, payload_json, status, created_at, updated_at, run_id, external_id, source_event_id) VALUES (:id, :kind, :target, :payload, :status, :created, :updated, :run, :external, :source)', { ':id': command.id, ':kind': command.kind, ':target': command.target, ':payload': JSON.stringify(command.payload), ':status': 'pending', ':created': now, ':updated': now, ':run': runId, ':external': null, ':source': sourceEventId || null });
     let acceptance;
     try { acceptance = await this.gateway.send(command); }
     catch (error) { acceptance = { accepted: false, outcome: 'unknown' as const, externalId: undefined, error: error instanceof Error ? error.message : String(error) }; }

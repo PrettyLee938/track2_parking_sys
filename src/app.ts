@@ -65,6 +65,12 @@ export function buildApp(options: AppOptions = {}): { app: FastifyInstance; cont
     recovery.beginStartupReconciliation();
     recovery.startAutomaticResume();
     if (recovery.status().status === 'reconciling') await recovery.reconcile();
+    if (recovery.status().status === 'active') {
+      for (const event of events.pending(recovery.status().runId)) {
+        try { await eventController.apply(event); events.markProcessed(event.eventId); }
+        catch (error) { audit.record('event-replay-failed', 'event', event.eventId, { error: error instanceof Error ? error.message : String(error) }); }
+      }
+    }
   });
   app.addHook('onClose', async () => { recovery.stopAutomaticResume(); auth.invalidateAll(); if (ownsDb) db.close(); });
   return { app, context };

@@ -2,7 +2,7 @@ import type { Database } from '../db/database.js';
 import { AuditService } from './audit.js';
 import type { CommandService } from './command-service.js';
 
-type EventInput = { type: string; payload: Record<string, unknown> };
+type EventInput = { type: string; payload: Record<string, unknown>; eventId?: string };
 const pick = (payload: Record<string, unknown>, ...keys: string[]) => keys.map((key) => payload[key]).find((value) => value !== undefined && value !== null);
 
 export class EquipmentService {
@@ -18,7 +18,7 @@ export class EquipmentService {
       this.save(`zone:${id}`, 'zone', 'observed', level, now, id);
       const fanId = pick(event.payload, 'FanId', 'fanId');
       if (fanId) {
-        try { await this.setFan(String(fanId), level >= this.coThreshold); }
+        try { await this.setFan(String(fanId), level >= this.coThreshold, undefined, event.eventId); }
         catch (error) { this.audit.record('equipment-command-deferred', 'component', String(fanId), { reason: error instanceof Error ? error.message : String(error), coLevel: level }); }
       }
     }
@@ -39,14 +39,14 @@ export class EquipmentService {
     return { id, status: 'repair-requested' as const, commandId: command.id };
   }
 
-  async setFan(id: string, enabled: boolean, actorId?: string) { return this.issueEquipmentCommand('fan.set', id, enabled, actorId); }
+  async setFan(id: string, enabled: boolean, actorId?: string, sourceEventId?: string) { return this.issueEquipmentCommand('fan.set', id, enabled, actorId, sourceEventId); }
   async setLight(id: string, enabled: boolean, actorId?: string) { return this.issueEquipmentCommand('light.set', id, enabled, actorId); }
 
-  private async issueEquipmentCommand(kind: string, id: string, enabled: boolean, actorId?: string) {
+  private async issueEquipmentCommand(kind: string, id: string, enabled: boolean, actorId?: string, sourceEventId?: string) {
     const component = this.db.get<{ status: string }>('SELECT status FROM components WHERE id = :id', { ':id': id });
     if (component && ['broken', 'under-maintenance', 'repair-requested'].includes(component.status)) throw new Error('component-unavailable');
     if (kind === 'fan.set' && !enabled && this.db.get('SELECT id FROM components WHERE kind = :kind AND co_level >= :threshold', { ':kind': 'zone', ':threshold': this.coThreshold })) throw new Error('fan-required-for-co');
-    const command = await this.commands.issue({ kind, target: `/api/v1/${kind.split('.')[0]}s/${encodeURIComponent(id)}`, payload: { id, enabled } }, actorId);
+    const command = await this.commands.issue({ kind, target: `/api/v1/${kind.split('.')[0]}s/${encodeURIComponent(id)}`, payload: { id, enabled, ...(sourceEventId ? { sourceEventId } : {}) } }, actorId);
     this.audit.record('equipment-command-requested', 'component', id, { kind, enabled, commandId: command.id }, actorId);
     return command;
   }

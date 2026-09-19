@@ -7,9 +7,16 @@ const migrations: Migration[] = [{
   apply(connection) {
     const columns = connection.prepare('PRAGMA table_info(events)').all() as Array<{ name: string }>;
     if (!columns.some((column) => column.name === 'signature_digest')) connection.exec('ALTER TABLE events ADD COLUMN signature_digest TEXT');
-    if (!columns.some((column) => column.name === 'processed')) connection.exec('ALTER TABLE events ADD COLUMN processed INTEGER NOT NULL DEFAULT 0');
     const commandColumns = connection.prepare('PRAGMA table_info(commands)').all() as Array<{ name: string }>;
     if (!commandColumns.some((column) => column.name === 'external_id')) connection.exec('ALTER TABLE commands ADD COLUMN external_id TEXT');
+  }
+}, {
+  version: 2,
+  apply(connection) {
+    const eventColumns = connection.prepare('PRAGMA table_info(events)').all() as Array<{ name: string }>;
+    if (!eventColumns.some((column) => column.name === 'processed')) connection.exec('ALTER TABLE events ADD COLUMN processed INTEGER NOT NULL DEFAULT 0');
+    const commandColumns = connection.prepare('PRAGMA table_info(commands)').all() as Array<{ name: string }>;
+    if (!commandColumns.some((column) => column.name === 'source_event_id')) connection.exec('ALTER TABLE commands ADD COLUMN source_event_id TEXT');
   }
 }];
 
