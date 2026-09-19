@@ -1,0 +1,123 @@
+{
+  "name": "lvl3",
+  "entry_lanes": [
+    {
+      "spot": "ENTRY1",
+      "gate": "gate1",
+      "zone": "ZONE1"
+    },
+    {
+      "spot": "ENTRY2",
+      "gate": "gate3",
+      "zone": "ZONE2"
+    },
+    {
+      "spot": "ENTRY3",
+      "gate": "gate5",
+      "zone": "ZONE3"
+    },
+    {
+      "spot": "Entry104",
+      "gate": "gate9",
+      "zone": "ZONE4"
+    },
+    {
+      "spot": "OENTRY1",
+      "gate": "gate8",
+      "zone": "ZONE4"
+    },
+    {
+      "spot": "OENTRY2",
+      "gate": "gate10",
+      "zone": "ZONE5"
+    },
+    {
+      "spot": "OENTRY3",
+      "gate": "gate13",
+      "zone": "ZONE6"
+    },
+    {
+      "spot": "OENTRY4",
+      "gate": "gate16",
+      "zone": "ZONE7"
+    }
+  ],
+  "exit_lanes": [
+    {
+      "spot": "EXIT_EXIT",
+      "gate": "gate2",
+      "zone": "ZONE1"
+    },
+    {
+      "spot": "Exit67",
+      "gate": "gate4",
+      "zone": "ZONE2"
+    },
+    {
+      "spot": "Exit100",
+      "gate": "gate6",
+      "zone": "ZONE3"
+    },
+    {
+      "spot": "Exit103",
+      "gate": "gate7",
+      "zone": "ZONE4"
+    },
+    {
+      "spot": "Exit187",
+      "gate": "gate11",
+      "zone": "ZONE5"
+    },
+    {
+      "spot": "Exit188",
+      "gate": "gate12",
+      "zone": "ZONE5"
+    },
+    {
+      "spot": "Exit191",
+      "gate": "gate14",
+      "zone": "ZONE6"
+    },
+    {
+      "spot": "Exit192",
+      "gate": "gate15",
+      "zone": "ZONE6"
+    },
+    {
+      "spot": "Exit234",
+      "gate": "gate17",
+      "zone": "ZONE7"
+    },
+    {
+      "spot": "Exit235",
+      "gate": "gate18",
+      "zone": "ZONE7"
+    }
+  ],
+  "notes": {
+    "generated_from": "lvl3.json",
+    "gate_distance": {
+      "ENTRY1": 159.5,
+      "EXIT_EXIT": 119.4,
+      "ENTRY2": 171.7,
+      "Exit67": 98.7,
+      "ENTRY3": 172.9,
+      "Exit100": 118.4,
+      "Exit103": 115.1,
+      "Entry104": 143.1,
+      "OENTRY1": 121.8,
+      "OENTRY2": 353.2,
+      "Exit187": 104.4,
+      "Exit188": 147.0,
+      "OENTRY3": 271.2,
+      "Exit191": 111.5,
+      "Exit192": 100.6,
+      "OENTRY4": 368.9,
+      "Exit234": 119.1,
+      "Exit235": 113.2
+    },
+    "gates_not_on_a_lane": [
+      "gate19"
+    ]
+  }
+}

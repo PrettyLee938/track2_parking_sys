@@ -1,0 +1,51 @@
+{
+  "name": "lvl2",
+  "entry_lanes": [
+    {
+      "spot": "ENTRY1",
+      "gate": "gate1",
+      "zone": "ZONE1"
+    },
+    {
+      "spot": "ENTRY2",
+      "gate": "gate3",
+      "zone": "ZONE2"
+    },
+    {
+      "spot": "ENTRY3",
+      "gate": "gate5",
+      "zone": "ZONE3"
+    }
+  ],
+  "exit_lanes": [
+    {
+      "spot": "EXIT_EXIT",
+      "gate": "gate2",
+      "zone": "ZONE1"
+    },
+    {
+      "spot": "Exit67",
+      "gate": "gate4",
+      "zone": "ZONE2"
+    },
+    {
+      "spot": "Exit100",
+      "gate": "gate6",
+      "zone": "ZONE3"
+    }
+  ],
+  "notes": {
+    "generated_from": "lvl2.json",
+    "gate_distance": {
+      "ENTRY1": 159.5,
+      "EXIT_EXIT": 119.4,
+      "ENTRY2": 171.7,
+      "Exit67": 98.7,
+      "ENTRY3": 172.9,
+      "Exit100": 118.4
+    },
+    "gates_not_on_a_lane": [
+      "gate7"
+    ]
+  }
+}

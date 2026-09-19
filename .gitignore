@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+
+# runtime data
+data/
+*.jsonl
+*.db
