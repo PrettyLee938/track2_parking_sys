@@ -50,7 +50,8 @@ export function validateCredentials(username: string | undefined, password: stri
   return null;
 }
 
-type LoginResult = { ok: true; token: string; user: UserView } | { ok: false; reason: "invalid" | "throttled"; retryAfterS?: number };
+type LoginResult = { ok: true; token: string; user: UserView; previousAttempts: ReturnType<Store["listLoginAttempts"]> } |
+  { ok: false; reason: "invalid" | "throttled"; retryAfterS?: number };
 
 export class AuthService {
   private readonly failures = new Map<string, { count: number; until: number }>();
@@ -70,10 +71,13 @@ export class AuthService {
     return { username: this.cfg.adminUsername, generatedPassword: generated };
   }
 
-  async login(username: string, password: string): Promise<LoginResult> {
+  async login(username: string, password: string, source: { ip?: string | null } = {}): Promise<LoginResult> {
     const key = username.toLowerCase(), now = Date.now();
     const f = this.failures.get(key);
-    if (f && f.until > now) return { ok: false, reason: "throttled", retryAfterS: Math.ceil((f.until - now) / 1000) };
+    if (f && f.until > now) {
+      this.store.recordLoginAttempt({ username, userId: this.store.findUser(username)?.id ?? null, ok: false, ip: source.ip, reason: "throttled" });
+      return { ok: false, reason: "throttled", retryAfterS: Math.ceil((f.until - now) / 1000) };
+    }
 
     const row = this.store.findUser(username);
     // Hash even when the user does not exist, so timing does not reveal valid usernames.
@@ -82,15 +86,19 @@ export class AuthService {
       const count = (f?.count ?? 0) + 1;
       const locked = count >= this.cfg.loginMaxFailures;
       this.failures.set(key, { count: locked ? 0 : count, until: locked ? now + this.cfg.loginLockoutS * 1000 : 0 });
+      this.store.recordLoginAttempt({ username, userId: row?.id ?? null, ok: false, ip: source.ip,
+        reason: !row ? "unknown user" : row.disabled ? "disabled" : "bad password" });
       return { ok: false, reason: "invalid" };
     }
     this.failures.delete(key);
     const token = randomBytes(32).toString("base64url");
     this.store.createAuthSession(sha256(token), row.id, now + this.cfg.sessionTtlH * 3600_000);
     this.store.touchLogin(row.id);
+    const attemptId = this.store.recordLoginAttempt({ username: row.username, userId: row.id, ok: true, ip: source.ip, reason: null });
     this.store.purgeExpiredAuthSessions(now);
     const { password_hash, ...user } = row;
-    return { ok: true, token, user: { ...user, last_login_at: new Date().toISOString() } };
+    return { ok: true, token, user: { ...user, last_login_at: new Date().toISOString() },
+      previousAttempts: this.store.listLoginAttempts(row.username, 3, attemptId) };
   }
 
   userForToken(token: string | undefined): UserView | null {

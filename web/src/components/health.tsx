@@ -20,15 +20,8 @@ const EVENT_LABEL: Record<ComponentEventView["event"], { text: string; tone: "cr
   fixed: { text: "back in service", tone: "good" },
 };
 
-/** StateSnapshot.subsystems.environment (server/src/environment.ts). */
-interface EnvironmentView {
-  polls: number;
-  zones: { zone: string; fans_on: number; fans: number; co: number | null; risk: string | null; forced: boolean; want: boolean }[];
-}
-
-export function ComponentHealthCard({ components, environment }: { components: ComponentView[]; environment?: unknown }) {
+export function ComponentHealthCard({ components }: { components: ComponentView[] }) {
   const trouble = components.filter((c) => c.health !== "ok");
-  const env = environment as EnvironmentView | undefined;
   return (
     <Card title="Component health" subtitle="Broken parts are repaired automatically as soon as nothing is using them">
       <div className="tiles">
@@ -43,24 +36,6 @@ export function ComponentHealthCard({ components, environment }: { components: C
           );
         })}
       </div>
-      {env?.zones?.length ? (
-        <>
-          <h3 className="section-title">Exhaust fans: on at CO 50 and above, off below</h3>
-          <table className="data compact">
-            <thead><tr><th>Zone</th><th className="right">CO</th><th>Fans on</th><th>State</th></tr></thead>
-            <tbody>
-              {env.zones.map((z) => (
-                <tr key={z.zone}>
-                  <td><b>{z.zone}</b></td>
-                  <td className="right">{z.co === null ? "—" : `${z.co.toFixed(0)}${z.risk ? ` (${z.risk})` : ""}`}</td>
-                  <td>{z.fans_on} / {z.fans}</td>
-                  <td>{z.forced ? <Badge tone="critical">CO penalty - clearing</Badge> : z.want ? <Badge tone="warning">CO high - venting</Badge> : <span className="muted">clean - off</span>}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </>
-      ) : null}
       <h3 className="section-title">Out of service</h3>
       {!trouble.length ? <Empty>Everything is working.</Empty> : (
         <table className="data compact">

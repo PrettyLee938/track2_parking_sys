@@ -95,6 +95,7 @@ Sign in with a dashboard account (the admin creates the others under **Admin**).
 | `npm test` | controller, webhook and HTTP tests against a fake simulator |
 | `npm run typecheck` | typecheck every package |
 | `npm run smoke` | live check: API both ways + webhook delivery (`-- --gates` to cycle a gate) |
+| `npm run level2-live` | live Level 2 acceptance check: three-zone topology, fan/light inventory, daytime lights, CO ventilation, car flow and signed webhooks |
 | `npm run single-car` | drive one car by hand (server must run with `GPA_CONTROLLER_ENABLED=false`) |
 | `npm run topology -- --levels-dir "<sim>/settings"` | regenerate `topology/*.json` from the simulator's layouts |
 | `npm run fake-sim -w server` | a stand-in simulator API on :9899 for dashboard work (`GPA_SIM_BASE_URL=http://127.0.0.1:9899/api/v1`) |

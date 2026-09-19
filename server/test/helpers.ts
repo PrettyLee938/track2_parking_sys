@@ -132,7 +132,9 @@ export async function make(opts: { sim?: FakeSim; topo?: Topology; topologies?: 
   const store = new Store(":memory:");
   const queue = new RecordingQueue();
   // closeIdleGatesOnSync off keeps call logs simple; it has its own test.
-  const cfg = testSettings({ closeIdleGatesOnSync: false, ...opts.cfg });
+  // Unit tests that exercise limit learning start with unknown limits; the
+  // production defaults are calibrated for the real Level 2 simulator.
+  const cfg = testSettings({ closeIdleGatesOnSync: false, gateCycleLimit: 0, spotUseLimit: 0, ...opts.cfg });
   // The clock reads a hand-driven wall clock, starting at the real one (replayed events
   // carry real timestamps).
   const time = { now: Date.now() / 1000 };

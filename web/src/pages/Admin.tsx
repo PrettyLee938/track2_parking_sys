@@ -1,6 +1,6 @@
 /** Admin only: accounts, site controls, audit trail, configuration. */
 import { useCallback, useEffect, useState, type FormEvent } from "react";
-import type { ActionView, Role, UserView } from "@gpa/shared";
+import type { AuditEntryView, Role, UserView } from "@gpa/shared";
 import { Badge, Button, Card, Empty, useCommand, useToast } from "../components/ui";
 import { api } from "../lib/api";
 import { useAuth } from "../lib/auth";
@@ -124,21 +124,19 @@ function SiteControls() {
 }
 
 function Audit() {
-  const [items, setItems] = useState<ActionView[]>([]);
-  useEffect(() => { api.actions({ manual: true, limit: 50 }).then((r) => setItems(r.items)).catch(() => undefined); }, []);
+  const [items, setItems] = useState<AuditEntryView[]>([]);
+  useEffect(() => { const load = () => api.audit(100).then((r) => setItems(r.items)).catch(() => undefined); load(); const id = setInterval(load, 5000); return () => clearInterval(id); }, []);
   return (
-    <Card title="Audit trail" subtitle="Every command a person sent, newest first">
+    <Card title="Audit trail" subtitle="Important actions, security events and recovery decisions, newest first">
       {!items.length ? <Empty>No manual commands yet.</Empty> : (
         <div className="table-wrap tall">
           <table className="data compact">
-            <thead><tr><th>When</th><th>Who</th><th>Command</th><th>Result</th></tr></thead>
+            <thead><tr><th>When</th><th>Who</th><th>Action</th><th>Target</th><th>Result</th><th>Reason</th></tr></thead>
             <tbody>
               {items.map((a) => (
                 <tr key={a.id}>
-                  <td className="mono">{fmtDateTime(a.at)}</td>
-                  <td><b>{a.actor}</b></td>
-                  <td>{a.cmd} <span className="mono">{a.args.join(" ")}</span></td>
-                  <td>{a.ok ? <Badge tone="good">ok</Badge> : <Badge tone="critical" title={a.error ?? ""}>failed</Badge>}</td>
+                  <td className="mono">{fmtDateTime(a.at)}</td><td><b>{a.actor ?? "system"}</b></td><td>{a.action}</td><td className="mono">{a.target ?? "-"}</td>
+                  <td>{a.ok ? <Badge tone="good">ok</Badge> : <Badge tone="critical">failed</Badge>}</td><td>{a.detail ?? "-"}</td>
                 </tr>
               ))}
             </tbody>

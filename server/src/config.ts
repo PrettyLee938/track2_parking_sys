@@ -46,6 +46,10 @@ const schema = z.object({
   //   monitor - all of them, status only recorded: to check how a new level signs
   //             (npm run report:level -w server) before switching to strict
   signatureMode: z.enum(["strict", "lenient", "monitor"]).default("lenient"),
+  /** Profile used by the route layer to apply Level 2 ingress policy automatically. */
+  levelProfile: z.enum(["auto", "level1", "level2", "level3"]).default("auto"),
+  /** Level 2 webhooks are expected to arrive from the local simulator process. */
+  webhookLoopbackOnly: bool().default(false),
 
   // ---- site layout ----------------------------------------------------------
   topologyDir: repoPath().default(path.resolve(REPO_ROOT, "topology")),
@@ -169,8 +173,10 @@ const schema = z.object({
   // A worn-out gate is not opened until repaired. If no repair has started after this long
   // (GAME seconds) while cars wait, it is opened anyway: a breakdown beats a dead lane.
   wornWaitMaxGameS: num().positive().default(20),
-  gateCycleLimit: num().int().min(0).default(0),
-  spotUseLimit: num().int().min(0).default(0),
+  // Known Level 2 simulator limits. Keep 0 available when a deployment must
+  // learn a site-specific limit from its breakdown events.
+  gateCycleLimit: num().int().min(0).default(10),
+  spotUseLimit: num().int().min(0).default(12),
   fanHourLimit: num().min(0).default(0),
 
   // ---- environment (Level 2, environment.ts) ----------------------------------------
@@ -180,7 +186,7 @@ const schema = z.object({
   // CO webhook at all in the 2026-09-20 runs, only CO penalties.
   fanControl: bool().default(true),
   coFanOnLevel: num().nonnegative().default(50),
-  coFanOffLevel: num().nonnegative().default(30),
+  coFanOffLevel: num().nonnegative().default(50),
   coPollGameS: num().positive().default(15),
 
   // Lights (spec: they guide drivers in dark zones, cost electricity, "make sure they run
