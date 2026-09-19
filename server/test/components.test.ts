@@ -155,6 +155,34 @@ describe("component health", () => {
     expect(repairs(sim)).toEqual([["repair", "gateA"]]); // idle now, and one more opening would break it
   });
 
+  it("starts usage from zero when the simulator restarts the level with new parts", async () => {
+    // 2026-09-20 02:26: the simulator was restarted (Level 2 is not saved: all gates new), but
+    // gate1 was still "11 openings" in our books - held shut as worn out, no car got in.
+    const { c, sim, store } = await make({ cfg: { gateCycleLimit: 10 } });
+    for (let i = 0; i < 11; i++) await feed(c, gateEv("gateA", "Open"), gateEv("gateA", "Closed"));
+    expect(c.components.wornOut("gate", "gateA")).toBe(true);
+    const spots = sim.spots;
+    sim.spots = []; // restarted: on the menu...
+    await c.sync();
+    sim.spots = spots; // ...then the level is started again
+    await c.sync();
+    expect(c.components.views().find((v) => v.name === "gateA")).toMatchObject({ uses: 0, uses_total: 11 });
+    expect(store.loadComponent("gate", "gateA")!.uses).toBe(0);
+    await feed(c, carEv("A", "ENTRY1", "CarIn", "10:00:00"));
+    expect(sim.last()).toEqual(["open", "gateA"]);
+  });
+
+  it("uses a worn gate anyway when the simulator refuses its preventive repair", async () => {
+    const { c, sim } = await make({ cfg: { gateCycleLimit: 10 } });
+    for (let i = 0; i < 9; i++) await feed(c, gateEv("gateA", "Open"), gateEv("gateA", "Closed"));
+    sim.failing.add("repair");
+    await c.handle(carEv("A", "ENTRY1", "CarIn", "10:00:00"));
+    expect(sim.calls.filter((x) => x[0] === "repair")).toHaveLength(1);
+    expect(c.components.wornOut("gate", "gateA")).toBe(false); // a dead lane is worse than a breakdown
+    await c.tick();
+    expect(sim.last()).toEqual(["open", "gateA"]);
+  });
+
   it("keeps working when the level has no fans or lights to list (Level 1)", async () => {
     const sim = FakeSim.lvl1();
     sim.listExhaustFans = async () => { throw new Error("404"); };

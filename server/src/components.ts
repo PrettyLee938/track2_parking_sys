@@ -40,6 +40,8 @@ interface Part {
   retryAfterG: number;         // game clock: no repair attempt before this
   waiting: string | null;
   dirty: boolean;              // usage changed, not yet saved
+  blockedSinceG: number | null; // a car has waited for its preventive repair since (game clock)
+  useAnyway: boolean;          // its preventive repair was refused / never came: use it until it breaks
 }
 
 const KIND_OF_TYPE: Record<string, ComponentKind> = {
@@ -97,7 +99,46 @@ export class ComponentRegistry implements Subsystem {
   /** One more use would break it: repair first. (For a gate, "use" = an opening.) */
   wornOut(kind: ComponentKind, name: string): boolean {
     const p = this.get(kind, name), limit = this.limit(kind);
-    return !!p && limit !== null && p.uses >= limit - 1;
+    return this.engine.cfg.preventiveMaintenance && !!p && !p.useAnyway && limit !== null && p.uses >= limit - 1;
+  }
+
+  /**
+   * The controller wants to open a gate. If it is worn out, start its repair right now and
+   * say no (cars wait for the repair). Never a dead lane: if the repair is refused, or none
+   * starts within wornWaitMaxGameS, the gate is used anyway - a breakdown costs a fine, a
+   * gate that never opens costs every car behind it.
+   */
+  async holdForRepair(kind: ComponentKind, name: string): Promise<boolean> {
+    const p = this.get(kind, name);
+    if (!p || !this.wornOut(kind, name)) return false;
+    const now = this.engine.clock.now();
+    if (p.blockedSinceG === null) {
+      p.blockedSinceG = now;
+      this.engine.note("warn", `${kind} ${name} is due for maintenance before its next use (${Math.round(p.uses)}/${this.limit(kind)}) - repairing first`);
+    }
+    await this.preventiveRepair(p, true);
+    if (this.health(p) !== "ok") return true; // repair under way: resume() carries on once fixed
+    if (now - p.blockedSinceG >= this.engine.cfg.wornWaitMaxGameS) {
+      this.engine.note("error", `${kind} ${name}: preventive repair did not start after ${this.engine.cfg.wornWaitMaxGameS} game-s - using it anyway`);
+      p.useAnyway = true;
+      p.blockedSinceG = null;
+      return false;
+    }
+    return true;
+  }
+
+  /** New parts on site (simulator restarted, level changed): usage starts again from zero.
+   * History (breakdowns, the uses they happened at - i.e. the learned limits) is kept. */
+  resetUsage(reason: string): void {
+    let changed = 0;
+    for (const p of this.parts.values()) {
+      if (p.uses) changed++;
+      p.uses = 0;
+      p.useAnyway = false;
+      p.blockedSinceG = null;
+      this.save(p);
+    }
+    if (changed) this.engine.note("info", `usage counts reset for ${changed} parts: ${reason}`);
   }
 
   views(): ComponentView[] {
@@ -184,25 +225,33 @@ export class ComponentRegistry implements Subsystem {
    * happens in a quiet moment rather than while cars queue.
    */
   private async preventiveMaintenance() {
+    for (const p of this.parts.values()) await this.preventiveRepair(p, false);
+  }
+
+  /** Repair p if it is worn (due), or well worn and idle. urgent: a car is waiting on it. */
+  private async preventiveRepair(p: Part, urgent: boolean) {
     const { engine } = this;
-    if (!engine.cfg.preventiveMaintenance || engine.replaying) return;
-    for (const p of this.parts.values()) {
-      const limit = this.limit(p.kind);
-      if (limit === null || this.health(p) !== "ok" || p.uses < limit * engine.cfg.preventiveIdleRatio) continue;
-      const due = p.uses >= limit - 1;
-      if (!due && this.demand(p)) continue; // well worn but in demand: use it a little longer
-      if (engine.clock.now() < p.retryAfterG) continue;
-      p.waiting = this.inUse(p);
-      if (p.waiting) continue;
-      const send = this.repairCommand(p);
-      if (!send) continue;
-      if (await engine.cmd("repair", send, [p.name])) {
-        this.markMaintenance(p);
-        this.record(p, "preventive_repair", null, `${Math.round(p.uses)} of ~${limit} uses${due ? "" : ", while idle"}`);
-        engine.note("info", `preventive repair of ${p.kind} ${p.name} (${Math.round(p.uses)}/${limit} uses)`);
-      } else {
-        p.retryAfterG = engine.clock.now() + engine.cfg.repairRetryGameS;
-      }
+    if (!engine.cfg.preventiveMaintenance || engine.replaying || p.useAnyway) return;
+    const limit = this.limit(p.kind);
+    if (limit === null || this.health(p) !== "ok" || p.uses < limit * engine.cfg.preventiveIdleRatio) return;
+    const due = p.uses >= limit - 1;
+    if (!due && (urgent || this.demand(p))) return; // well worn but in demand: use it a little longer
+    if (engine.clock.now() < p.retryAfterG) return;
+    p.waiting = this.inUse(p);
+    if (p.waiting) return;
+    const send = this.repairCommand(p);
+    if (!send) return;
+    if (await engine.cmd("repair", send, [p.name])) {
+      this.markMaintenance(p);
+      p.blockedSinceG = null;
+      this.record(p, "preventive_repair", null, `${Math.round(p.uses)} of ~${limit} uses${due ? "" : ", while idle"}`);
+      engine.note("info", `preventive repair of ${p.kind} ${p.name} (${Math.round(p.uses)}/${limit} uses)`);
+    } else {
+      // The simulator refused: do not hold the part hostage to a repair that will not come.
+      p.retryAfterG = engine.clock.now() + engine.cfg.repairRetryGameS;
+      p.useAnyway = true;
+      this.record(p, "repair_failed", null, "preventive repair refused - using it until it breaks");
+      engine.note("error", `preventive repair of ${p.kind} ${p.name} refused - using it until it breaks`);
     }
   }
 
@@ -225,6 +274,8 @@ export class ComponentRegistry implements Subsystem {
       p.broken = true;
       p.on = false; // a broken fan does not run - and switching it is a penalty
     }
+    p.useAnyway = false;
+    p.blockedSinceG = null;
     if (this.engine.replaying) return; // counted and recorded the first time round
     p.breakdowns++;
     p.usesAtBreakdown.push(Math.round(p.uses * 100) / 100);
@@ -241,6 +292,8 @@ export class ComponentRegistry implements Subsystem {
     if (p.kind === "fan" || p.kind === "light") p.broken = p.maintenance = false;
     p.waiting = null;
     p.retryAfterG = 0;
+    p.useAnyway = false;
+    p.blockedSinceG = null;
     if (this.engine.replaying) return;
     p.uses = 0; // counted again from this repair
     p.lastFixedAt = e.ServerDateTime ?? new Date().toISOString();
@@ -329,7 +382,7 @@ export class ComponentRegistry implements Subsystem {
       kind, name, zone, group: null, broken: false, maintenance: false, on: null,
       uses: saved?.uses ?? 0, usesTotal: saved?.uses_total ?? 0, breakdowns: saved?.breakdowns ?? 0,
       usesAtBreakdown: saved?.uses_at_breakdown ?? [], lastBrokenAt: saved?.last_broken_at ?? null,
-      lastFixedAt: saved?.last_fixed_at ?? null, retryAfterG: 0, waiting: null, dirty: false,
+      lastFixedAt: saved?.last_fixed_at ?? null, retryAfterG: 0, waiting: null, dirty: false, blockedSinceG: null, useAnyway: false,
     };
   }
 

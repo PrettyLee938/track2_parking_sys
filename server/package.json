@@ -22,6 +22,7 @@
     "report:window": "tsx tools/window.ts",
     "report:speed": "tsx tools/speedReplay.ts",
     "report:level": "tsx tools/levelReport.ts",
+    "report:live": "tsx tools/live.ts",
     "discover": "tsx tools/discover.ts",
     "user:password": "tsx tools/setPassword.ts",
     "fake-sim": "tsx tools/fakeSim.ts"

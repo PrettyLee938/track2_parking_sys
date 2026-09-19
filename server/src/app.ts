@@ -302,6 +302,24 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
     ...intake.stats, last_sequence_id: intake.lastSeq, controller_enabled: cfg.controllerEnabled,
   }));
   app.get<{ Querystring: { n?: string } }>("/debug/recent", debugAccess, async (req) => recent.slice(-(Number(req.query.n) || 20)));
+  // What the engine is doing right now (npm run report:live -w server): lanes, gates and
+  // their wear, the task queue, the latest feed - to diagnose a live run from this machine.
+  app.get("/debug/controller", debugAccess, async () => {
+    const s = controller.snapshot();
+    return {
+      synced: s.synced, topology: s.topology?.name ?? null, time_scale: s.time_scale, time_scale_source: s.time_scale_source,
+      queue_depth: (controller.queue as { depth?: number }).depth ?? null,
+      entry_lanes: s.entry_lanes, exit_lanes: s.exit_lanes,
+      gates: s.gates.map((g) => {
+        const c = s.components.find((x) => x.kind === "gate" && x.name === g.name);
+        return { ...g, uses: c?.uses ?? null, worn: controller.components.wornOut("gate", g.name), waiting: c?.waiting ?? null };
+      }),
+      gate_limit: controller.components.limit("gate"),
+      out_of_service: s.components.filter((c) => c.health !== "ok").map((c) => `${c.kind} ${c.name} ${c.health}${c.waiting ? ` (${c.waiting})` : ""}`),
+      cars: s.active_cars.length, counters: s.counters, feed: s.feed.slice(-40),
+    };
+  });
+
   app.get("/debug/config", debugAccess, async () => ({ ...cfg, simPassword: "***", adminPassword: cfg.adminPassword ? "***" : undefined }));
 
   // ---------------------------------------------------------------------------
