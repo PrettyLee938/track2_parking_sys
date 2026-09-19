@@ -1,10 +1,12 @@
 import type { SimulatorCommand, SimulatorSnapshot } from '../domain/types.js';
 import type { CommandAcceptance, GatewayHealth, SimulatorGateway } from './contracts.js';
+import { WebhookBoundary } from './webhook-boundary.js';
 
 export class FixtureGateway implements SimulatorGateway {
   readonly commands: SimulatorCommand[] = [];
   private connected = false;
   private readonly snapshot: SimulatorSnapshot;
+  private readonly boundary = new WebhookBoundary();
 
   constructor(snapshot?: Partial<SimulatorSnapshot>) {
     this.snapshot = {
@@ -34,4 +36,6 @@ export class FixtureGateway implements SimulatorGateway {
   health(): GatewayHealth {
     return { connected: this.connected, runId: this.connected ? this.snapshot.runId : undefined, lastError: undefined, checkedAt: new Date().toISOString() };
   }
+
+  webhookBoundary() { return this.boundary; }
 }

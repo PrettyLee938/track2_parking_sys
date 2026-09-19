@@ -1,4 +1,5 @@
 import type { SimulatorCommand, SimulatorSnapshot } from '../domain/types.js';
+import type { WebhookBoundary } from './webhook-boundary.js';
 
 export interface GatewayHealth {
   connected: boolean;
@@ -19,4 +20,5 @@ export interface SimulatorGateway {
   send(command: SimulatorCommand): Promise<CommandAcceptance>;
   reconcile(): Promise<SimulatorSnapshot>;
   health(): GatewayHealth;
+  webhookBoundary(): WebhookBoundary;
 }

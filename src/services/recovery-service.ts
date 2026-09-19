@@ -17,6 +17,7 @@ export class RecoveryService {
       const current = this.meta('run_id');
       if (current && current !== snapshot.runId) {
         this.setMeta('run_status', 'ambiguous');
+        this.setMeta('pending_run_id', snapshot.runId);
         this.audit.record('run-ambiguous', 'simulator-run', snapshot.runId, { previousRunId: current, observedRunId: snapshot.runId });
         return { status: 'ambiguous' as const, runId: snapshot.runId };
       }
@@ -43,6 +44,10 @@ export class RecoveryService {
     this.db.transaction(() => {
       this.db.run('DELETE FROM spots');
       this.db.run('DELETE FROM components');
+      if (previous) {
+        this.db.run("UPDATE commands SET status = 'unknown' WHERE run_id = :run AND status IN ('pending', 'unknown')", { ':run': previous });
+        this.db.run("UPDATE overrides SET status = 'closed' WHERE session_id IN (SELECT id FROM parking_sessions WHERE run_id = :run) AND status = 'active'", { ':run': previous });
+      }
       this.setMeta('run_id', runId);
       this.setMeta('run_status', 'active');
     });
@@ -52,7 +57,9 @@ export class RecoveryService {
 
   continueRun(actorId: string) {
     if (this.meta('run_status') !== 'ambiguous') throw new Error('run-not-ambiguous');
-    const runId = this.meta('run_id');
+    const runId = this.meta('pending_run_id') || this.meta('run_id');
+    this.setMeta('run_id', runId || 'unknown');
+    this.setMeta('pending_run_id', '');
     this.setMeta('run_status', 'active');
     this.audit.record('run-continued', 'simulator-run', runId, {}, actorId);
     return { status: 'active' as const, runId };

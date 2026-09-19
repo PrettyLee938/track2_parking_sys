@@ -1,12 +1,14 @@
 import type { Config } from '../config.js';
 import type { SimulatorCommand, SimulatorSnapshot, SpotCandidate } from '../domain/types.js';
 import type { CommandAcceptance, GatewayHealth, SimulatorGateway } from './contracts.js';
+import { WebhookBoundary } from './webhook-boundary.js';
 
 type Fetcher = typeof fetch;
 
 export class HttpSimulatorGateway implements SimulatorGateway {
   private token: string | undefined;
   private state: GatewayHealth = { connected: false, runId: undefined, lastError: undefined, checkedAt: undefined };
+  private readonly boundary = new WebhookBoundary();
 
   constructor(private readonly config: Config, private readonly fetcher: Fetcher = fetch) {}
 
@@ -34,22 +36,31 @@ export class HttpSimulatorGateway implements SimulatorGateway {
     return Array.isArray(result) ? result : result.items || [];
   }
 
+  private async optionalList<T>(path: string): Promise<T[]> {
+    try { return await this.list<T>(path); } catch { return []; }
+  }
+
   async discover(): Promise<SimulatorSnapshot> {
     if (!this.token) await this.login();
-    const [spots, components, zones, barriers, lights, fans, alarms, topology] = await Promise.all([
+    const [spots, barriers, lights, fans, alarms, zones, topology] = await Promise.all([
       this.list<SpotCandidate>('/api/v1/parking-spots'),
-      this.list<Record<string, unknown>>('/api/v1/components'),
-      this.list<Record<string, unknown>>('/api/v1/zones'),
-      this.list<Record<string, unknown>>('/api/v1/barriers'),
-      this.list<Record<string, unknown>>('/api/v1/lights'),
-      this.list<Record<string, unknown>>('/api/v1/fans'),
-      this.list<Record<string, unknown>>('/api/v1/alarms'),
-      this.list<Record<string, unknown>>('/api/v1/topology')
+      this.optionalList<Record<string, unknown>>('/api/v1/barriers'),
+      this.optionalList<Record<string, unknown>>('/api/v1/lights'),
+      this.optionalList<Record<string, unknown>>('/api/v1/fans'),
+      this.optionalList<Record<string, unknown>>('/api/v1/alarms'),
+      this.optionalList<Record<string, unknown>>('/api/v1/zones'),
+      this.optionalList<Record<string, unknown>>('/api/v1/topology')
     ]);
-    const runId = String((await this.request<Record<string, unknown>>('/api/v1/status')).runId || 'unknown-run');
-    const snapshot = { runId, levelId: 'lvl1', spots, components, zones, barriers, lights, fans, alarms, topology };
+    const status = await this.optionalStatus();
+    const runId = String(status?.runId || status?.RunId || 'unknown-run');
+    const components = [...barriers, ...lights, ...fans, ...alarms];
+    const snapshot = { runId, levelId: String(status?.levelId || status?.LevelId || 'lvl1'), spots, components, zones, barriers, lights, fans, alarms, topology };
       this.state = { connected: true, runId, lastError: undefined, checkedAt: new Date().toISOString() };
     return snapshot;
+  }
+
+  private async optionalStatus() {
+    try { return await this.request<Record<string, unknown>>('/api/v1/status'); } catch { return undefined; }
   }
 
   async send(command: SimulatorCommand): Promise<CommandAcceptance> {
@@ -72,4 +83,6 @@ export class HttpSimulatorGateway implements SimulatorGateway {
   health() {
     return this.state;
   }
+
+  webhookBoundary() { return this.boundary; }
 }

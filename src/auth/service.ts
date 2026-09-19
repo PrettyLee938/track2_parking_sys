@@ -39,7 +39,7 @@ export class AuthService {
     const token = randomBytes(32).toString('base64url');
     const now = new Date(this.clock()).toISOString();
     this.db.run('INSERT INTO sessions (token_hash, user_id, created_at, last_seen_at) VALUES (:token, :user, :created, :seen)', { ':token': tokenHash(token), ':user': row.id, ':created': now, ':seen': now });
-    return { token, user: userFromRow(row) };
+    return { token, csrfToken: randomBytes(24).toString('base64url'), user: userFromRow(row) };
   }
 
   async authenticate(token: string | undefined): Promise<User | null> {
@@ -64,6 +64,7 @@ export class AuthService {
 
   async createUser(actor: User, username: string, password: string, role: Role): Promise<User> {
     if (actor.role !== 'admin') throw new Error('forbidden');
+    if (role !== 'operator') throw new Error('invalid-role');
     const id = randomUUID();
     this.db.run('INSERT INTO users (id, username, role, password_hash, created_at) VALUES (:id, :username, :role, :hash, :created)', { ':id': id, ':username': username, ':role': role, ':hash': hashPassword(password), ':created': new Date(this.clock()).toISOString() });
     return { id, username, role, mustChangePassword: true, active: true };

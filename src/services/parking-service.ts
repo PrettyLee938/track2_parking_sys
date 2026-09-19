@@ -20,6 +20,15 @@ export class ParkingService {
       this.db.run('INSERT INTO meta (key, value) VALUES (:key, :value) ON CONFLICT(key) DO UPDATE SET value = excluded.value', { ':key': 'run_id', ':value': snapshot.runId });
       this.db.run('INSERT INTO meta (key, value) VALUES (:key, :value) ON CONFLICT(key) DO UPDATE SET value = excluded.value', { ':key': 'run_status', ':value': 'active' });
       for (const spot of snapshot.spots) this.db.run('INSERT INTO spots (id, type, accessible, occupied, reserved, broken, under_maintenance, reachable, zone_safe, rank, run_id) VALUES (:id, :type, :accessible, :occupied, :reserved, :broken, :maintenance, :reachable, :safe, :rank, :run) ON CONFLICT(id) DO UPDATE SET type=excluded.type, accessible=excluded.accessible, occupied=excluded.occupied, broken=excluded.broken, under_maintenance=excluded.under_maintenance, reachable=excluded.reachable, zone_safe=excluded.zone_safe, rank=excluded.rank, run_id=excluded.run_id', { ':id': spot.id, ':type': spot.type, ':accessible': +spot.accessible, ':occupied': +spot.occupied, ':reserved': +spot.reserved, ':broken': +spot.broken, ':maintenance': +spot.underMaintenance, ':reachable': +spot.reachable, ':safe': +spot.zoneSafe, ':rank': spot.rank, ':run': snapshot.runId });
+      const devices = [...(snapshot.components || []), ...(snapshot.barriers || []), ...(snapshot.lights || []), ...(snapshot.fans || []), ...(snapshot.alarms || [])];
+      for (const device of devices) {
+        const id = String(device.id || device.Id || device.name || device.Name || randomUUID());
+        this.db.run('INSERT INTO components (id, kind, zone_id, status, usage_count, updated_at) VALUES (:id, :kind, :zone, :status, :usage, :updated) ON CONFLICT(id) DO UPDATE SET kind=excluded.kind, zone_id=excluded.zone_id, status=excluded.status, usage_count=excluded.usage_count, updated_at=excluded.updated_at', { ':id': id, ':kind': String(device.kind || device.Kind || device.type || device.Type || 'component'), ':zone': device.zoneId || device.ZoneParent || null, ':status': String(device.status || device.Status || 'healthy'), ':usage': Number(device.usageCount || device.UsageCounter || 0), ':updated': new Date(this.clock()).toISOString() });
+      }
+      for (const zone of snapshot.zones || []) {
+        const id = String(zone.id || zone.Id || zone.name || zone.Name || randomUUID());
+        this.db.run('INSERT INTO components (id, kind, zone_id, status, updated_at) VALUES (:id, :kind, :zone, :status, :updated) ON CONFLICT(id) DO UPDATE SET zone_id=excluded.zone_id, status=excluded.status, updated_at=excluded.updated_at', { ':id': `zone:${id}`, ':kind': 'zone', ':zone': id, ':status': 'observed', ':updated': new Date(this.clock()).toISOString() });
+      }
     });
   }
 
@@ -32,8 +41,8 @@ export class ParkingService {
     const now = new Date(this.clock()).toISOString();
     this.db.transaction(() => {
       this.db.run('INSERT INTO cars (plate, type, accessible, created_at) VALUES (:plate, :type, :accessible, :created) ON CONFLICT(plate) DO UPDATE SET type=excluded.type, accessible=excluded.accessible', { ':plate': input.plate, ':type': input.type, ':accessible': +input.accessible, ':created': now });
-      const changed = Number((this.db.run('UPDATE spots SET reserved = 1 WHERE id = :id AND occupied = 0 AND reserved = 0 AND broken = 0 AND under_maintenance = 0', { ':id': choice.spotId }) as { changes: number | bigint }).changes);
-      if (changed !== 1) throw new Error('spot-unavailable');
+      const assigned = this.db.get('SELECT id FROM parking_sessions WHERE spot_id = :spot AND status IN (\'entry-pending\', \'parked\', \'at-exit\', \'departure-pending\')', { ':spot': choice.spotId });
+      if (assigned) throw new Error('spot-unavailable');
       this.db.run('INSERT INTO parking_sessions (id, plate, status, spot_id, needs_charging, started_at, run_id) VALUES (:id, :plate, :status, :spot, :charging, :started, (SELECT value FROM meta WHERE key = :run))', { ':id': sessionId, ':plate': input.plate, ':status': 'entry-pending', ':spot': choice.spotId, ':charging': +input.needsCharging, ':started': now, ':run': 'run_id' });
     });
     const command = await this.commands.issue({ kind: 'car.goto', target: `/api/v1/car/${encodeURIComponent(input.plate)}/goto/${encodeURIComponent(choice.spotId)}`, payload: { plate: input.plate, destination: choice.spotId } }, actorId);
@@ -53,7 +62,10 @@ export class ParkingService {
     if (!plate) return;
     const session = this.db.get<{ id: string; spot_id: string | null }>('SELECT id, spot_id FROM parking_sessions WHERE plate = :plate ORDER BY started_at DESC LIMIT 1', { ':plate': plate });
     if (!session) return;
-    if (spot.toLowerCase().includes('exit')) this.markAtExit(session.id);
+    if (spot.toLowerCase().includes('exit')) {
+      const current = this.db.get<{ status: string }>('SELECT status FROM parking_sessions WHERE id = :id', { ':id': session.id });
+      if (current?.status !== 'departure-pending') this.markAtExit(session.id);
+    }
     else {
       this.db.run('UPDATE parking_sessions SET status = :status WHERE id = :id', { ':status': 'parked', ':id': session.id });
       if (session.spot_id) this.db.run('UPDATE spots SET occupied = 1, reserved = 0 WHERE id = :id', { ':id': session.spot_id });

@@ -45,10 +45,17 @@ export class PaymentService {
     if (!session || session.status !== 'at-exit') throw new Error('car-not-at-exit');
     if (!this.db.get('SELECT id FROM invoices WHERE session_id = :session', { ':session': sessionId })) throw new Error('invoice-missing');
     if (this.db.get('SELECT id FROM payments WHERE session_id = :session AND status = :status', { ':session': sessionId, ':status': 'valid' })) throw new Error('payment-already-valid');
-    if (this.db.get('SELECT id FROM overrides WHERE session_id = :session AND status = :status', { ':session': sessionId, ':status': 'active' })) throw new Error('override-already-active');
     if (!reason.trim()) throw new Error('reason-required');
     const id = randomUUID();
-    this.db.run('INSERT INTO overrides (id, session_id, admin_user_id, reason, status, created_at) VALUES (:id, :session, :admin, :reason, :status, :created)', { ':id': id, ':session': sessionId, ':admin': actor.id, ':reason': reason.trim(), ':status': 'active', ':created': new Date(this.clock()).toISOString() });
+    try {
+      this.db.transaction(() => {
+        if (this.db.get('SELECT id FROM overrides WHERE session_id = :session AND status = :status', { ':session': sessionId, ':status': 'active' })) throw new Error('override-already-active');
+        this.db.run('INSERT INTO overrides (id, session_id, admin_user_id, reason, status, created_at) VALUES (:id, :session, :admin, :reason, :status, :created)', { ':id': id, ':session': sessionId, ':admin': actor.id, ':reason': reason.trim(), ':status': 'active', ':created': new Date(this.clock()).toISOString() });
+      });
+    } catch (error) {
+      if (String(error).includes('UNIQUE')) throw new Error('override-already-active');
+      throw error;
+    }
     this.audit.record('unpaid-release-authorized', 'override', id, { sessionId, reason: reason.trim() }, actor.id);
     return { id, sessionId, status: 'active' as const };
   }
@@ -72,8 +79,8 @@ export class PaymentService {
       this.db.run('UPDATE parking_sessions SET status = :status, ended_at = :ended WHERE id = :id', { ':status': 'departed', ':ended': endedAt, ':id': sessionId });
       if (session?.spot_id) this.db.run('UPDATE spots SET occupied = 0, reserved = 0 WHERE id = :id', { ':id': session.spot_id });
       this.db.run('UPDATE overrides SET status = :status, consumed_at = :consumed WHERE session_id = :session AND status = :active', { ':status': 'consumed', ':consumed': endedAt, ':session': sessionId, ':active': 'active' });
+      this.audit.record('departure-confirmed', 'parking-session', sessionId, {});
     });
-    this.audit.record('departure-confirmed', 'parking-session', sessionId, {});
   }
 
   async applyEvent(type: string, payload: Record<string, unknown>) {

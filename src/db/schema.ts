@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS overrides (
   reason TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL,
   consumed_at TEXT
 );
+CREATE UNIQUE INDEX IF NOT EXISTS active_override_idx ON overrides(session_id) WHERE status = 'active';
 CREATE TABLE IF NOT EXISTS components (
   id TEXT PRIMARY KEY, kind TEXT NOT NULL, zone_id TEXT,
   status TEXT NOT NULL, usage_count INTEGER NOT NULL DEFAULT 0,

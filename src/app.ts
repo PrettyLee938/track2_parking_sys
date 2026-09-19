@@ -41,7 +41,7 @@ export function buildApp(options: AppOptions = {}): { app: FastifyInstance; cont
   const gateway = options.gateway || new HttpSimulatorGateway(config);
   const audit = new AuditService(db);
   const auth = new AuthService(db, config.sessionIdleMs);
-  const events = new EventService(db, audit);
+  const events = new EventService(db, audit, () => Date.now(), gateway.webhookBoundary());
   const commands = new CommandService(db, gateway, audit);
   const parking = new ParkingService(db, commands, audit);
   const payments = new PaymentService(db, commands, auth, audit);
