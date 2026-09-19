@@ -68,9 +68,11 @@ describe("roles", () => {
   it("lets an operator see the site and control gates, but not administer", async () => {
     const { app, signIn } = await testServer();
     const cookie = await signIn("oper", "oper-password");
-    for (const url of ["/api/state", "/api/stats?minutes=60", "/api/timeseries", "/api/sessions", "/api/events", "/api/actions"]) {
+    for (const url of ["/api/state", "/api/stats?minutes=60", "/api/timeseries", "/api/sessions", "/api/events", "/api/actions",
+      "/api/equipment", "/api/maintenance", "/api/incidents", "/api/penalties", "/api/reports/daily?kind=operations", "/api/auth/login-attempts"]) {
       expect((await app.inject({ url, headers: { cookie } })).statusCode, url).toBe(200);
     }
+    expect((await app.inject({ url: "/api/reports/daily?kind=financial", headers: { cookie } })).statusCode).toBe(403);
     for (const [method, url] of [["GET", "/api/users"], ["POST", "/api/users"], ["PATCH", "/api/users/1"], ["GET", "/api/config"],
       ["POST", "/api/resync"], ["POST", "/api/control/entries/ENTRY1/close"]] as const) {
       expect((await app.inject({ method, url, headers: { cookie, ...json }, payload: "{}" })).statusCode, url).toBe(403);
@@ -80,6 +82,7 @@ describe("roles", () => {
   it("lets an admin manage users", async () => {
     const { app, signIn } = await testServer();
     const cookie = await signIn("admin", "admin-password");
+    expect((await app.inject({ url: "/api/reports/daily?kind=financial", headers: { cookie } })).statusCode).toBe(200);
     const created = await app.inject({ method: "POST", url: "/api/users", headers: { cookie, ...json },
       payload: JSON.stringify({ username: "night.shift", password: "long-enough", role: "operator" }) });
     expect(created.statusCode).toBe(201);
@@ -119,6 +122,7 @@ describe("roles", () => {
     const hook = await app.inject({ method: "POST", url: "/webhook", payload: '{"EventClass":"test_webhook","EventId":"x"}' });
     expect(hook.statusCode).toBe(200);
     expect((await app.inject({ url: "/debug/stats", remoteAddress: "127.0.0.1" })).statusCode).toBe(200);
+    expect((await app.inject({ url: "/debug/controller", remoteAddress: "127.0.0.1" })).statusCode).toBe(200);
     expect((await app.inject({ url: "/debug/stats", remoteAddress: "10.0.0.7" })).statusCode).toBe(403);
   });
 });

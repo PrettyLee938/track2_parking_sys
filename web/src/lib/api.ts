@@ -1,6 +1,7 @@
 /** Typed calls to our own server. The session travels in an HttpOnly cookie. */
 import type {
-  ActionsResponse, ComponentsResponse, ControlResult, CreateUserRequest, EventsResponse, GateAction, MeResponse, SessionsResponse, StateSnapshot,
+  ActionsResponse, AuditResponse, ComponentsResponse, ControlResult, CreateUserRequest, DailyReport, EventsResponse, GateAction,
+  IncidentView, LoginAttemptView, MaintenanceJobView, MeResponse, PenaltiesResponse, SessionsResponse, StateSnapshot,
   StatsResponse, TimeseriesResponse, UpdateUserRequest, UsersResponse,
 } from "@gpa/shared";
 
@@ -38,10 +39,24 @@ export const api = {
   login: (username: string, password: string) => call<MeResponse>("POST", "/api/auth/login", { username, password }),
   logout: () => call<{ ok: true }>("POST", "/api/auth/logout"),
   me: () => call<MeResponse>("GET", "/api/auth/me"),
+  loginAttempts: (limit = 3) => call<{ items: LoginAttemptView[] }>("GET", `/api/auth/login-attempts${qs({ limit })}`),
 
   state: () => call<StateSnapshot>("GET", "/api/state"),
   timeseries: () => call<TimeseriesResponse>("GET", "/api/timeseries"),
   components: (q: { name?: string; limit?: number } = {}) => call<ComponentsResponse>("GET", `/api/components${qs(q)}`),
+  equipment: (q: { kind?: string; zone?: string; limit?: number } = {}) =>
+    call<{ items: ComponentsResponse["items"] }>("GET", `/api/equipment${qs(q)}`),
+  maintenance: (limit = 100) => call<{ items: MaintenanceJobView[] }>("GET", `/api/maintenance${qs({ limit })}`),
+  maintenanceStart: (kind: string, name: string) =>
+    call<ControlResult>("POST", `/api/equipment/${encodeURIComponent(`${kind}:${name}`)}/maintenance`),
+  incidents: (status?: string, limit = 100) => call<{ items: IncidentView[] }>("GET", `/api/incidents${qs({ status, limit })}`),
+  resolveIncident: (id: number, resolution: string, status: "resolved" | "dismissed" = "resolved") =>
+    call<IncidentView>("POST", `/api/incidents/${id}/resolve`, { resolution, status }),
+  penalties: (limit = 200) => call<PenaltiesResponse>("GET", `/api/penalties${qs({ limit })}`),
+  dailyReport: (day: string, kind: "operations" | "financial" = "operations") =>
+    call<DailyReport>("GET", `/api/reports/daily${qs({ day, kind })}`),
+  dailyReportExportUrl: (day: string, kind: "operations" | "financial" = "operations") =>
+    `/api/reports/daily/export${qs({ day, kind })}`,
   stats: (minutes: number) => call<StatsResponse>("GET", `/api/stats${qs({ minutes })}`),
 
   sessions: (q: { plate?: string; status?: string; since?: string; before?: number; limit?: number }) =>
@@ -59,6 +74,8 @@ export const api = {
   config: () => call<Record<string, unknown>>("GET", "/api/config"),
 
   users: () => call<UsersResponse>("GET", "/api/users"),
+  audit: (limit = 100) => call<AuditResponse>("GET", `/api/audit${qs({ limit })}`),
+  securityLoginAttempts: (limit = 100) => call<{ items: LoginAttemptView[] }>("GET", `/api/security/login-attempts${qs({ limit })}`),
   createUser: (body: CreateUserRequest) => call<MeResponse>("POST", "/api/users", body),
   updateUser: (id: number, body: UpdateUserRequest) => call<MeResponse>("PATCH", `/api/users/${id}`, body),
 };

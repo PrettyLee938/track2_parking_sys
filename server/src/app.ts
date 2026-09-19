@@ -103,16 +103,36 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
   // ---------------------------------------------------------------------------
   // simulator -> us
   // ---------------------------------------------------------------------------
-  app.post("/webhook", async (req) => {
+  app.post("/webhook", async (req, reply) => {
+    const level2 = cfg.levelProfile === "level2" || cfg.levelProfile === "level3" ||
+      (cfg.levelProfile === "auto" && (/lvl[23]/i.test(deps.controller.topology?.name ?? "") ||
+        deps.controller.components.all("fan").length > 0 || deps.controller.components.all("light").length > 0));
+    if ((level2 && cfg.webhookLoopbackOnly) && !isLoopback(req.ip)) {
+      store.recordAudit({ action: "webhook.rejected", target: req.ip, ok: false, reason: "non-loopback Level 2 ingress" });
+      return err(reply, 403, "Level 2 webhooks are restricted to loopback");
+    }
     const receivedAt = new Date().toISOString();
     let event;
     try {
       event = parseRaw(String(req.body ?? ""));
     } catch {
       req.log.error({ body: String(req.body).slice(0, 300) }, "non-JSON webhook");
-      return { ok: false };
+      store.recordAudit({ action: "webhook.rejected", target: req.ip, ok: false, reason: "malformed JSON" });
+      return reply.code(400).send({ ok: false });
     }
-    const meta = intake.check(event);
+    if (typeof event.EventClass !== "string" || !event.EventClass) {
+      store.recordAudit({ action: "webhook.rejected", target: req.ip, ok: false, reason: "missing EventClass" });
+      return err(reply, 400, "webhook EventClass is required");
+    }
+    const identity = store.eventIdentity(event.EventId, event);
+    if (identity === "conflict") {
+      const incident = store.createIncident({ status: "open", kind: "event_id_conflict", reason: `EventId ${event.EventId} was reused with a different payload`,
+        confidence: "high", evidence: { event_id: event.EventId, payload: event } });
+      store.recordAudit({ action: "webhook.rejected", target: String(event.EventId), ok: false, reason: "event ID payload conflict", detail: { incident: incident.id } });
+      return err(reply, 409, "event ID was already used for a different payload");
+    }
+    const mode = cfg.signatureMode === "strict" || level2 ? "strict" : cfg.signatureMode;
+    const meta = intake.check(event, identity === "duplicate", mode);
     const record: EventRecord = {
       ...event, _received_at: receivedAt, _sig: meta.sig, _duplicate: meta.duplicate,
       _seq_note: meta.seqNote, _accepted: meta.accept,
@@ -124,11 +144,16 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
     if (meta.seqNote) req.log.warn(`sequence gap: ${meta.seqNote}`);
     if (!meta.accept) {
       req.log.warn(`dropped ${event.EventClass} (${meta.duplicate ? "duplicate" : `signature ${meta.sig}`})`);
-      // A payment with a bad signature is a fake one: the controller must know the car has not paid.
+      store.recordAudit({ action: "webhook.rejected", target: String(event.EventId ?? event.EventClass), ok: false,
+        reason: meta.duplicate ? "duplicate" : `signature ${meta.sig}` });
+      // Keep the controller informed about rejected signed-looking simulator
+      // events. This preserves the penalty/failed-payment workflow while the
+      // HTTP request still receives the correct rejection status.
       if (!meta.duplicate && meta.sig === "invalid" && cfg.controllerEnabled) controller.submitRejected(record);
     } else if (cfg.controllerEnabled) {
       controller.submit(record); // handled on the controller's queue; respond immediately
     }
+    if (!meta.accept && !meta.duplicate && mode === "strict") return err(reply, 401, "valid webhook signature required");
     return { ok: true };
   });
 
@@ -138,7 +163,7 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
   app.post("/api/auth/login", async (req, reply) => {
     const body = jsonBody<LoginRequest>(req);
     if (!body?.username || !body?.password) return err(reply, 400, "username and password are required");
-    const result = await auth.login(String(body.username), String(body.password));
+    const result = await auth.login(String(body.username), String(body.password), { ip: req.ip });
     if (!result.ok) {
       if (result.reason === "throttled") {
         reply.header("retry-after", String(result.retryAfterS));
@@ -148,7 +173,7 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
     }
     setSessionCookie(reply, result.token, cfg.sessionTtlH * 3600);
     req.log.warn(`sign-in: ${result.user.username} (${result.user.role})`);
-    return { user: result.user } satisfies MeResponse;
+    return { user: result.user, previous_login_attempts: result.previousAttempts } satisfies MeResponse;
   });
 
   app.post("/api/auth/logout", async (req, reply) => {
@@ -157,7 +182,12 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
     return { ok: true };
   });
 
-  app.get("/api/auth/me", operator, async (req): Promise<MeResponse> => ({ user: req.user! }));
+  app.get("/api/auth/me", operator, async (req): Promise<MeResponse> => ({
+    user: req.user!, previous_login_attempts: store.listLoginAttempts(req.user!.username, 3),
+  }));
+  app.get<{ Querystring: { limit?: string } }>("/api/auth/login-attempts", operator, async (req) => ({
+    items: store.listLoginAttempts(req.user!.username, Math.min(Number(req.query.limit) || 3, 50)),
+  }));
 
   // ---------------------------------------------------------------------------
   // live state (operator+)
@@ -193,11 +223,96 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
     events: store.listComponentEvents({ name: req.query.name || undefined, limit: Number(req.query.limit) || 200 }),
   }));
 
+  app.get<{ Querystring: { kind?: string; zone?: string; limit?: string } }>("/api/equipment", operator, async (req) => {
+    const items = controller.components.views().filter((c) => (!req.query.kind || c.kind === req.query.kind) && (!req.query.zone || c.zone === req.query.zone));
+    return { items: items.slice(0, Math.min(Number(req.query.limit) || 500, 1000)) };
+  });
+
+  app.post<{ Params: { id: string } }>("/api/equipment/:id/maintenance", operator, async (req, reply) => {
+    const [kind, ...nameParts] = decodeURIComponent(req.params.id).split(":");
+    const target = `${kind}:${nameParts.join(":")}`;
+    const audit = { actor: req.user!.username, action: "component.repair", target, permission: "repair" };
+    if (kind === "gate") return control(reply, () => controller.exclusive(() => controller.manualGate(nameParts.join(":"), "repair", req.user!.username)), audit);
+    if (kind === "spot") return control(reply, () => controller.exclusive(() => controller.manualSpotRepair(nameParts.join(":"), req.user!.username)), audit);
+    if (kind === "fan" || kind === "light") return control(reply, () => controller.exclusive(() => controller.manualComponentRepair(kind, nameParts.join(":"), req.user!.username)), audit);
+    return err(reply, 400, "equipment id must be kind:name");
+  });
+
+  app.get<{ Querystring: { limit?: string } }>("/api/maintenance", operator, async (req) => ({
+    items: store.listMaintenanceJobs(Number(req.query.limit) || 100),
+  }));
+
+  app.get<{ Querystring: { status?: "open" | "provisional" | "resolved" | "dismissed"; limit?: string } }>("/api/incidents", operator, async (req) => ({
+    items: store.listIncidents({ status: req.query.status, limit: Number(req.query.limit) || 100 }),
+  }));
+  app.get<{ Params: { id: string } }>("/api/incidents/:id", operator, async (req, reply) => {
+    const incident = store.getIncident(Number(req.params.id));
+    return incident ? incident : err(reply, 404, "no such incident");
+  });
+  app.post<{ Params: { id: string } }>("/api/incidents/:id/resolve", operator, async (req, reply) => {
+    const body = jsonBody<{ resolution?: string; status?: "resolved" | "dismissed" }>(req);
+    if (!body?.resolution?.trim()) return err(reply, 400, "resolution is required");
+    return controller.exclusive(async () => {
+      const resolved = store.resolveIncident(Number(req.params.id), req.user!.username, body.resolution!.trim(), body.status ?? "resolved");
+      if (!resolved) return err(reply, 404, "no such incident");
+      store.recordAudit({ actor: req.user!.username, action: "incident.resolve", target: req.params.id, ok: true, reason: body.resolution });
+      return resolved;
+    });
+  });
+
+  app.get("/api/penalties", operator, async (): Promise<{ items: ReturnType<Store["listPenalties"]> }> => ({ items: store.listPenalties() }));
+
   app.get<{ Querystring: { minutes?: string } }>("/api/stats", operator, async (req): Promise<StatsResponse> => {
     const minutes = Math.min(Math.max(Number(req.query.minutes) || 60, 5), 7 * 24 * 60);
     const bucket = BUCKETS_S.find((b) => (minutes * 60) / b <= 40) ?? BUCKETS_S.at(-1)!;
     const until = Date.now();
     return store.stats(until - minutes * 60_000, until, bucket);
+  });
+
+  const dailyReport = (day: string, kind: "operations" | "financial") => {
+    const start = Date.parse(`${day}T00:00:00Z`), end = start + 86_400_000;
+    const stats = store.stats(start, end, 3600);
+    const invoiceCount = store.db.prepare("SELECT count(*) n FROM invoices WHERE created_at >= ? AND created_at < ?")
+      .get(new Date(start).toISOString(), new Date(end).toISOString()) as { n: number };
+    const uncertainCount = store.db.prepare("SELECT count(*) n FROM invoices WHERE status IN ('intended', 'outcome_unknown') AND created_at >= ? AND created_at < ?")
+      .get(new Date(start).toISOString(), new Date(end).toISOString()) as { n: number };
+    const totals = kind === "financial"
+      ? { ...stats.totals, invoices: Number(invoiceCount.n ?? 0), uncertain_payments: Number(uncertainCount.n ?? 0) }
+      : { arrivals: stats.totals.arrivals, departures: stats.totals.departures, turned_away: stats.totals.turned_away,
+        neglected: stats.totals.neglected, lost: stats.totals.lost, penalties: stats.totals.penalties, fines: stats.totals.fines,
+        payment_mismatches: stats.totals.payment_mismatches, escaped: stats.totals.escaped };
+    return { run_id: null, day, kind, time_basis: "UTC received time; simulator calendar is provisional until anchored",
+      provisional: true, generated_at: new Date().toISOString(), totals,
+      equipment: controller.components.views() as unknown as Record<string, unknown>[],
+      incidents: store.listIncidents({ limit: 1000, since: new Date(start).toISOString(), until: new Date(end).toISOString() }),
+      penalties: store.listPenalties(1000, { sinceMs: start, untilMs: end }) };
+  };
+  const csv = (report: ReturnType<typeof dailyReport>) => {
+    const rows = [["field", "value"], ...Object.entries(report.totals).map(([k, v]) => [k, String(v)])];
+    return rows.map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\n") + "\n";
+  };
+  app.get<{ Querystring: { day?: string; kind?: "operations" | "financial" } }>("/api/reports/daily", operator, async (req, reply) => {
+    const kind = req.query.kind ?? "operations";
+    if (kind !== "operations" && kind !== "financial") return err(reply, 400, "kind must be operations or financial");
+    if (kind === "financial" && !hasRole(req.user, "admin")) return err(reply, 403, "requires the admin role");
+    const day = req.query.day ?? new Date().toISOString().slice(0, 10);
+    const parsed = Date.parse(`${day}T00:00:00Z`);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || !Number.isFinite(parsed)) return err(reply, 400, "day must be a real YYYY-MM-DD date");
+    const report = dailyReport(day, kind);
+    if (kind === "financial") store.recordAudit({ actor: req.user!.username, permission: "reports.financial", action: "report.view", target: report.day, ok: true });
+    return report;
+  });
+  app.get<{ Querystring: { day?: string; kind?: "operations" | "financial" } }>("/api/reports/daily/export", operator, async (req, reply) => {
+    const kind = req.query.kind ?? "operations";
+    if (kind !== "operations" && kind !== "financial") return err(reply, 400, "kind must be operations or financial");
+    if (kind === "financial" && !hasRole(req.user, "admin")) return err(reply, 403, "requires the admin role");
+    const day = req.query.day ?? new Date().toISOString().slice(0, 10);
+    const parsed = Date.parse(`${day}T00:00:00Z`);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || !Number.isFinite(parsed)) return err(reply, 400, "day must be a real YYYY-MM-DD date");
+    const report = dailyReport(day, kind);
+    store.recordAudit({ actor: req.user!.username, permission: kind === "financial" ? "reports.financial" : "view",
+      action: "report.export", target: report.day, ok: true });
+    return reply.type("text/csv; charset=utf-8").header("content-disposition", `attachment; filename=report-${report.day}-${kind}.csv`).send(csv(report));
   });
 
   // ---------------------------------------------------------------------------
@@ -223,19 +338,22 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
   // ---------------------------------------------------------------------------
   // manual control (operator+)
   // ---------------------------------------------------------------------------
-  const control = async (reply: FastifyReply, run: () => Promise<ControlResult>) => {
+  const control = async (reply: FastifyReply, run: () => Promise<ControlResult>, audit?: { actor: string; action: string; target: string; permission?: string }) => {
     const result = await run();
+    if (audit) store.recordAudit({ ...audit, ok: result.ok, reason: result.ok ? undefined : result.message });
     return reply.code(result.ok ? 200 : 409).send(result);
   };
 
   app.post<{ Params: { name: string; action: string } }>("/api/control/gates/:name/:action", operator, async (req, reply) => {
     const action = req.params.action as GateAction;
     if (!GATE_ACTIONS.includes(action)) return err(reply, 400, `action must be one of ${GATE_ACTIONS.join(", ")}`);
-    return control(reply, () => controller.exclusive(() => controller.manualGate(req.params.name, action, req.user!.username)));
+    return control(reply, () => controller.exclusive(() => controller.manualGate(req.params.name, action, req.user!.username)),
+      { actor: req.user!.username, action: `gate.${action}`, target: req.params.name, permission: "control" });
   });
 
   app.post<{ Params: { name: string } }>("/api/control/spots/:name/repair", operator, async (req, reply) =>
-    control(reply, () => controller.exclusive(() => controller.manualSpotRepair(req.params.name, req.user!.username))));
+    control(reply, () => controller.exclusive(() => controller.manualSpotRepair(req.params.name, req.user!.username)),
+      { actor: req.user!.username, action: "spot.repair", target: req.params.name, permission: "repair" }));
 
   // ---------------------------------------------------------------------------
   // administration (admin only)
@@ -243,18 +361,22 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
   app.post<{ Params: { spot: string; state: string } }>("/api/control/entries/:spot/:state", admin, async (req, reply) => {
     if (req.params.state !== "open" && req.params.state !== "close") return err(reply, 400, "state must be open or close");
     return control(reply, () => controller.exclusive(() =>
-      controller.setEntryOpen(req.params.spot, req.params.state === "open", req.user!.username)));
+      controller.setEntryOpen(req.params.spot, req.params.state === "open", req.user!.username)),
+      { actor: req.user!.username, action: `entrance.${req.params.state}`, target: req.params.spot, permission: "control" });
   });
 
   app.post("/api/resync", admin, async (req) => {
     controller.requestResync();
     controller.note("info", `${req.user!.username} requested a resync`);
+    store.recordAudit({ actor: req.user!.username, permission: "config", action: "site.resync", target: "simulator", ok: true });
     return { ok: true, message: "resync queued" } satisfies ControlResult;
   });
 
   app.get("/api/config", admin, async () => ({ ...cfg, simPassword: "***", adminPassword: cfg.adminPassword ? "***" : undefined }));
 
   app.get("/api/users", admin, async (): Promise<UsersResponse> => ({ items: store.listUsers() }));
+  app.get<{ Querystring: { limit?: string } }>("/api/audit", admin, async (req) => ({ items: store.listAudit(Number(req.query.limit) || 100) }));
+  app.get<{ Querystring: { limit?: string } }>("/api/security/login-attempts", admin, async (req) => ({ items: store.listLoginAttemptsForAdmin(Number(req.query.limit) || 100) }));
 
   app.post("/api/users", admin, async (req, reply) => {
     const body = jsonBody<CreateUserRequest>(req);
@@ -265,6 +387,8 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
     if (store.findUser(body.username)) return err(reply, 409, `user ${body.username} already exists`);
     const user = store.createUser(body.username, await hashPassword(body.password), body.role);
     controller.note("info", `${req.user!.username} created ${user.role} ${user.username}`);
+    store.recordAudit({ actor: req.user!.username, permission: "users.manage", action: "user.create", target: `user:${user.username}`, ok: true,
+      detail: { role: user.role } });
     return reply.code(201).send({ user } satisfies MeResponse);
   });
 
@@ -292,6 +416,8 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
     const what = [body.role && `role ${body.role}`, body.disabled !== undefined && (body.disabled ? "disabled" : "enabled"),
       body.password !== undefined && "password reset"].filter(Boolean).join(", ");
     controller.note("info", `${req.user!.username} updated ${user.username}: ${what}`);
+    store.recordAudit({ actor: req.user!.username, permission: "users.manage", action: "user.update", target: `user:${user.username}`, ok: true,
+      detail: { changes: what } });
     return { user } satisfies MeResponse;
   });
 
@@ -302,8 +428,9 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
     ...intake.stats, last_sequence_id: intake.lastSeq, controller_enabled: cfg.controllerEnabled,
   }));
   app.get<{ Querystring: { n?: string } }>("/debug/recent", debugAccess, async (req) => recent.slice(-(Number(req.query.n) || 20)));
-  // What the engine is doing right now (npm run report:live -w server): lanes, gates and
-  // their wear, the task queue, the latest feed - to diagnose a live run from this machine.
+  app.get("/debug/config", debugAccess, async () => ({ ...cfg, simPassword: "***", adminPassword: cfg.adminPassword ? "***" : undefined }));
+  // Read-only controller view used by the live diagnostics. Keep this on the
+  // loopback/debug surface; the authenticated dashboard uses /api/state.
   app.get("/debug/controller", debugAccess, async () => {
     const s = controller.snapshot();
     return {
@@ -316,12 +443,11 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
       }),
       gate_limit: controller.components.limit("gate"),
       out_of_service: s.components.filter((c) => c.health !== "ok").map((c) => `${c.kind} ${c.name} ${c.health}${c.waiting ? ` (${c.waiting})` : ""}`),
+      zones: s.zones, spots: s.spots, components: s.components, active_cars: s.active_cars,
       environment: s.subsystems.environment ?? null, unreachable: [...controller.unreachable],
       cars: s.active_cars.length, counters: s.counters, feed: s.feed.slice(-40),
     };
   });
-
-  app.get("/debug/config", debugAccess, async () => ({ ...cfg, simPassword: "***", adminPassword: cfg.adminPassword ? "***" : undefined }));
 
   // ---------------------------------------------------------------------------
   // the built dashboard (npm run build), if present - one port for everything

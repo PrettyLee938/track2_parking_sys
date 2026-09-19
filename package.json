@@ -17,6 +17,7 @@
     "typecheck": "npm run typecheck --workspaces --if-present",
     "topology": "npm run topology -w server --",
     "smoke": "npm run smoke -w server --",
+    "level2-live": "npm run level2-live -w server --",
     "single-car": "npm run single-car -w server --"
   },
   "engines": {

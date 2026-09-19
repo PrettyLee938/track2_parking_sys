@@ -62,13 +62,13 @@ export class Intake {
 
   constructor(private readonly mode: SignatureMode) {}
 
-  check(event: SimEventBase): IntakeResult {
+  check(event: SimEventBase, knownDuplicate = false, mode = this.mode): IntakeResult {
     this.stats.received++;
     const sig = signatureStatus(event);
     this.stats[`sig_${sig}`]++;
 
     const eventId = event.EventId ?? "";
-    const duplicate = eventId !== "" && this.seenIds.has(eventId);
+    const duplicate = knownDuplicate || (eventId !== "" && this.seenIds.has(eventId));
     if (duplicate) this.stats.duplicates++;
 
     let seqNote = "";
@@ -81,7 +81,7 @@ export class Intake {
       if (this.lastSeq === null || seq > this.lastSeq) this.lastSeq = seq;
     }
 
-    const accept = trusted(sig, this.mode) && !duplicate;
+    const accept = trusted(sig, mode) && !duplicate;
     if (accept) {
       if (eventId) this.seenIds.add(eventId);
       this.stats.accepted++;

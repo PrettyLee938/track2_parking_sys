@@ -1743,6 +1743,18 @@ export class Controller implements Engine {
     return ok(`maintenance started on ${name}`);
   }
 
+  /** Fans can be repaired through the simulator API; lights have no repair endpoint. */
+  async manualComponentRepair(kind: "fan" | "light", name: string, actor: string): Promise<ControlResult> {
+    const part = this.components.get(kind, name);
+    if (!part) return fail(`unknown ${kind} ${name}`);
+    if (kind === "light") return fail("the simulator exposes no light repair endpoint; record an incident instead");
+    if (part.maintenance) return fail(`${name} is already under maintenance`);
+    if (part.on) return fail(`${name} is operating - wait for it to be idle`);
+    if (!(await this.cmd("repair", () => this.sim.repairFan(name), [name], actor))) return fail(`the simulator rejected repair ${name}`);
+    this.components.repairStarted(kind, name, actor, !part.broken);
+    return ok(`maintenance started on ${name}`);
+  }
+
   /** Close an entrance (arriving cars are turned away; queued cars are still served) or reopen it. */
   async setEntryOpen(spot: string, open: boolean, actor: string): Promise<ControlResult> {
     const lane = this.entryLanes.get(spot);

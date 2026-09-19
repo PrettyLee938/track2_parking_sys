@@ -16,8 +16,10 @@ import { mkdirSync } from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
 import type {
-  ActionView, ComponentEventView, ComponentKind, EventView, Role, SessionView, SimEventBase, StatsResponse, UserView,
+  ActionView, AuditEntryView, ComponentEventView, ComponentKind, EventView, IncidentView, IncidentStatus, LoginAttemptView,
+  MaintenanceJobView, MaintenanceStatus, PenaltyView, Role, SessionView, SimEventBase, StatsResponse, UserView,
 } from "@gpa/shared";
+import { createHash } from "node:crypto";
 
 /** A received webhook as the controller sees it: the payload plus intake metadata. */
 export type EventRecord = SimEventBase & {
@@ -63,6 +65,7 @@ CREATE INDEX IF NOT EXISTS events_class    ON events (event_class, received_ms);
 
 CREATE TABLE IF NOT EXISTS sessions (
   id               INTEGER PRIMARY KEY,
+  visit_id         TEXT,
   plate            TEXT NOT NULL,
   car_type         TEXT,
   status           TEXT NOT NULL,
@@ -126,6 +129,7 @@ CREATE TABLE IF NOT EXISTS components (
   uses_at_breakdown  TEXT NOT NULL,
   last_broken_at     TEXT,
   last_fixed_at      TEXT,
+  last_event_seq     INTEGER,
   updated_at         TEXT NOT NULL,
   PRIMARY KEY (kind, name)
 );
@@ -141,6 +145,108 @@ CREATE TABLE IF NOT EXISTS component_events (
   detail  TEXT
 );
 CREATE INDEX IF NOT EXISTS component_events_at ON component_events (at);
+
+-- Durable webhook identity. Raw deliveries remain in events, including duplicates.
+CREATE TABLE IF NOT EXISTS event_identities (
+  event_id       TEXT PRIMARY KEY,
+  payload_hash   TEXT NOT NULL,
+  first_seen_at  TEXT NOT NULL,
+  first_event_row INTEGER NOT NULL,
+  accepted       INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS login_attempts (
+  id          INTEGER PRIMARY KEY,
+  at          TEXT NOT NULL,
+  username    TEXT NOT NULL,
+  user_id     INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  ok          INTEGER NOT NULL,
+  ip          TEXT,
+  reason      TEXT
+);
+CREATE INDEX IF NOT EXISTS login_attempts_user ON login_attempts (username COLLATE NOCASE, id DESC);
+
+CREATE TABLE IF NOT EXISTS audit_log (
+  id          INTEGER PRIMARY KEY,
+  at          TEXT NOT NULL,
+  actor       TEXT,
+  permission  TEXT,
+  action      TEXT NOT NULL,
+  target      TEXT,
+  ok          INTEGER NOT NULL,
+  reason      TEXT,
+  detail      TEXT
+);
+CREATE INDEX IF NOT EXISTS audit_log_at ON audit_log (id DESC);
+
+CREATE TABLE IF NOT EXISTS incidents (
+  id            INTEGER PRIMARY KEY,
+  at            TEXT NOT NULL,
+  status        TEXT NOT NULL,
+  kind          TEXT NOT NULL,
+  zone          TEXT,
+  visit_id      TEXT,
+  component     TEXT,
+  reason        TEXT NOT NULL,
+  confidence    TEXT NOT NULL,
+  evidence      TEXT NOT NULL,
+  resolution    TEXT,
+  resolved_by   TEXT,
+  resolved_at   TEXT
+);
+CREATE INDEX IF NOT EXISTS incidents_status ON incidents (status, id DESC);
+
+CREATE TABLE IF NOT EXISTS maintenance_jobs (
+  id               INTEGER PRIMARY KEY,
+  component_kind   TEXT NOT NULL,
+  component_name   TEXT NOT NULL,
+  zone             TEXT,
+  status           TEXT NOT NULL,
+  reason           TEXT NOT NULL,
+  actor            TEXT,
+  evidence         TEXT NOT NULL,
+  created_at       TEXT NOT NULL,
+  updated_at       TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS maintenance_jobs_component ON maintenance_jobs (component_kind, component_name, id DESC);
+
+CREATE TABLE IF NOT EXISTS command_intents (
+  id              INTEGER PRIMARY KEY,
+  command_id      TEXT NOT NULL UNIQUE,
+  created_at      TEXT NOT NULL,
+  cmd             TEXT NOT NULL,
+  args            TEXT NOT NULL,
+  status          TEXT NOT NULL,
+  actor           TEXT,
+  error           TEXT,
+  finished_at     TEXT
+);
+
+CREATE TABLE IF NOT EXISTS invoices (
+  id              INTEGER PRIMARY KEY,
+  invoice_id      TEXT NOT NULL UNIQUE,
+  visit_id        TEXT,
+  plate           TEXT NOT NULL,
+  parking_amount  REAL NOT NULL,
+  electric_amount REAL NOT NULL,
+  basis           TEXT NOT NULL,
+  status          TEXT NOT NULL,
+  created_at      TEXT NOT NULL,
+  settled_at      TEXT
+);
+
+CREATE TABLE IF NOT EXISTS payments (
+  id           INTEGER PRIMARY KEY,
+  event_id     TEXT,
+  invoice_id   TEXT,
+  visit_id     TEXT,
+  plate        TEXT NOT NULL,
+  amount       REAL NOT NULL,
+  accepted     INTEGER NOT NULL,
+  received_at  TEXT NOT NULL,
+  UNIQUE(event_id),
+  UNIQUE(invoice_id, amount)
+);
 `;
 
 /** Persisted usage of one component (components.ts). */
@@ -154,6 +260,7 @@ export interface ComponentRow {
   uses_at_breakdown: number[];
   last_broken_at: string | null;
   last_fixed_at: string | null;
+  last_event_seq?: number | null;
 }
 
 const toUser = (r: Record<string, unknown>): UserView => ({
@@ -163,6 +270,16 @@ const toUser = (r: Record<string, unknown>): UserView => ({
 
 /** "…charged wrongly with amount: (2.00)…" -> "…charged wrongly with amount: (…)…" so reasons group. */
 const reasonKey = (reason: string) => reason.replace(/\([^)]*\)/g, "(…)").trim();
+const payloadHash = (payload: Record<string, unknown>) => createHash("sha256")
+  .update(JSON.stringify(Object.fromEntries(Object.entries(payload).sort(([a], [b]) => a.localeCompare(b)))))
+  .digest("hex");
+const toIncident = (r: Record<string, unknown>): IncidentView => ({
+  id: r.id as number, at: r.at as string, status: r.status as IncidentStatus, kind: r.kind as string,
+  zone: r.zone as string | null, visit_id: r.visit_id as string | null, component: r.component as string | null,
+  reason: r.reason as string, confidence: r.confidence as "high" | "medium" | "low",
+  evidence: JSON.parse(String(r.evidence ?? "{}")), resolution: r.resolution as string | null,
+  resolved_by: r.resolved_by as string | null, resolved_at: r.resolved_at as string | null,
+});
 
 export class Store {
   readonly db: Database.Database;
@@ -188,10 +305,10 @@ export class Store {
       VALUES (@event_id, @seq, @event_class, @plate, @spot, @spot_type, @direction, @received_at, @received_ms, @sig,
         @accepted, @duplicate, @payload)`);
     this.insSession = this.db.prepare(`
-      INSERT INTO sessions (plate, car_type, status, entry_lane, exit_lane, spot, planned_minutes, arrived_at, parked_at,
+      INSERT INTO sessions (visit_id, plate, car_type, status, entry_lane, exit_lane, spot, planned_minutes, arrived_at, parked_at,
         left_spot_at, exit_at, left_at, parked_seconds, charge_parking, charge_electric, charge_attempts, paid, payment_ok,
         recorded_at, data)
-      VALUES (@plate, @car_type, @status, @entry_lane, @exit_lane, @spot, @planned_minutes, @arrived_at, @parked_at,
+      VALUES (@visit_id, @plate, @car_type, @status, @entry_lane, @exit_lane, @spot, @planned_minutes, @arrived_at, @parked_at,
         @left_spot_at, @exit_at, @left_at, @parked_seconds, @charge_parking, @charge_electric, @charge_attempts, @paid,
         @payment_ok, @recorded_at, @data)`);
     this.insAction = this.db.prepare(
@@ -206,6 +323,8 @@ export class Store {
       this.db.exec(`ALTER TABLE events ADD COLUMN spot_type TEXT; ALTER TABLE events ADD COLUMN direction TEXT;
         UPDATE events SET spot_type = json_extract(payload, '$.SpotType'), direction = json_extract(payload, '$.Direction');`);
     }
+    if (!columns("sessions").has("visit_id")) this.db.exec("ALTER TABLE sessions ADD COLUMN visit_id TEXT");
+    if (!columns("components").has("last_event_seq")) this.db.exec("ALTER TABLE components ADD COLUMN last_event_seq INTEGER");
     this.db.exec("CREATE INDEX IF NOT EXISTS events_flow ON events (spot_type, direction, received_ms)");
     if (!columns("actions").has("actor")) this.db.exec("ALTER TABLE actions ADD COLUMN actor TEXT");
   }
@@ -221,11 +340,20 @@ export class Store {
 
   saveComponent(c: ComponentRow): void {
     this.db.prepare(`
-      INSERT INTO components (kind, name, zone, uses, uses_total, breakdowns, uses_at_breakdown, last_broken_at, last_fixed_at, updated_at)
-      VALUES (@kind, @name, @zone, @uses, @uses_total, @breakdowns, @uses_at_breakdown, @last_broken_at, @last_fixed_at, @updated_at)
+      INSERT INTO components (kind, name, zone, uses, uses_total, breakdowns, uses_at_breakdown, last_broken_at, last_fixed_at, last_event_seq, updated_at)
+      VALUES (@kind, @name, @zone, @uses, @uses_total, @breakdowns, @uses_at_breakdown, @last_broken_at, @last_fixed_at, @last_event_seq, @updated_at)
       ON CONFLICT (kind, name) DO UPDATE SET zone = @zone, uses = @uses, uses_total = @uses_total, breakdowns = @breakdowns,
-        uses_at_breakdown = @uses_at_breakdown, last_broken_at = @last_broken_at, last_fixed_at = @last_fixed_at, updated_at = @updated_at`,
-    ).run({ ...c, uses_at_breakdown: JSON.stringify(c.uses_at_breakdown), updated_at: new Date().toISOString() });
+        uses_at_breakdown = @uses_at_breakdown, last_broken_at = @last_broken_at, last_fixed_at = @last_fixed_at,
+        last_event_seq = @last_event_seq, updated_at = @updated_at`,
+    ).run({
+      ...c,
+      // ComponentRegistry predates the durable event cursor and does not
+      // always provide it. better-sqlite3 still requires every named bind,
+      // so explicitly bind the nullable column for legacy callers.
+      last_event_seq: c.last_event_seq ?? null,
+      uses_at_breakdown: JSON.stringify(c.uses_at_breakdown),
+      updated_at: new Date().toISOString(),
+    });
   }
 
   recordComponentEvent(e: Omit<ComponentEventView, "id">): void {
@@ -240,6 +368,167 @@ export class Store {
     if (opts.since) { where.push("at >= @since"); params.since = opts.since; }
     return this.db.prepare(`SELECT * FROM component_events ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY id DESC LIMIT @limit`)
       .all(params) as ComponentEventView[];
+  }
+
+  // ---------------------------------------------------------------------------
+  // durable trust, audit, incidents, maintenance
+  // ---------------------------------------------------------------------------
+  /** Durable identity check used before the in-memory intake dedupe. */
+  eventIdentity(eventId: string | undefined, payload: Record<string, unknown>): "new" | "duplicate" | "conflict" {
+    if (!eventId) return "new";
+    const row = this.db.prepare("SELECT payload_hash FROM event_identities WHERE event_id = ?").get(eventId) as { payload_hash: string } | undefined;
+    if (!row) return "new";
+    return row.payload_hash === payloadHash(payload) ? "duplicate" : "conflict";
+  }
+
+  recordLoginAttempt(input: { username: string; userId?: number | null; ok: boolean; ip?: string | null; reason?: string | null }): number {
+    const info = this.db.prepare("INSERT INTO login_attempts (at, username, user_id, ok, ip, reason) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(new Date().toISOString(), input.username, input.userId ?? null, input.ok ? 1 : 0, input.ip ?? null, input.reason ?? null);
+    return Number(info.lastInsertRowid);
+  }
+
+  listLoginAttempts(username: string, limit = 3, beforeId?: number): LoginAttemptView[] {
+    const safeLimit = Math.min(Math.max(limit, 1), 50);
+    const rows = (beforeId
+      ? this.db.prepare(`SELECT id, at, username, ok, ip, reason FROM login_attempts
+        WHERE username = ? COLLATE NOCASE AND id < ? ORDER BY id DESC LIMIT ?`).all(username, beforeId, safeLimit)
+      : this.db.prepare(`SELECT id, at, username, ok, ip, reason FROM login_attempts
+        WHERE username = ? COLLATE NOCASE ORDER BY id DESC LIMIT ?`).all(username, safeLimit)) as
+      { id: number; at: string; username: string; ok: number; ip: string | null; reason: string | null }[];
+    return rows.map((r) => ({ ...r, ok: !!r.ok }));
+  }
+
+  listLoginAttemptsForAdmin(limit = 100): LoginAttemptView[] {
+    const rows = this.db.prepare("SELECT id, at, username, ok, ip, reason FROM login_attempts ORDER BY id DESC LIMIT ?")
+      .all(Math.min(Math.max(limit, 1), 500)) as { id: number; at: string; username: string; ok: number; ip: string | null; reason: string | null }[];
+    return rows.map((r) => ({ ...r, ok: !!r.ok }));
+  }
+
+  recordAudit(input: { actor?: string | null; permission?: string | null; action: string; target?: string | null; ok: boolean; reason?: string | null; detail?: unknown }): number {
+    const info = this.db.prepare(`INSERT INTO audit_log (at, actor, permission, action, target, ok, reason, detail)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(new Date().toISOString(), input.actor ?? null, input.permission ?? null,
+      input.action, input.target ?? null, input.ok ? 1 : 0, input.reason ?? null,
+      input.detail === undefined ? null : JSON.stringify(input.detail));
+    return Number(info.lastInsertRowid);
+  }
+
+  listAudit(limit = 100): AuditEntryView[] {
+    const rows = this.db.prepare("SELECT id, at, actor, action, target, ok, detail FROM audit_log ORDER BY id DESC LIMIT ?")
+      .all(Math.min(Math.max(limit, 1), 1000)) as { id: number; at: string; actor: string | null; action: string; target: string | null; ok: number; detail: string | null }[];
+    return rows.map((r) => ({ id: r.id, at: r.at, actor: r.actor, action: r.action, target: r.target, ok: !!r.ok, detail: r.detail }));
+  }
+
+  createIncident(input: { status: IncidentStatus; kind: string; zone?: string | null; visit_id?: string | null; component?: string | null;
+    reason: string; confidence: "high" | "medium" | "low"; evidence?: unknown }): IncidentView {
+    const at = new Date().toISOString();
+    const info = this.db.prepare(`INSERT INTO incidents (at, status, kind, zone, visit_id, component, reason, confidence, evidence)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(at, input.status, input.kind, input.zone ?? null, input.visit_id ?? null, input.component ?? null,
+      input.reason, input.confidence, JSON.stringify(input.evidence ?? {}));
+    return this.getIncident(Number(info.lastInsertRowid))!;
+  }
+
+  getIncident(id: number): IncidentView | undefined {
+    const r = this.db.prepare("SELECT * FROM incidents WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+    return r ? toIncident(r) : undefined;
+  }
+
+  listIncidents(opts: { status?: IncidentStatus; limit?: number; since?: string; until?: string } = {}): IncidentView[] {
+    const limit = Math.min(Math.max(opts.limit ?? 100, 1), 1000);
+    const where: string[] = [], params: unknown[] = [];
+    if (opts.status) { where.push("status = ?"); params.push(opts.status); }
+    if (opts.since) { where.push("at >= ?"); params.push(opts.since); }
+    if (opts.until) { where.push("at < ?"); params.push(opts.until); }
+    params.push(limit);
+    const rows = this.db.prepare(`SELECT * FROM incidents ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY id DESC LIMIT ?`)
+      .all(...params) as Record<string, unknown>[];
+    return rows.map(toIncident);
+  }
+
+  resolveIncident(id: number, actor: string, resolution: string, status: IncidentStatus = "resolved"): IncidentView | undefined {
+    this.db.prepare("UPDATE incidents SET status = ?, resolution = ?, resolved_by = ?, resolved_at = ? WHERE id = ?")
+      .run(status, resolution, actor, new Date().toISOString(), id);
+    return this.getIncident(id);
+  }
+
+  createMaintenanceJob(input: { kind: ComponentKind; name: string; zone?: string | null; status: MaintenanceStatus; reason: string; actor?: string | null; evidence?: unknown }): number {
+    const active = this.db.prepare(`SELECT id FROM maintenance_jobs
+      WHERE component_kind = ? AND component_name = ?
+        AND status IN ('scheduled', 'waiting_for_clearance', 'requested', 'in_progress', 'outcome_unknown')
+      ORDER BY id DESC LIMIT 1`).get(input.kind, input.name) as { id: number } | undefined;
+    if (active) return active.id;
+    const now = new Date().toISOString();
+    const info = this.db.prepare(`INSERT INTO maintenance_jobs (component_kind, component_name, zone, status, reason, actor, evidence, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(input.kind, input.name, input.zone ?? null, input.status, input.reason, input.actor ?? null,
+      JSON.stringify(input.evidence ?? {}), now, now);
+    return Number(info.lastInsertRowid);
+  }
+
+  updateMaintenanceJob(kind: ComponentKind, name: string, status: MaintenanceStatus, evidence?: unknown): void {
+    this.db.prepare(`UPDATE maintenance_jobs SET status = ?, evidence = COALESCE(?, evidence), updated_at = ?
+      WHERE id = (SELECT id FROM maintenance_jobs WHERE component_kind = ? AND component_name = ? ORDER BY id DESC LIMIT 1)`)
+      .run(status, evidence === undefined ? null : JSON.stringify(evidence), new Date().toISOString(), kind, name);
+  }
+
+  listMaintenanceJobs(limit = 100): MaintenanceJobView[] {
+    const rows = this.db.prepare("SELECT * FROM maintenance_jobs ORDER BY id DESC LIMIT ?").all(Math.min(Math.max(limit, 1), 1000)) as Record<string, unknown>[];
+    return rows.map((r) => ({ id: r.id as number, component_kind: r.component_kind as ComponentKind, component_name: r.component_name as string,
+      zone: r.zone as string | null, status: r.status as MaintenanceStatus, reason: r.reason as string, actor: r.actor as string | null,
+      created_at: r.created_at as string, updated_at: r.updated_at as string, evidence: JSON.parse(String(r.evidence ?? "{}")) }));
+  }
+
+  listPenalties(limit = 200, range: { sinceMs?: number; untilMs?: number } = {}): PenaltyView[] {
+    const where = ["accepted = 1", "event_class = 'penalty'"], params: unknown[] = [];
+    if (range.sinceMs !== undefined) { where.push("received_ms >= ?"); params.push(range.sinceMs); }
+    if (range.untilMs !== undefined) { where.push("received_ms < ?"); params.push(range.untilMs); }
+    params.push(Math.min(Math.max(limit, 1), 2000));
+    const rows = this.db.prepare(`SELECT id, received_at, payload FROM events WHERE ${where.join(" AND ")}
+      ORDER BY id DESC LIMIT ?`).all(...params) as { id: number; received_at: string; payload: string }[];
+    return rows.map((r) => { const p = JSON.parse(r.payload) as Record<string, unknown>; return {
+      id: r.id, at: r.received_at, reason: String(p.Reason ?? ""), type: p.Type ? String(p.Type) : null,
+      component: p.ComponentName ? String(p.ComponentName) : null, fine: Number(p.FineAmount) || 0,
+    }; });
+  }
+
+  createInvoice(input: { invoiceId: string; visitId?: string | null; plate: string; parkingAmount: number; electricAmount: number; basis: string }): void {
+    this.db.prepare(`INSERT OR IGNORE INTO invoices (invoice_id, visit_id, plate, parking_amount, electric_amount, basis, status, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, 'intended', ?)`).run(input.invoiceId, input.visitId ?? null, input.plate,
+      input.parkingAmount, input.electricAmount, input.basis, new Date().toISOString());
+  }
+
+  findInvoice(visitId: string | null | undefined, plate: string): { invoice_id: string; visit_id: string | null; parking_amount: number; electric_amount: number; basis: string; status: string } | undefined {
+    const row = (visitId
+      ? this.db.prepare("SELECT invoice_id, visit_id, parking_amount, electric_amount, basis, status FROM invoices WHERE visit_id = ? ORDER BY id DESC LIMIT 1").get(visitId)
+      : this.db.prepare("SELECT invoice_id, visit_id, parking_amount, electric_amount, basis, status FROM invoices WHERE plate = ? ORDER BY id DESC LIMIT 1").get(plate)) as
+      { invoice_id: string; visit_id: string | null; parking_amount: number; electric_amount: number; basis: string; status: string } | undefined;
+    if (row || !visitId) return row;
+    // Visit ids are derived from the simulator arrival EventId when possible. Older
+    // records (and a crash before that migration) may not have one, so rehydrate the
+    // latest plate invoice as a conservative restart fallback. The controller still
+    // refuses to issue a second charge for any restored invoice.
+    return this.db.prepare("SELECT invoice_id, visit_id, parking_amount, electric_amount, basis, status FROM invoices WHERE plate = ? AND status IN ('intended', 'issued', 'outcome_unknown') ORDER BY id DESC LIMIT 1").get(plate) as
+      { invoice_id: string; visit_id: string | null; parking_amount: number; electric_amount: number; basis: string; status: string } | undefined;
+  }
+
+  updateInvoiceStatus(invoiceId: string, status: string): void {
+    this.db.prepare("UPDATE invoices SET status = ? WHERE invoice_id = ?").run(status, invoiceId);
+  }
+
+  recordPayment(input: { eventId?: string | null; invoiceId?: string | null; visitId?: string | null; plate: string; amount: number; accepted: boolean }): void {
+    if (input.eventId) {
+      const existing = this.db.prepare("SELECT id FROM payments WHERE event_id = ?").get(input.eventId);
+      if (existing) return;
+    }
+    try {
+      this.db.prepare(`INSERT INTO payments (event_id, invoice_id, visit_id, plate, amount, accepted, received_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`).run(input.eventId ?? null, input.invoiceId ?? null, input.visitId ?? null, input.plate,
+        input.amount, input.accepted ? 1 : 0, new Date().toISOString());
+    } catch (err) {
+      // The UNIQUE(invoice_id, amount) constraint is deliberate: a repeated matching
+      // payment must not become revenue or another physical passage.
+      if (!(err instanceof Error) || !/UNIQUE/i.test(err.message)) throw err;
+    }
+    if (input.accepted && input.invoiceId) this.db.prepare("UPDATE invoices SET status = 'settled', settled_at = COALESCE(settled_at, ?) WHERE invoice_id = ?")
+      .run(new Date().toISOString(), input.invoiceId);
   }
 
   // ---------------------------------------------------------------------------
@@ -264,11 +553,19 @@ export class Store {
       duplicate: _duplicate ? 1 : 0,
       payload: JSON.stringify(payload),
     });
+    // A rejected delivery is still in the raw event log, but must not reserve its
+    // identity. Otherwise an unsigned/invalid request could block the later valid
+    // signed simulator delivery that uses the same EventId.
+    if (payload.EventId && _accepted !== false) {
+      const row = this.db.prepare("SELECT last_insert_rowid() AS id").get() as { id: number };
+      this.db.prepare(`INSERT OR IGNORE INTO event_identities (event_id, payload_hash, first_seen_at, first_event_row, accepted)
+        VALUES (?, ?, ?, ?, 1)`).run(payload.EventId, payloadHash(payload), _received_at, row.id);
+    }
   }
 
   recordSession(s: SessionView): void {
     this.insSession.run({
-      ...s,
+      ...s, visit_id: s.visit_id ?? null,
       payment_ok: s.payment_ok === null ? null : s.payment_ok ? 1 : 0,
       recorded_at: new Date().toISOString(),
       data: JSON.stringify(s),
@@ -350,7 +647,7 @@ export class Store {
 
     // arrivals: a car reaching an entry sensor
     const arrivals = this.db.prepare(
-      `SELECT received_ms FROM events WHERE spot_type = 'EntrySpot' AND direction = 'CarIn' AND received_ms BETWEEN ? AND ?`,
+      `SELECT received_ms FROM events WHERE accepted = 1 AND spot_type = 'EntrySpot' AND direction = 'CarIn' AND received_ms BETWEEN ? AND ?`,
     ).all(sinceMs, untilMs) as { received_ms: number }[];
     for (const a of arrivals) bucketOf(a.received_ms).arrivals++;
 
@@ -379,7 +676,7 @@ export class Store {
 
     // penalties and gate cycles, from the event payloads
     const other = this.db.prepare(
-      `SELECT received_ms, event_class, payload FROM events WHERE event_class IN ('penalty', 'gate_action') AND received_ms BETWEEN ? AND ?`,
+      `SELECT received_ms, event_class, payload FROM events WHERE accepted = 1 AND event_class IN ('penalty', 'gate_action') AND received_ms BETWEEN ? AND ?`,
     ).all(sinceMs, untilMs) as { received_ms: number; event_class: string; payload: string }[];
     const penalties = new Map<string, { count: number; fines: number }>(), gates = new Map<string, number>();
     let fines = 0, penaltyCount = 0;
