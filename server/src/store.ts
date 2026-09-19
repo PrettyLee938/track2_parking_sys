@@ -6,6 +6,8 @@
  *   actions        every command sent to the simulator - by the controller or a named user
  *   users          dashboard accounts (role admin | operator)
  *   auth_sessions  login sessions (only a hash of each token is stored)
+ *   components        usage and breakdown history per gate/spot/fan/light (Level 2)
+ *   component_events  breakdowns, repairs sent, fixes (Level 2)
  *
  * Writes are synchronous and take microseconds, so they never hold up event handling.
  * Schema changes are applied in migrate() so existing databases keep working.
@@ -13,7 +15,9 @@
 import { mkdirSync } from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
-import type { ActionView, EventView, Role, SessionView, SimEventBase, StatsResponse, UserView } from "@gpa/shared";
+import type {
+  ActionView, ComponentEventView, ComponentKind, EventView, Role, SessionView, SimEventBase, StatsResponse, UserView,
+} from "@gpa/shared";
 
 /** A received webhook as the controller sees it: the payload plus intake metadata. */
 export type EventRecord = SimEventBase & {
@@ -110,7 +114,47 @@ CREATE TABLE IF NOT EXISTS auth_sessions (
   created_at  TEXT NOT NULL,
   expires_ms  INTEGER NOT NULL
 );
+
+-- Level 2: component usage (survives restarts) and history (components.ts)
+CREATE TABLE IF NOT EXISTS components (
+  kind               TEXT NOT NULL,
+  name               TEXT NOT NULL,
+  zone               TEXT,
+  uses               REAL NOT NULL,
+  uses_total         REAL NOT NULL,
+  breakdowns         INTEGER NOT NULL,
+  uses_at_breakdown  TEXT NOT NULL,
+  last_broken_at     TEXT,
+  last_fixed_at      TEXT,
+  updated_at         TEXT NOT NULL,
+  PRIMARY KEY (kind, name)
+);
+
+CREATE TABLE IF NOT EXISTS component_events (
+  id      INTEGER PRIMARY KEY,
+  at      TEXT NOT NULL,
+  kind    TEXT NOT NULL,
+  name    TEXT NOT NULL,
+  zone    TEXT,
+  event   TEXT NOT NULL,
+  amount  REAL,
+  detail  TEXT
+);
+CREATE INDEX IF NOT EXISTS component_events_at ON component_events (at);
 `;
+
+/** Persisted usage of one component (components.ts). */
+export interface ComponentRow {
+  kind: ComponentKind;
+  name: string;
+  zone: string;
+  uses: number;
+  uses_total: number;
+  breakdowns: number;
+  uses_at_breakdown: number[];
+  last_broken_at: string | null;
+  last_fixed_at: string | null;
+}
 
 const toUser = (r: Record<string, unknown>): UserView => ({
   id: r.id as number, username: r.username as string, role: r.role as Role, disabled: !!r.disabled,
@@ -164,6 +208,38 @@ export class Store {
     }
     this.db.exec("CREATE INDEX IF NOT EXISTS events_flow ON events (spot_type, direction, received_ms)");
     if (!columns("actions").has("actor")) this.db.exec("ALTER TABLE actions ADD COLUMN actor TEXT");
+  }
+
+  // ---------------------------------------------------------------------------
+  // components (Level 2)
+  // ---------------------------------------------------------------------------
+  loadComponent(kind: ComponentKind, name: string): ComponentRow | null {
+    const r = this.db.prepare("SELECT * FROM components WHERE kind = ? AND name = ?").get(kind, name) as
+      (Omit<ComponentRow, "uses_at_breakdown"> & { uses_at_breakdown: string }) | undefined;
+    return r ? { ...r, uses_at_breakdown: JSON.parse(r.uses_at_breakdown) } : null;
+  }
+
+  saveComponent(c: ComponentRow): void {
+    this.db.prepare(`
+      INSERT INTO components (kind, name, zone, uses, uses_total, breakdowns, uses_at_breakdown, last_broken_at, last_fixed_at, updated_at)
+      VALUES (@kind, @name, @zone, @uses, @uses_total, @breakdowns, @uses_at_breakdown, @last_broken_at, @last_fixed_at, @updated_at)
+      ON CONFLICT (kind, name) DO UPDATE SET zone = @zone, uses = @uses, uses_total = @uses_total, breakdowns = @breakdowns,
+        uses_at_breakdown = @uses_at_breakdown, last_broken_at = @last_broken_at, last_fixed_at = @last_fixed_at, updated_at = @updated_at`,
+    ).run({ ...c, uses_at_breakdown: JSON.stringify(c.uses_at_breakdown), updated_at: new Date().toISOString() });
+  }
+
+  recordComponentEvent(e: Omit<ComponentEventView, "id">): void {
+    this.db.prepare("INSERT INTO component_events (at, kind, name, zone, event, amount, detail) VALUES (@at, @kind, @name, @zone, @event, @amount, @detail)")
+      .run(e);
+  }
+
+  /** Breakdowns, repairs and fixes, newest first. */
+  listComponentEvents(opts: { limit?: number; name?: string; since?: string } = {}): ComponentEventView[] {
+    const where: string[] = [], params: Record<string, unknown> = { limit: Math.min(opts.limit ?? 200, 2000) };
+    if (opts.name) { where.push("name = @name"); params.name = opts.name; }
+    if (opts.since) { where.push("at >= @since"); params.since = opts.since; }
+    return this.db.prepare(`SELECT * FROM component_events ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY id DESC LIMIT @limit`)
+      .all(params) as ComponentEventView[];
   }
 
   // ---------------------------------------------------------------------------

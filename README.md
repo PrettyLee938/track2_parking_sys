@@ -154,6 +154,13 @@ Learned from live runs; each has a test in `server/test/controller.test.ts`.
   from completed stays; else `GameSpeedMultiplier` from `settings.json`; else 1.0.
   `/api/state` shows it as `time_scale` and `time_scale_source`;
   `npm run report:speed -w server -- 21:00 21:30` replays a run through the estimator.
+- **Level 2: parts break by themselves** (gate1 broke a minute into the first run, fine 20).
+  Operating or repairing a broken, under-repair or in-use part is a penalty, so the
+  controller never opens a gate that is not ok, and `server/src/components.ts` repairs every
+  broken gate, spot and fan as soon as nothing uses it (`GPA_AUTO_REPAIR`), then resumes
+  whatever waited on it. Usage and breakdown history are stored (`components`,
+  `component_events`), served at `GET /api/components` and shown on the Operations page.
+  New features plug in through `server/src/subsystems.ts` instead of growing controller.ts.
 - The simulator acknowledges every `goto` but **silently drops some** (~15% of those sent
   while another car's event fires). The car just sits on its sensor, holding its lane and
   open gate. A car that has not driven off `GPA_GOTO_CONFIRM_GAME_S` after its goto gets

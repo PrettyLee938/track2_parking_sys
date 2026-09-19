@@ -1,6 +1,6 @@
 /** Test doubles and event builders shared by the controller tests. */
 import Fastify from "fastify";
-import type { SimBarrier, SimParkingSpot } from "@gpa/shared";
+import type { SimAlarm, SimBarrier, SimExhaustFan, SimLight, SimParkingSpot, SimZone } from "@gpa/shared";
 import { registerRoutes } from "../src/app";
 import { AuthService, hashPassword } from "../src/auth";
 import { loadSettings, type Settings } from "../src/config";
@@ -15,7 +15,27 @@ export type Call = [string, ...(string | number)[]];
 
 export class FakeSim implements SimApi {
   calls: Call[] = [];
+  fans: SimExhaustFan[] = [];
+  lights: SimLight[] = [];
+  /** Commands that throw (the simulator answering 4xx). */
+  failing = new Set<string>();
   constructor(public spots: SimParkingSpot[], public barriers: SimBarrier[]) {}
+
+  async listLights() { return this.lights; }
+  async listExhaustFans() { return this.fans; }
+  async listAlarms(): Promise<SimAlarm[]> { return []; }
+  async listZones(): Promise<SimZone[]> { return []; }
+  private rec(...call: Call) {
+    this.calls.push(call);
+    if (this.failing.has(call[0])) throw new Error(`${call[0]} rejected`);
+  }
+  async repairFan(n: string) { this.rec("repair", n); }
+  async fanOn(n: string) { this.rec("fan-on", n); }
+  async fanOff(n: string) { this.rec("fan-off", n); }
+  async lightOn(n: string) { this.rec("light-on", n); }
+  async lightOff(n: string) { this.rec("light-off", n); }
+  async lightGroupOn(g: string) { this.rec("group-on", g); }
+  async lightGroupOff(g: string) { this.rec("group-off", g); }
 
   static lvl1(nSpots = 3) {
     return new FakeSim(
@@ -30,8 +50,8 @@ export class FakeSim implements SimApi {
   async closeGate(n: string) { this.calls.push(["close", n]); }
   async carGoto(p: string, d: string) { this.calls.push(["goto", p, d]); }
   async carCharge(p: string, pc: number, cc: number) { this.calls.push(["charge", p, pc, cc]); }
-  async repairGate(n: string) { this.calls.push(["repair", n]); }
-  async repairSpot(n: string) { this.calls.push(["repair", n]); }
+  async repairGate(n: string) { this.rec("repair", n); }
+  async repairSpot(n: string) { this.rec("repair", n); }
 
   charges() { return this.calls.filter((c) => c[0] === "charge"); }
   gotos() { return this.calls.filter((c) => c[0] === "goto"); }

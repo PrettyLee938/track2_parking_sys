@@ -111,7 +111,34 @@ Open / next:
   fixed, never use broken parts, dashboard; split controller.ts) -> 3 preventive
   maintenance -> 4 CO fans + day/night lights -> 5 RBAC, login history, audit log ->
   6 penalties page, daily reports, vehicle-type billing, manually-parked-car scenario.
-  Step 1 in progress: observe a Level 2 run in monitor mode, then `discover` + `report:level`.
+  **Step 1 DONE** (commit 7940b8c on miro_level2; push failed from Claude's sandbox with an
+  SSL error - push from your own terminal). Level 2 run 2026-09-20 01:14: 557/557 webhooks
+  validly signed -> local .env GPA_SIGNATURE_MODE=strict. Findings: all cars arrive at
+  ENTRY1 only (Normal/Accessible/Electric ~1/3 each) so ZONE2/3 sat empty (allocator keeps
+  ENTRY1 cars in ZONE1 - try GPA_ALLOCATION_STRATEGY=any_zone_first_free and watch for
+  "cannot reach" penalties); gate1 broke 1 min in and nothing repaired it (lane dead 12
+  min); ServerDateTime is wall clock (x1.01) so day/night is NOT in events; CO max 7 (fans
+  never needed); all 30 lights on.
+  **Step 2 (component health) IN PROGRESS** (uncommitted): `server/src/subsystems.ts`
+  (plug-in slot: Subsystem{onSync,onEvent,onTick,snapshot} + Engine interface; add new ones
+  in createSubsystems()), `server/src/components.ts` (ComponentRegistry: gates/spots/fans/
+  lights, health, usage persisted in tables `components` + `component_events`, auto repair
+  when not in use, retry after repairRetryGameS), controller guards (never open a broken
+  gate; resume() after a fix restarts lanes, waiting gate opens and paid cars at exits;
+  gateInUse()), shared types for components/permissions/login attempts/audit/penalties in
+  shared/src/api.ts, protocol types SimLight/SimExhaustFan/SimAlarm/SimZone,
+  test/components.test.ts, GET /api/components (parts + history), dashboard "Component
+  health" card at the top of Operations (web/src/components/health.tsx), allocation strategy
+  `lane_zone_then_any` (own zone first, overflow to others; opt-in via
+  GPA_ALLOCATION_STRATEGY). 98 tests pass. Remaining for step 2: a live Level 2 run to verify
+  repairs (`report:level`, look for "repairing broken" in the log and the health card).
+  Next after that: step 3 preventive maintenance using `uses_at_breakdown` (repair a part
+  when idle once uses reach ~80% of the smallest limit seen for its kind).
+  Team split (4 people): A = core engine/repairs/maintenance (Miro + Claude), B = environment
+  subsystem (CO fans, day/night lights) plugging into subsystems.ts, C = RBAC permissions
+  (ROLE_PERMISSIONS in shared/api.ts), login attempt log + last 3 after login, audit log,
+  rejected-webhook page, D = penalties page, components page, daily/financial reports,
+  presentation.
 
 ## Working conventions
 - Don't commit or push unless asked; branch off `main` for new work.

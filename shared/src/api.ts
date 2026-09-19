@@ -130,7 +130,104 @@ export interface StateSnapshot {
   recent_sessions: SessionView[];
   counters: Counters;
   feed: FeedItem[];
+  /** Every gate, parking spot, exhaust fan and light, with health and usage. */
+  components: ComponentView[];
+  /** Extra state from plug-in subsystems (server/src/subsystems), keyed by subsystem name. */
+  subsystems: Record<string, unknown>;
 }
+
+// ---------------------------------------------------------------------------
+// components: health, usage, repairs (Level 2)
+// ---------------------------------------------------------------------------
+export type ComponentKind = "gate" | "spot" | "fan" | "light";
+/** ok, broken (waiting for a repair), maintenance (repair under way). */
+export type ComponentHealth = "ok" | "broken" | "maintenance";
+
+export interface ComponentView {
+  kind: ComponentKind;
+  name: string;
+  zone: string;
+  health: ComponentHealth;
+  /** Fans and lights: switched on; gates: open; spots: occupied. null = unknown. */
+  on: boolean | null;
+  /** Work since the last repair: gate cycles, spot visits, fan/light on-hours (game). */
+  uses: number;
+  uses_total: number;
+  breakdowns: number;
+  /** Uses at each breakdown so far - what preventive maintenance learns the limit from. */
+  uses_at_breakdown: number[];
+  last_broken_at: string | null;
+  last_fixed_at: string | null;
+  /** Why a broken part is not being repaired yet, e.g. "a car is passing". */
+  waiting: string | null;
+}
+
+export type ComponentEventKind = "broken" | "fixed" | "repair_sent" | "repair_failed" | "preventive_repair";
+
+/** GET /api/components - also written to the audit trail. */
+export interface ComponentEventView {
+  id: number;
+  at: string;
+  kind: ComponentKind;
+  name: string;
+  zone: string;
+  event: ComponentEventKind;
+  /** Fine for a breakdown, cost of a repair. */
+  amount: number | null;
+  detail: string | null;
+}
+export interface ComponentsResponse { items: ComponentView[]; events: ComponentEventView[] }
+
+// ---------------------------------------------------------------------------
+// security & audit (Level 2) - contracts; see CLAUDE.md for who builds what
+// ---------------------------------------------------------------------------
+/** What a role may do. The server enforces it; the dashboard uses it to hide controls. */
+export type Permission =
+  | "view"              // dashboard, logs, stats
+  | "control"           // gates open/close/auto, entrances
+  | "repair"            // start repairs on gates, spots, fans
+  | "reports.financial" // revenue and financial reports
+  | "users.manage"      // accounts
+  | "config";           // settings, resync
+
+export const ROLE_PERMISSIONS: Record<Role, readonly Permission[]> = {
+  operator: ["view", "control", "repair"],
+  admin: ["view", "control", "repair", "reports.financial", "users.manage", "config"],
+};
+
+/** One sign-in attempt; the last three are shown after login. */
+export interface LoginAttemptView {
+  id: number;
+  at: string;
+  username: string;
+  ok: boolean;
+  ip: string | null;
+  /** Why it failed: "bad password", "locked", "disabled", "unknown user". */
+  reason: string | null;
+}
+
+/** An important action or change: who did what to what. actor null = the system. */
+export interface AuditEntryView {
+  id: number;
+  at: string;
+  actor: string | null;
+  action: string;         // e.g. "gate.hold", "component.repair", "user.create", "webhook.rejected"
+  target: string | null;  // e.g. "gate1", "user:oper"
+  ok: boolean;
+  detail: string | null;
+}
+export interface AuditResponse { items: AuditEntryView[] }
+
+/** A fine from the simulator, for the penalties page. */
+export interface PenaltyView {
+  id: number;
+  at: string;
+  reason: string;
+  type: string | null;
+  component: string | null;
+  fine: number;
+}
+export interface PenaltiesResponse { items: PenaltyView[] }
 
 /** GET /api/sessions */
 export interface SessionsResponse {
