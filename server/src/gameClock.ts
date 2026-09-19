@@ -32,6 +32,8 @@ const CALIBRATION_SAMPLES = 20;
 // webhook delivery, a rendered frame). Fitted on Level 1 runs at x1.7-x7.1: moves took
 // 0.03 s + 0.48 game-s; ignoring the fixed part skews estimates by up to 25%.
 const GATE_FIXED_S = 0.03;
+// Plausible game speeds, and the least game time a real gate move takes (~0.5 measured).
+const MIN_SPEED = 0.2, MAX_SPEED = 12, MIN_GATE_GAME_S = 0.3;
 
 export class GameClock {
   private game = 0;                 // game seconds elapsed
@@ -44,6 +46,7 @@ export class GameClock {
   private gateGameS: number[] = []; // the same in game seconds, while the speed was known from stays
   private fromGates: number | null = null; // speed read off the gates since a change they detected
   private changedAt = -Infinity;    // active() when that change was detected
+  private pendingChange: number | null = null; // a first window's reading, awaiting confirmation
   private settingsSpeed: number | null = null;
 
   constructor(private readonly cfg: ClockSettings, private readonly realNow: () => number = () => Date.now() / 1000) {
@@ -105,7 +108,11 @@ export class GameClock {
    * when this reveals a speed change, else null.
    */
   addGateMove(realS: number): { from: number; to: number } | null {
-    if (this.cfg.gameSpeed || !(realS > 0 && realS < 10)) return null;
+    // A move takes ~0.5 game-s: even at x10 that is 0.08 s. Anything quicker was no move at all
+    // (the gate already stood that way) - 2026-09-20 04:16: such readings (~0.03 s, minus the
+    // 0.03 s fixed part) made the speed look like x100, the game clock raced, and 27 parked
+    // cars were written off as overdue. Their spots then got second cars: occupied-spot fines.
+    if (this.cfg.gameSpeed || !(realS >= GATE_FIXED_S + MIN_GATE_GAME_S / MAX_SPEED && realS < 10)) return null;
     this.gateTimes.push(realS);
     const n = this.cfg.gateSpeedSamples;
     if (this.gateTimes.length > n) this.gateTimes.shift();
@@ -128,12 +135,21 @@ export class GameClock {
       calibrate();
       return null;
     }
-    const estimate = median(this.gateGameS) / recent;
+    const estimate = Math.min(MAX_SPEED, Math.max(MIN_SPEED, median(this.gateGameS) / recent));
     if (Math.abs(estimate / value - 1) <= this.cfg.speedChangeThreshold) {
       if (source === "gate timing") this.fromGates = estimate; // keep following until stays take over
       else calibrate();
+      this.pendingChange = null;
       return null;
     }
+    // A change must show in two windows in a row: one odd window (a gate that did not really
+    // move, a repair in between) must not move the whole clock.
+    if (this.pendingChange === null || Math.abs(estimate / this.pendingChange - 1) > this.cfg.speedChangeThreshold) {
+      this.pendingChange = estimate;
+      this.gateTimes = [];
+      return null;
+    }
+    this.pendingChange = null;
     this.fromGates = estimate;
     this.changedAt = this.activeNow();
     this.stays = [];
