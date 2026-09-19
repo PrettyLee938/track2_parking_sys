@@ -158,6 +158,7 @@ export interface Car extends CarView {
   parkedA: number | null;        // active real seconds (GameClock.activeNow), to learn the speed
   leftSpotA: number | null;
   chargeScheduled: boolean;
+  fakePayments: number;          // payments with a bad signature
 }
 
 function newCar(plate: string, carType: string, planned: number | null, status: CarStatus, extra: Partial<Car> = {}): Car {
@@ -167,14 +168,14 @@ function newCar(plate: string, carType: string, planned: number | null, status: 
     exit_at: null, charge_parking: null, charge_electric: null, charge_attempts: 0, charge_override: null,
     paid: null, payment_ok: null, left_at: null,
     arrivedG: null, dispatchedG: null, parkedG: null, leftSpotG: null, releasedG: null, lastSeenG: null,
-    gotoG: null, gotoResends: 0, parkedA: null, leftSpotA: null, chargeScheduled: false,
+    gotoG: null, gotoResends: 0, parkedA: null, leftSpotA: null, chargeScheduled: false, fakePayments: 0,
     ...extra,
   };
 }
 
 export function publicCar(c: Car): CarView {
   const { arrivedG, dispatchedG, parkedG, leftSpotG, releasedG, lastSeenG, gotoG, gotoResends, parkedA, leftSpotA,
-    chargeScheduled, ...view } = c;
+    chargeScheduled, fakePayments, ...view } = c;
   return view;
 }
 
@@ -241,7 +242,7 @@ export class Controller implements Engine {
   feed: FeedItem[] = [];
   counters: Counters = {
     arrived: 0, admitted: 0, turned_away: 0, neglected: 0, exited: 0, revenue: 0, payment_mismatches: 0,
-    repeat_exits: 0, ghosts_retired: 0, escaped: 0, penalties: 0, fines: 0, command_errors: 0,
+    repeat_exits: 0, ghosts_retired: 0, escaped: 0, penalties: 0, fines: 0, command_errors: 0, fake_payments: 0,
   };
 
   constructor(deps: ControllerDeps) {
@@ -316,6 +317,12 @@ export class Controller implements Engine {
 
   submit(e: EventRecord): void {
     this.queue.push(() => this.handle(e));
+  }
+
+  /** A webhook the intake refused (bad signature): not acted on, only looked at - a refused
+   * payment_made is a car trying to leave with a fake payment. */
+  submitRejected(e: EventRecord): void {
+    this.queue.push(() => this.onRejected(e));
   }
 
   requestResync(): void {
@@ -713,7 +720,7 @@ export class Controller implements Engine {
       if (car) car.status = "entering";
       lane.current = null;
       if (lane.queue.length) await this.pumpEntry(lane);
-      else this.later(this.cfg.gateCloseDelayGameS, `close ${lane.gate}`, () => this.closeGateIfIdle(lane.gate));
+      else this.later(this.cfg.entryGateCloseDelayGameS, `close ${lane.gate}`, () => this.closeGateIfIdle(lane.gate));
     } else if (lane.queue.includes(plate)) {
       lane.queue.splice(lane.queue.indexOf(plate), 1);
       car!.status = "neglected";
@@ -912,6 +919,27 @@ export class Controller implements Engine {
     }
   }
 
+  /**
+   * "Some cars will tweak the system and send fake payment" (spec). In the 2026-09-20 run six
+   * payments had a bad signature; each car sat on the exit unpaid and the simulator fined us
+   * every ~3 min ("escaped without paying") until it drove out. The car is never released
+   * for it. It is asked once more to pay (rechargeAfterFakePayment) - its only way to pay
+   * for real.
+   */
+  private async onRejected(e: EventRecord) {
+    if (e.EventClass !== EventClass.PaymentMade) return;
+    const plate = str(e, "CarPlateNumber") ?? "?";
+    const car = this.cars.get(plate);
+    this.counters.fake_payments++;
+    this.note("error", `FAKE payment ${e.Amount} from ${plate} (bad signature) - not releasing`);
+    if (!car || car.payment_ok || car.status !== "invoiced") return;
+    car.fakePayments++;
+    if (this.cfg.rechargeAfterFakePayment && car.fakePayments === 1) {
+      this.note("warn", `${plate}: asking for payment again after the fake one`);
+      this.rebill(car, car.charge_parking);
+    }
+  }
+
   async release(car: Car): Promise<void> {
     if (this.replaying) return; // whether it was released is in the recorded commands
     if (car.status !== "released") {
@@ -1071,9 +1099,10 @@ export class Controller implements Engine {
   }
 
   private async requestOpen(gate: Gate) {
-    // Operating a broken or under-repair gate is a penalty. Whoever waits on it stays in
-    // onOpen; resume() asks again once it is fixed.
-    if (!gate.operable) return;
+    // Operating a broken or under-repair gate is a penalty, and opening a worn-out one
+    // breaks it (Level 2 gates break on their 10th opening). Whoever waits on it stays in
+    // onOpen; preventive maintenance repairs a worn gate, resume() asks again once fixed.
+    if (!gate.operable || this.components.wornOut("gate", gate.name)) return;
     const clean = gate.state === GateState.Closed, sent = this.clock.real();
     if (await this.cmd("open", () => this.sim.openGate(gate.name), [gate.name])) {
       gate.state = GateState.Opening;

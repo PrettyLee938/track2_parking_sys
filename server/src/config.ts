@@ -103,6 +103,10 @@ const schema = z.object({
   // car to pass the barrier, short enough that nobody else follows. Cars leave the exit
   // ~1.5 game-s after paying and arrive every ~8 game-s.
   gateCloseDelayGameS: num().nonnegative().default(1.5),
+  // Entry gates stay open this long after the last car went in. Cars never drive through an
+  // entry without a goto (7,124 entries checked), and every closing costs a gate cycle -
+  // Level 2 gates break after 10 - so an entry keeps its gate open across a stream of cars.
+  entryGateCloseDelayGameS: num().nonnegative().default(10),
   // A gate normally reports Open/Closed ~0.6 game-s after the command. An open not
   // confirmed after this long is re-sent once, then assumed open; a close is re-sent.
   gateConfirmGameS: num().positive().default(3),
@@ -139,6 +143,20 @@ const schema = z.object({
   autoRepair: bool().default(true),
   // After a rejected repair command, wait this long (GAME seconds) before trying again.
   repairRetryGameS: num().positive().default(10),
+  // Repair parts before they break (a breakdown = fine + a long outage). A part is repaired
+  // when one more use would break it, or - when nothing needs it right now - once it has
+  // used this share of its limit. Limits are learned from breakdowns (gates: 10 openings)
+  // unless set here (0 = learn).
+  preventiveMaintenance: bool().default(true),
+  preventiveIdleRatio: num().min(0).max(1).default(0.8),
+  gateCycleLimit: num().int().min(0).default(0),
+  spotUseLimit: num().int().min(0).default(0),
+  fanHourLimit: num().min(0).default(0),
+
+  // ---- payments --------------------------------------------------------------------
+  // A payment_made with a bad signature is a fake: the car has not paid. It is never
+  // released for it; ask it to pay once more (the only way it can still pay).
+  rechargeAfterFakePayment: bool().default(true),
 
   // ---- our own timing (REAL seconds) ------------------------------------------------
   tickIntervalS: num().positive().default(0.5),

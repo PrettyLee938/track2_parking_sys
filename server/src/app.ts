@@ -124,6 +124,8 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
     if (meta.seqNote) req.log.warn(`sequence gap: ${meta.seqNote}`);
     if (!meta.accept) {
       req.log.warn(`dropped ${event.EventClass} (${meta.duplicate ? "duplicate" : `signature ${meta.sig}`})`);
+      // A payment with a bad signature is a fake one: the controller must know the car has not paid.
+      if (!meta.duplicate && meta.sig === "invalid" && cfg.controllerEnabled) controller.submitRejected(record);
     } else if (cfg.controllerEnabled) {
       controller.submit(record); // handled on the controller's queue; respond immediately
     }
