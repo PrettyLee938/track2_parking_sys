@@ -3,10 +3,12 @@ import type { Database } from '../db/database.js';
 import type { SimulatorGateway } from '../simulator/contracts.js';
 import { AuditService } from './audit.js';
 import type { ParkingService } from './parking-service.js';
+import type { SimulatorSnapshot } from '../domain/types.js';
 
 export class RecoveryService {
   private timer: ReturnType<typeof setInterval> | undefined;
   private reconciling = false;
+  private pendingSnapshot: SimulatorSnapshot | undefined;
 
   constructor(private readonly db: Database, private readonly gateway: SimulatorGateway, private readonly parking: ParkingService, private readonly audit = new AuditService(db)) {}
 
@@ -39,6 +41,7 @@ export class RecoveryService {
       if (current && current !== snapshot.runId) {
         this.setMeta('run_status', 'ambiguous');
         this.setMeta('pending_run_id', snapshot.runId);
+        this.pendingSnapshot = snapshot;
         this.audit.record('run-ambiguous', 'simulator-run', snapshot.runId, { previousRunId: current, observedRunId: snapshot.runId });
         return { status: 'ambiguous' as const, runId: snapshot.runId };
       }
@@ -79,9 +82,13 @@ export class RecoveryService {
     return { status: 'active' as const, runId };
   }
 
-  continueRun(actorId: string) {
+  async continueRun(actorId: string) {
     if (this.meta('run_status') !== 'ambiguous') throw new Error('run-not-ambiguous');
     const runId = this.meta('pending_run_id') || this.meta('run_id');
+    const snapshot = await this.gateway.reconcile();
+    if (snapshot.runId !== runId) { this.setMeta('pending_run_id', snapshot.runId); throw new Error('run-changed'); }
+    await this.parking.refreshSnapshot(snapshot);
+    this.pendingSnapshot = undefined;
     this.db.transaction(() => {
       this.setMeta('run_id', runId || 'unknown');
       this.setMeta('pending_run_id', '');
