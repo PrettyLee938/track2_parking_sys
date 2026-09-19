@@ -3,20 +3,32 @@
  * Roles are enforced by the server; the UI only hides what a role cannot use.
  */
 import { useEffect, useState } from "react";
-import { Badge, ToastProvider } from "./components/ui";
+import { Badge, Card, ToastProvider } from "./components/ui";
 import { AuthProvider, useAuth } from "./lib/auth";
 import { useLiveState } from "./lib/live";
 import { Admin } from "./pages/Admin";
+import { Equipment } from "./pages/Equipment";
+import { Incidents } from "./pages/Incidents";
 import { Login } from "./pages/Login";
 import { Logs } from "./pages/Logs";
+import { Maintenance } from "./pages/Maintenance";
 import { Operations } from "./pages/Operations";
 import { Overview } from "./pages/Overview";
+import { Penalties } from "./pages/Penalties";
+import { Reports } from "./pages/Reports";
 import { Stats } from "./pages/Stats";
+import type { LoginAttemptView } from "@gpa/shared";
+import { fmtDateTime } from "./lib/format";
 
-type Route = "overview" | "operations" | "logs" | "stats" | "admin";
+type Route = "overview" | "operations" | "equipment" | "maintenance" | "incidents" | "penalties" | "reports" | "logs" | "stats" | "admin";
 const ROUTES: { id: Route; label: string; adminOnly?: boolean }[] = [
   { id: "overview", label: "Overview" },
   { id: "operations", label: "Operations" },
+  { id: "equipment", label: "Equipment" },
+  { id: "maintenance", label: "Maintenance" },
+  { id: "incidents", label: "Incidents" },
+  { id: "penalties", label: "Penalties" },
+  { id: "reports", label: "Reports" },
   { id: "logs", label: "Logs" },
   { id: "stats", label: "Statistics" },
   { id: "admin", label: "Admin", adminOnly: true },
@@ -51,7 +63,7 @@ function Root() {
 }
 
 function Shell() {
-  const { user, signOut, can } = useAuth();
+  const { user, signOut, can, previousLoginAttempts } = useAuth();
   const route = useHashRoute();
   const { state, connected } = useLiveState();
   const visible = ROUTES.filter((r) => !r.adminOnly || can("admin"));
@@ -76,11 +88,17 @@ function Shell() {
         </div>
       </header>
       <main className="content">
+        <LoginHistory attempts={previousLoginAttempts} />
         {!state ? <p className="muted">Connecting to the control centre…</p> : (
           <>
             {!state.synced && <p className="banner">Waiting for the simulator - start it and load a level.</p>}
             {current === "overview" && <Overview s={state} />}
             {current === "operations" && <Operations s={state} />}
+            {current === "equipment" && <Equipment s={state} />}
+            {current === "maintenance" && <Maintenance />}
+            {current === "incidents" && <Incidents />}
+            {current === "penalties" && <Penalties />}
+            {current === "reports" && <Reports />}
             {current === "logs" && <Logs />}
             {current === "stats" && <Stats spots={state.spots} />}
             {current === "admin" && <Admin />}
@@ -89,4 +107,13 @@ function Shell() {
       </main>
     </>
   );
+}
+
+function LoginHistory({ attempts }: { attempts: LoginAttemptView[] }) {
+  if (!attempts.length) return null;
+  return <Card title="Recent sign-in attempts" subtitle="The three attempts before this session was opened">
+    <div className="table-wrap"><table className="data compact"><thead><tr><th>When</th><th>User</th><th>Result</th><th>Reason</th><th>IP</th></tr></thead>
+      <tbody>{attempts.map((a) => <tr key={a.id}><td className="mono">{fmtDateTime(a.at)}</td><td>{a.username}</td><td>{a.ok ? "successful" : "failed"}</td><td>{a.reason ?? "-"}</td><td className="mono">{a.ip ?? "-"}</td></tr>)}</tbody>
+    </table></div>
+  </Card>;
 }

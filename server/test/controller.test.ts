@@ -5,7 +5,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { getAllocator } from "../src/allocation";
 import { loadSettings, REPO_ROOT, unknownSettingVars } from "../src/config";
-import { Controller } from "../src/controller";
+import { Controller, simSecondsBetween } from "../src/controller";
 import { Store } from "../src/store";
 import { loadDir, resolve, type Topology } from "../src/topology";
 import {
@@ -17,6 +17,15 @@ import {
 // lifecycle
 // ---------------------------------------------------------------------------
 describe("lifecycle", () => {
+  it("treats backwards simulator timestamps as an unknown duration", () => {
+    expect(simSecondsBetween("2026-09-20 04:24:43", "2026-09-20 04:24:41")).toBeNull();
+  });
+
+  it("does not use backwards game-clock duration as measured billing evidence", async () => {
+    const { c } = await make();
+    expect((c as any).parkedGameSeconds({ parkedG: 10, leftSpotG: 5, parked_at: null, left_spot_at: null })).toBeNull();
+  });
+
   it("runs a car from arrival to departure", async () => {
     const { c, sim } = await make();
     await c.handle(carEv("AAA 1", "ENTRY1", "CarIn", "10:00:00"));
@@ -555,6 +564,23 @@ describe("recovery", () => {
     expect(c.cars.size).toBe(0);
     expect(sim.charges()).toEqual([]);
   });
+
+  it("does not learn the current game speed from replayed historical stays", async () => {
+    const store = new Store(":memory:");
+    const settingsFile = path.join(mkdtempSync(path.join(tmpdir(), "gpa-replay-")), "settings.json");
+    writeFileSync(settingsFile, JSON.stringify({ GameSpeedMultiplier: 1 }));
+    const base = Date.now() - 20_000;
+    for (let i = 0; i < 3; i++) {
+      const parkedAt = new Date(base + i * 4_000).toISOString();
+      const leftAt = new Date(base + i * 4_000 + 3_000).toISOString();
+      store.recordEvent({ ...carEv(`REPLAY ${i}`, "S1", "CarIn", "10:00:00", "1"), _received_at: parkedAt, _accepted: true });
+      store.recordEvent({ ...carEv(`REPLAY ${i}`, "S1", "CarOut", "10:01:00", "1"), _received_at: leftAt, _accepted: true });
+    }
+    const sim = FakeSim.lvl1();
+    const c = new Controller({ sim, cfg: testSettings({ simSettingsFile: settingsFile }), store, log: silentLog, topologies: [LVL1], queue: new RecordingQueue() });
+    await c.sync({ replay: true });
+    expect(c.timeScaleInfo).toEqual({ value: 1, source: "simulator settings" });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -817,6 +843,21 @@ describe("lost webhooks", () => {
     expect(c.cars.has("Q")).toBe(false);
     expect(c.entryLanes.get("ENTRY1")!.queue).toEqual([]);
     expect(c.counters.ghosts_retired).toBe(2);
+  });
+
+  it("advances the exit queue when a stale unpaid head is retired", async () => {
+    const { c, sim } = await make();
+    await parkAndReachExit(c, "HEAD");
+    await fireTimers(c); // HEAD is invoiced and owns the exit passage.
+    await parkAndReachExit(c, "FOLLOW"); // FOLLOW is queued behind HEAD.
+
+    back(c, "HEAD", "lastSeenG", c.cfg.staleCarGameS);
+    await c.tick();
+
+    expect(c.cars.has("HEAD")).toBe(false);
+    expect(c.exitLanes.get("EXIT_EXIT")!).toMatchObject({ active: "FOLLOW", queue: ["FOLLOW"] });
+    await fireTimers(c);
+    expect(sim.charges()).toContainEqual(["charge", "FOLLOW", 2, 0]);
   });
 
   it("redirects a car the simulator says was sent to an occupied spot, instead of re-sending it", async () => {

@@ -21,13 +21,18 @@ import type { Car, EntryLane, ExitLane, Gate, Spot } from "./controller";
 import type { EventRecord, Store } from "./store";
 import type { GameClock } from "./gameClock";
 import type { SimApi } from "./simClient";
+import { EnvironmentSubsystem } from "./environment";
 
 export interface Subsystem {
   readonly name: string;
   onSync?(): Promise<void> | void;
+  /** Optional pre-event hook for safety actions that must happen before controller dispatch. */
+  onBeforeEvent?(e: EventRecord): Promise<void> | void;
   onEvent?(e: EventRecord): Promise<void> | void;
   onTick?(gameNow: number): Promise<void> | void;
   snapshot?(): unknown;
+  /** Optional admission gate for zone-local automation (e.g. unsafe CO). */
+  isZoneRestricted?(zone: string): boolean;
 }
 
 /** The controller as subsystems see it. */
@@ -45,10 +50,14 @@ export interface Engine {
   readonly cars: Map<string, Car>;
   /** Every gate, spot, fan and light with health and usage (core, always present). */
   readonly components: ComponentRegistry;
+  /** Whether a zone is currently restricted by an environment subsystem. */
+  isZoneRestricted(zone: string): boolean;
   /** Dashboard feed + server log. */
   note(level: FeedLevel, msg: string): void;
   /** Send a simulator command, recorded in the actions log. Returns whether it was accepted. */
   cmd(what: string, fn: () => Promise<void>, args: (string | number)[], actor?: string | null): Promise<boolean>;
+  /** The last command outcome; unknown means no response arrived. */
+  readonly lastCommandOutcome: "ok" | "failed" | "unknown" | null;
   /** Run fn after delayGameS of game time, on the serial queue. */
   later(delayGameS: number, label: string, fn: () => Promise<unknown> | unknown): void;
   /** Why this gate cannot be worked on right now (a car is passing through), or null. */
@@ -58,6 +67,6 @@ export interface Engine {
 }
 
 /** Every subsystem, in the order they see events. */
-export function createSubsystems(_engine: Engine): Subsystem[] {
-  return [];
+export function createSubsystems(engine: Engine): Subsystem[] {
+  return [new EnvironmentSubsystem(engine)];
 }

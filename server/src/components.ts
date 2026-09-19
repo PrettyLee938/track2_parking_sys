@@ -40,6 +40,8 @@ interface Part {
   retryAfterG: number;         // game clock: no repair attempt before this
   waiting: string | null;
   dirty: boolean;              // usage changed, not yet saved
+  lastUsageG: number | null;
+  lastEventSeq: number | null;
 }
 
 const KIND_OF_TYPE: Record<string, ComponentKind> = {
@@ -90,6 +92,7 @@ export class ComponentRegistry implements Subsystem {
         uses: Math.round(p.uses * 100) / 100, uses_total: Math.round(p.usesTotal * 100) / 100,
         breakdowns: p.breakdowns, uses_at_breakdown: p.usesAtBreakdown,
         last_broken_at: p.lastBrokenAt, last_fixed_at: p.lastFixedAt, waiting: p.waiting,
+        maintenance_due: this.due(p),
       }));
   }
 
@@ -98,7 +101,15 @@ export class ComponentRegistry implements Subsystem {
   // ---------------------------------------------------------------------------
   setOn(kind: ComponentKind, name: string, on: boolean): void {
     const p = this.get(kind, name);
-    if (p) p.on = on;
+    if (p) {
+      if (p.on === on) return;
+      const now = this.engine.clock.now();
+      if ((kind === "fan" || kind === "light") && p.on && p.lastUsageG !== null) {
+        this.addUsage(kind, name, Math.max(0, now - p.lastUsageG) / 3600);
+      }
+      p.lastUsageG = on ? now : null;
+      p.on = on;
+    }
   }
 
   /** Work done, in the part's own unit (fan/light: game hours switched on). */
@@ -120,25 +131,38 @@ export class ComponentRegistry implements Subsystem {
       const k = key(kind, name);
       seen.add(k);
       const p = this.parts.get(k) ?? this.load(kind, name, zone);
+      if ((kind === "fan" || kind === "light") && typeof extra.on === "boolean") this.setOn(kind, name, extra.on);
       Object.assign(p, { zone }, extra);
       this.parts.set(k, p);
     };
     for (const g of engine.gates.values()) add("gate", g.name, g.zone);
     for (const s of engine.spots.values()) if (s.purpose === SpotPurpose.Park) add("spot", s.name, s.zone);
-    try {
-      const [fans, lights] = await Promise.all([engine.sim.listExhaustFans(), engine.sim.listLights()]);
-      for (const f of fans ?? []) add("fan", f.name, f.zoneParent ?? "", { broken: !!f.broken, maintenance: !!f.isUnderMaintenance, on: !!f.isOn });
-      for (const l of lights ?? []) add("light", l.name, l.zoneParent ?? "", { group: l.group ?? null, on: !!l.isOn });
-    } catch (err) {
-      // Level 1 has no fans or lights; keep going with gates and spots.
-      if (!this.listWarned) engine.note("warn", `could not list fans/lights: ${(err as Error).message}`);
+    const [fanResult, lightResult] = await Promise.allSettled([engine.sim.listExhaustFans(), engine.sim.listLights()]);
+    if (fanResult.status === "fulfilled") {
+      for (const f of fanResult.value ?? []) add("fan", f.name, f.zoneParent ?? "", { broken: !!f.broken, maintenance: !!f.isUnderMaintenance, on: !!f.isOn });
+    } else if (!this.listWarned) {
+      engine.note("warn", `could not list exhaust fans: ${(fanResult.reason as Error).message}`);
       this.listWarned = true;
+    }
+    if (lightResult.status === "fulfilled") {
+      for (const l of lightResult.value ?? []) add("light", l.name, l.zoneParent ?? "", { group: l.group ?? null, on: !!l.isOn,
+        broken: !!l.broken, maintenance: !!l.isUnderMaintenance });
+    } else if (!this.listWarned) {
+      engine.note("warn", `could not list lights: ${(lightResult.reason as Error).message}`);
+      this.listWarned = true;
+    }
+    for (const p of this.parts.values()) {
+      if (p.kind !== "fan" && p.kind !== "light") continue;
+      if (p.on && p.lastUsageG === null) p.lastUsageG = engine.clock.now();
+      if (!p.on) p.lastUsageG = null;
     }
     for (const k of [...this.parts.keys()]) if (!seen.has(k)) this.parts.delete(k); // another level
     await this.repairWhatWeCan();
   }
 
   async onEvent(e: EventRecord): Promise<void> {
+    const part = this.partOf(e);
+    if ((e.EventClass === EventClass.ComponentBroken || e.EventClass === EventClass.ComponentFixed) && part && !this.acceptEvent(part, e)) return;
     switch (e.EventClass) {
       case EventClass.ComponentBroken: return this.onBroken(e);
       case EventClass.ComponentFixed: return this.onFixed(e);
@@ -151,7 +175,15 @@ export class ComponentRegistry implements Subsystem {
     }
   }
 
-  async onTick(): Promise<void> {
+  async onTick(gameNow = this.engine.clock.now()): Promise<void> {
+    for (const p of this.parts.values()) {
+      if ((p.kind === "fan" || p.kind === "light") && p.on && p.lastUsageG !== null) {
+        const delta = gameNow - p.lastUsageG;
+        if (delta > 0) this.addUsage(p.kind, p.name, delta / 3600);
+        p.lastUsageG = gameNow;
+      }
+    }
+    this.schedulePreventive();
     await this.repairWhatWeCan();
     for (const p of this.parts.values()) if (p.dirty) this.save(p);
   }
@@ -164,7 +196,7 @@ export class ComponentRegistry implements Subsystem {
     if (!p) return;
     if (p.kind === "fan" || p.kind === "light") {
       p.broken = true;
-      p.on = false; // a broken fan does not run - and switching it is a penalty
+      this.setOn(p.kind, p.name, false); // a broken fan does not run - and switching it is a penalty
     }
     if (this.engine.replaying) return; // counted and recorded the first time round
     p.breakdowns++;
@@ -172,6 +204,7 @@ export class ComponentRegistry implements Subsystem {
     p.lastBrokenAt = e.ServerDateTime ?? new Date().toISOString();
     this.save(p);
     this.record(p, "broken", Number(e.FineAmount) || null, `after ${Math.round(p.uses * 100) / 100} uses since the last repair`);
+    this.engine.store.updateMaintenanceJob(p.kind, p.name, "failed", { source: "component_broken", event: e });
     this.engine.note("error", `${p.kind} ${p.name} BROKEN after ${Math.round(p.uses)} uses (fine ${e.FineAmount ?? "?"})`);
     await this.tryRepair(p);
   }
@@ -187,17 +220,23 @@ export class ComponentRegistry implements Subsystem {
     p.lastFixedAt = e.ServerDateTime ?? new Date().toISOString();
     this.save(p);
     this.record(p, "fixed", Number(e.RepairCost) || null, null);
+    this.engine.store.updateMaintenanceJob(p.kind, p.name, "completed", { source: "component_fixed", event: e });
     await this.engine.resume();
   }
 
   /** Repair every broken part nobody is using; the rest wait (reason in `waiting`). */
   async repairWhatWeCan(): Promise<void> {
-    for (const p of this.parts.values()) if (this.health(p) === "broken") await this.tryRepair(p);
+    for (const p of this.parts.values()) {
+      const health = this.health(p);
+      if (health === "broken" || (health === "maintenance" && p.waiting)) await this.tryRepair(p);
+    }
   }
 
   private async tryRepair(p: Part) {
     const { engine } = this;
-    if (!engine.cfg.autoRepair || engine.replaying || this.health(p) !== "broken") return;
+    const health = this.health(p);
+    if (!engine.cfg.autoRepair || engine.replaying || (health !== "broken" && health !== "maintenance")) return;
+    if (p.waiting?.startsWith("repair outcome unknown")) return;
     const now = engine.clock.now();
     if (now < p.retryAfterG) return;
     p.waiting = this.inUse(p);
@@ -209,8 +248,13 @@ export class ComponentRegistry implements Subsystem {
     }
     if (await engine.cmd("repair", send, [p.name])) {
       this.markMaintenance(p);
+      engine.store.updateMaintenanceJob(p.kind, p.name, "requested");
       this.record(p, "repair_sent", null, "automatic, as soon as it was free");
       engine.note("warn", `repairing broken ${p.kind} ${p.name}`);
+    } else if (engine.lastCommandOutcome === "unknown") {
+      p.waiting = "repair outcome unknown; verify the simulator before retrying";
+      engine.store.updateMaintenanceJob(p.kind, p.name, "outcome_unknown", { reason: p.waiting });
+      engine.note("error", `${p.kind} ${p.name} repair outcome is unknown; no blind retry will be sent`);
     } else {
       p.retryAfterG = now + engine.cfg.repairRetryGameS;
       this.record(p, "repair_failed", null, `retrying in ${engine.cfg.repairRetryGameS} game-s`);
@@ -229,6 +273,8 @@ export class ComponentRegistry implements Subsystem {
     const target = p.kind === "gate" ? this.engine.gates.get(p.name) : p.kind === "spot" ? this.engine.spots.get(p.name) : p;
     if (target) target.maintenance = true;
     p.waiting = null;
+    this.engine.store.createMaintenanceJob({ kind: p.kind, name: p.name, zone: p.zone, status: "requested",
+      reason: p.breakdowns ? (p.waiting ?? "component repair") : "preventive maintenance" });
   }
 
   /** Why the part cannot be repaired right now (repairing a part in use is a penalty). */
@@ -270,8 +316,59 @@ export class ComponentRegistry implements Subsystem {
       kind, name, zone, group: null, broken: false, maintenance: false, on: null,
       uses: saved?.uses ?? 0, usesTotal: saved?.uses_total ?? 0, breakdowns: saved?.breakdowns ?? 0,
       usesAtBreakdown: saved?.uses_at_breakdown ?? [], lastBrokenAt: saved?.last_broken_at ?? null,
-      lastFixedAt: saved?.last_fixed_at ?? null, retryAfterG: 0, waiting: null, dirty: false,
+      lastFixedAt: saved?.last_fixed_at ?? null, retryAfterG: 0, waiting: null, dirty: false, lastUsageG: null,
+      lastEventSeq: saved?.last_event_seq ?? null,
     };
+  }
+
+  private acceptEvent(p: Part, e: EventRecord): boolean {
+    const seq = Number(e.SequenceId);
+    if (!Number.isFinite(seq)) return true;
+    if (p.lastEventSeq !== null && seq <= p.lastEventSeq) return false;
+    p.lastEventSeq = seq;
+    return true;
+  }
+
+  private due(p: Part): boolean {
+    if (!this.engine.cfg.preventiveMaintenance || !p.usesAtBreakdown.length || p.maintenance || p.broken || this.health(p) !== "ok") return false;
+    const limit = Math.min(...p.usesAtBreakdown);
+    return limit > 0 && p.uses >= limit * this.engine.cfg.preventiveThresholdRatio;
+  }
+
+  /** Convert observed failure history into a conservative preventive job. */
+  private schedulePreventive(): void {
+    for (const p of this.parts.values()) {
+      if (!this.due(p)) continue;
+      if (p.kind === "light") {
+        p.waiting = "preventive repair is unsupported by the simulator API";
+        this.engine.store.createMaintenanceJob({ kind: p.kind, name: p.name, zone: p.zone, status: "scheduled", reason: p.waiting });
+        continue;
+      }
+      if (p.kind === "fan" && this.engine.isZoneRestricted(p.zone)) {
+        p.waiting = "preventive maintenance deferred while CO is elevated";
+        this.engine.store.createMaintenanceJob({ kind: p.kind, name: p.name, zone: p.zone, status: "scheduled", reason: p.waiting });
+        continue;
+      }
+      const otherMaintenance = [...this.parts.values()].some((other) => other !== p && other.zone === p.zone && this.health(other) === "maintenance");
+      if (otherMaintenance) {
+        p.waiting = "preventive maintenance queued behind another job in this zone";
+        this.engine.store.createMaintenanceJob({ kind: p.kind, name: p.name, zone: p.zone, status: "scheduled", reason: p.waiting });
+        continue;
+      }
+      const waiting = this.inUse(p);
+      if (waiting) {
+        p.waiting = `preventive maintenance due: ${waiting}`;
+        this.engine.store.createMaintenanceJob({ kind: p.kind, name: p.name, zone: p.zone, status: "waiting_for_clearance", reason: p.waiting });
+        // Marking it unavailable prevents a new allocation while the current use clears.
+        const target = p.kind === "gate" ? this.engine.gates.get(p.name) : p.kind === "spot" ? this.engine.spots.get(p.name) : p;
+        if (target) target.maintenance = true;
+        continue;
+      }
+      p.waiting = null;
+      const target = p.kind === "gate" ? this.engine.gates.get(p.name) : p.kind === "spot" ? this.engine.spots.get(p.name) : p;
+      if (target) target.maintenance = true;
+      void this.tryRepair(p);
+    }
   }
 
   private save(p: Part) {
@@ -279,6 +376,7 @@ export class ComponentRegistry implements Subsystem {
     this.engine.store.saveComponent({
       kind: p.kind, name: p.name, zone: p.zone, uses: p.uses, uses_total: p.usesTotal, breakdowns: p.breakdowns,
       uses_at_breakdown: p.usesAtBreakdown, last_broken_at: p.lastBrokenAt, last_fixed_at: p.lastFixedAt,
+      last_event_seq: p.lastEventSeq,
     });
   }
 

@@ -46,6 +46,10 @@ const schema = z.object({
   //   monitor - all of them, status only recorded: to check how a new level signs
   //             (npm run report:level -w server) before switching to strict
   signatureMode: z.enum(["strict", "lenient", "monitor"]).default("lenient"),
+  // auto keeps Level 1 compatibility but switches to strict as soon as a lvl2/lvl3
+  // topology is resolved. Explicit strict is recommended for judged Level 2 runs.
+  levelProfile: z.enum(["auto", "level1", "level2", "level3"]).default("auto"),
+  webhookLoopbackOnly: bool().default(false),
 
   // ---- site layout ----------------------------------------------------------
   topologyDir: repoPath().default(path.resolve(REPO_ROOT, "topology")),
@@ -139,6 +143,18 @@ const schema = z.object({
   autoRepair: bool().default(true),
   // After a rejected repair command, wait this long (GAME seconds) before trying again.
   repairRetryGameS: num().positive().default(10),
+  preventiveMaintenance: bool().default(true),
+  preventiveThresholdRatio: num().positive().max(1).default(0.8),
+
+  // ---- Level 2 environment / simulator calendar -------------------------------
+  ventilationMinGameS: num().nonnegative().default(30),
+  ventilationRecoveryGameS: num().nonnegative().default(10),
+  carbonMonoxideOn: num().nonnegative().default(50),
+  carbonMonoxideOff: num().nonnegative().default(40),
+  nightStartHour: num().int().min(0).max(23).default(18),
+  nightEndHour: num().int().min(0).max(23).default(6),
+  lightClearanceGameS: num().nonnegative().default(2),
+  incidentGraceS: num().nonnegative().default(2),
 
   // ---- our own timing (REAL seconds) ------------------------------------------------
   tickIntervalS: num().positive().default(0.5),

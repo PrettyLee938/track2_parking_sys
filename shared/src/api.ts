@@ -66,10 +66,22 @@ export interface ExitLaneView {
   gate: string | null;
   zone: string;
   releasing: string[];
+  /** Ordered visits waiting for this physical exit. */
+  queue?: string[];
+  /** The only visit currently allowed to own the passage. */
+  active?: string | null;
+  /** True when the lane needs reconciliation before another passage. */
+  recovery?: boolean;
 }
 
 /** A car's record. Times ending in _at are simulator ServerDateTime strings. */
 export interface CarView {
+  /** Stable identity for this visit; plates may be reused by the simulator. */
+  visit_id?: string;
+  run_id?: string | null;
+  reservation_id?: string | null;
+  passage_id?: string | null;
+  invoice_id?: string | null;
   plate: string;
   car_type: string;
   planned_minutes: number | null;
@@ -88,6 +100,10 @@ export interface CarView {
   paid: number | null;
   payment_ok: boolean | null;
   left_at: string | null;
+  /** Why the visit is being held for operator review, when status is unknown. */
+  unknown_reason?: string | null;
+  /** Trusted planned/measured/operator/admin basis used for the invoice. */
+  billing_basis?: string | null;
 }
 
 export interface SessionView extends CarView {
@@ -134,6 +150,10 @@ export interface StateSnapshot {
   components: ComponentView[];
   /** Extra state from plug-in subsystems (server/src/subsystems), keyed by subsystem name. */
   subsystems: Record<string, unknown>;
+  /** Level 2 environment and admission state. */
+  environment?: EnvironmentSnapshot;
+  /** Open incidents that need operator/admin attention. */
+  incidents?: IncidentView[];
 }
 
 // ---------------------------------------------------------------------------
@@ -160,6 +180,7 @@ export interface ComponentView {
   last_fixed_at: string | null;
   /** Why a broken part is not being repaired yet, e.g. "a car is passing". */
   waiting: string | null;
+  maintenance_due?: boolean;
 }
 
 export type ComponentEventKind = "broken" | "fixed" | "repair_sent" | "repair_failed" | "preventive_repair";
@@ -218,6 +239,69 @@ export interface AuditEntryView {
 }
 export interface AuditResponse { items: AuditEntryView[] }
 
+export type IncidentStatus = "open" | "provisional" | "resolved" | "dismissed";
+export interface IncidentView {
+  id: number;
+  at: string;
+  status: IncidentStatus;
+  kind: string;
+  zone: string | null;
+  visit_id: string | null;
+  component: string | null;
+  reason: string;
+  confidence: "high" | "medium" | "low";
+  evidence: Record<string, unknown>;
+  resolution: string | null;
+  resolved_by: string | null;
+  resolved_at: string | null;
+}
+
+export type MaintenanceStatus = "scheduled" | "waiting_for_clearance" | "requested" | "in_progress" |
+  "completed" | "failed" | "outcome_unknown" | "cancelled";
+export interface MaintenanceJobView {
+  id: number;
+  component_kind: ComponentKind;
+  component_name: string;
+  zone: string | null;
+  status: MaintenanceStatus;
+  reason: string;
+  actor: string | null;
+  created_at: string;
+  updated_at: string;
+  evidence: Record<string, unknown>;
+}
+
+export interface EnvironmentZoneView {
+  zone: string;
+  co: number | null;
+  risk: string | null;
+  fresh_at: string | null;
+  source_event_id?: string | null;
+  restricted: boolean;
+  ventilation: "off" | "running" | "recovery_pending" | "unknown";
+  moving: number;
+  nighttime: boolean | null;
+}
+export interface EnvironmentSnapshot {
+  calendar_time: string | null;
+  calendar_source: "event_timestamp" | "system_clock" | "admin_anchor" | "unknown";
+  calendar_confidence: "calibrated" | "provisional" | "unknown";
+  zones: EnvironmentZoneView[];
+}
+
+export interface DailyReport {
+  run_id: string | null;
+  day: string;
+  kind: "operations" | "financial";
+  time_basis: string;
+  provisional: boolean;
+  generated_at: string;
+  totals: Record<string, number>;
+  equipment: Record<string, unknown>[];
+  incidents: IncidentView[];
+  penalties: PenaltyView[];
+}
+
 /** A fine from the simulator, for the penalties page. */
 export interface PenaltyView {
   id: number;
@@ -252,7 +336,7 @@ export interface UserView {
 /** POST /api/auth/login */
 export interface LoginRequest { username: string; password: string }
 /** POST /api/auth/login, GET /api/auth/me */
-export interface MeResponse { user: UserView }
+export interface MeResponse { user: UserView; previous_login_attempts?: LoginAttemptView[] }
 /** GET /api/users */
 export interface UsersResponse { items: UserView[] }
 /** POST /api/users */

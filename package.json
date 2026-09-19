@@ -15,6 +15,8 @@
     "start": "npm run start -w server",
     "build": "npm run build -w web",
     "test": "npm test -w server",
+    "test:level2": "npm run test:level2 -w server",
+    "simulate:level2": "npm run simulate:level2 -w server",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "topology": "npm run topology -w server --",
     "smoke": "npm run smoke -w server --",

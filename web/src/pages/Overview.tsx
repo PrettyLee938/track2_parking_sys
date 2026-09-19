@@ -15,6 +15,7 @@ export function Overview({ s }: { s: StateSnapshot }) {
   const occupancy = (total.occ + total.res) / usable;
   const queued = s.entry_lanes.reduce((n, l) => n + l.queue.length, 0);
   const c = s.counters;
+  const incidents = s.incidents ?? [];
   const admitRate = c.arrived ? c.admitted / c.arrived : 0;
   const gate = (name: string | null) => s.gates.find((g) => g.name === name);
 
@@ -50,6 +51,8 @@ export function Overview({ s }: { s: StateSnapshot }) {
           sub={`${c.turned_away} full · ${c.neglected} gave up`} />
         <Tile label="Penalties" value={fmtInt(c.penalties)} sub={c.penalties ? `${fmtMoney(c.fines)} in fines` : "None"}
           tone={c.penalties ? "critical" : "good"} />
+        <Tile label="Open incidents" value={fmtInt(incidents.length)} sub={incidents.length ? "Needs operator attention" : "No unresolved alerts"}
+          tone={incidents.length ? "critical" : "good"} />
         <Tile label="Game speed" value={`×${s.time_scale.toFixed(2)}`} sub={s.time_scale_source} />
       </section>
 
@@ -102,6 +105,9 @@ export function Overview({ s }: { s: StateSnapshot }) {
         <Card title="Cars inside" subtitle={`${s.active_cars.length} tracked`}><CarsTable cars={s.active_cars} /></Card>
         <Card title="Live activity" subtitle="Newest first"><Feed items={s.feed} /></Card>
       </div>
+      {incidents.length > 0 && <Card title="Open incidents" subtitle="Select Incidents for evidence and resolution">
+        <ul className="plain-list">{incidents.slice(0, 8).map((i) => <li key={i.id}><Badge tone={i.status === "provisional" ? "warning" : "critical"}>{i.kind}</Badge> {i.reason}</li>)}</ul>
+      </Card>}
     </div>
   );
 }

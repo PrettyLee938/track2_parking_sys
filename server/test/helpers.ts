@@ -87,6 +87,20 @@ export const TWO_ZONES: Topology = {
   exit_lanes: [{ spot: "EXIT_EXIT", gate: "g2", zone: "ZONE1" }, { spot: "Exit67", gate: "g4", zone: "ZONE2" }],
 };
 
+export const THREE_ZONES: Topology = {
+  name: "test-lvl2",
+  entry_lanes: [
+    { spot: "ENTRY1", gate: "g1", zone: "ZONE1" },
+    { spot: "ENTRY2", gate: "g3", zone: "ZONE2" },
+    { spot: "ENTRY3", gate: "g5", zone: "ZONE3" },
+  ],
+  exit_lanes: [
+    { spot: "EXIT_EXIT", gate: "g2", zone: "ZONE1" },
+    { spot: "Exit67", gate: "g4", zone: "ZONE2" },
+    { spot: "Exit100", gate: "g6", zone: "ZONE3" },
+  ],
+};
+
 export function twoZoneSim() {
   return new FakeSim(
     [spot("S1"), spot("S2"), spot("S3", "Park", "ZONE2"), spot("S4", "Park", "ZONE2", "Electric"),
@@ -96,9 +110,18 @@ export function twoZoneSim() {
   );
 }
 
+export function threeZoneSim() {
+  return new FakeSim(
+    [spot("S1", "Park", "ZONE1", "Any"), spot("S2", "Park", "ZONE2", "Accessible"), spot("S3", "Park", "ZONE3", "Electric"),
+      spot("ENTRY1", "EntrySpot", ""), spot("ENTRY2", "EntrySpot", ""), spot("ENTRY3", "EntrySpot", ""),
+      spot("EXIT_EXIT", "ExitSpot", "ZONE1"), spot("Exit67", "ExitSpot", "ZONE2"), spot("Exit100", "ExitSpot", "ZONE3")],
+    [gate("g1", "Open", "ZONE1"), gate("g2", "Open", "ZONE1"), gate("g3", "Open", "ZONE2"), gate("g4", "Open", "ZONE2"), gate("g5", "Open", "ZONE3"), gate("g6", "Open", "ZONE3")],
+  );
+}
+
 let seq = 0;
 const nextId = () => `e${++seq}`;
-const SPOT_TYPES: Record<string, string> = { ENTRY1: "EntrySpot", ENTRY2: "EntrySpot", EXIT_EXIT: "ExitSpot", Exit67: "ExitSpot" };
+const SPOT_TYPES: Record<string, string> = { ENTRY1: "EntrySpot", ENTRY2: "EntrySpot", ENTRY3: "EntrySpot", EXIT_EXIT: "ExitSpot", Exit67: "ExitSpot", Exit100: "ExitSpot" };
 
 export function carEv(plate: string, spotName: string, direction: "CarIn" | "CarOut", t: string, planned = "2", carType = "Normal"): EventRecord {
   return {

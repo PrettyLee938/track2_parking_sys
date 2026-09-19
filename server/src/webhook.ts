@@ -36,7 +36,8 @@ export type SignatureMode = "strict" | "lenient" | "monitor";
 /** Level 1 sends Signature=null on every event. */
 export function signatureStatus(payload: Record<string, unknown>): SigStatus {
   const received = payload.Signature;
-  if (!received) return "unsigned";
+  if (received === null || received === undefined) return "unsigned";
+  if (typeof received !== "string" || received.length === 0) return "invalid";
   return computeSignature(payload) === String(received).toLowerCase() ? "valid" : "invalid";
 }
 
@@ -60,20 +61,26 @@ export class Intake {
   lastSeq: number | null = null;
   readonly stats = { received: 0, accepted: 0, sig_valid: 0, sig_unsigned: 0, sig_invalid: 0, duplicates: 0, seq_gaps: 0 };
 
-  constructor(private readonly mode: SignatureMode) {}
+  constructor(private mode: SignatureMode) {}
 
-  check(event: SimEventBase): IntakeResult {
+  setMode(mode: SignatureMode): void { this.mode = mode; }
+  get currentMode(): SignatureMode { return this.mode; }
+
+  check(event: SimEventBase, durableDuplicate = false, mode = this.mode): IntakeResult {
     this.stats.received++;
     const sig = signatureStatus(event);
     this.stats[`sig_${sig}`]++;
 
     const eventId = event.EventId ?? "";
-    const duplicate = eventId !== "" && this.seenIds.has(eventId);
+    const duplicate = durableDuplicate || (eventId !== "" && this.seenIds.has(eventId));
     if (duplicate) this.stats.duplicates++;
 
     let seqNote = "";
     const seq = /^\d+$/.test(String(event.SequenceId ?? "")) ? Number(event.SequenceId) : null;
-    if (!duplicate && seq !== null) {
+    // Invalid/unsigned Level 2 deliveries must not advance liveness or sequence state.
+    // A duplicate is recorded, but it is not a new sequence observation.
+    const trustedForSequence = trusted(sig, mode) && !duplicate;
+    if (trustedForSequence && seq !== null) {
       if (this.lastSeq !== null && seq !== this.lastSeq + 1) {
         seqNote = `expected ${this.lastSeq + 1}, got ${seq}`;
         this.stats.seq_gaps++;
@@ -81,7 +88,7 @@ export class Intake {
       if (this.lastSeq === null || seq > this.lastSeq) this.lastSeq = seq;
     }
 
-    const accept = trusted(sig, this.mode) && !duplicate;
+    const accept = trusted(sig, mode) && !duplicate;
     if (accept) {
       if (eventId) this.seenIds.add(eventId);
       this.stats.accepted++;

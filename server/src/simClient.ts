@@ -10,7 +10,9 @@
 import type { SimAlarm, SimBarrier, SimExhaustFan, SimLight, SimParkingSpot, SimZone } from "@gpa/shared";
 import type { Settings } from "./config";
 
-export class SimError extends Error {}
+export class SimError extends Error {
+  constructor(message: string, readonly outcomeUnknown = false) { super(message); }
+}
 
 /** What the controller and subsystems need from the simulator (a fake implements it in tests). */
 export interface SimApi {
@@ -64,10 +66,19 @@ export class SimClient implements SimApi {
         headers: { authorization: `Bearer ${this.token}` },
         signal: AbortSignal.timeout(this.cfg.simTimeoutS * 1000),
       });
-    let r = await send();
+    let r: Response;
+    try {
+      r = await send();
+    } catch (err) {
+      throw new SimError(`${method} ${path} failed before a response: ${(err as Error).message}`, true);
+    }
     if (r.status === 401) {
       await this.login();
-      r = await send();
+      try {
+        r = await send();
+      } catch (err) {
+        throw new SimError(`${method} ${path} failed before a response: ${(err as Error).message}`, true);
+      }
     }
     const text = await r.text();
     if (r.status >= 400) throw new SimError(`${method} ${path} -> ${r.status} ${text}`);

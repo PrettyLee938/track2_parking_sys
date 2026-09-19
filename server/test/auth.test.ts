@@ -62,6 +62,19 @@ describe("sign-in", () => {
     expect(locked.statusCode).toBe(429);
     expect(locked.headers["retry-after"]).toBeDefined();
   });
+
+  it("returns the previous three login attempts and persists the audit evidence", async () => {
+    const { app, store } = await testServer();
+    for (const password of ["wrong-one", "wrong-two"]) {
+      expect((await app.inject({ method: "POST", url: "/api/auth/login", headers: json,
+        payload: JSON.stringify({ username: "oper", password }) })).statusCode).toBe(401);
+    }
+    const ok = await app.inject({ method: "POST", url: "/api/auth/login", headers: json,
+      payload: JSON.stringify({ username: "oper", password: "oper-password" }) });
+    expect(ok.statusCode).toBe(200);
+    expect(ok.json().previous_login_attempts).toHaveLength(2);
+    expect(store.db.prepare("SELECT count(*) n FROM login_attempts WHERE username = 'oper'").get()).toEqual({ n: 3 });
+  });
 });
 
 describe("roles", () => {
@@ -176,6 +189,7 @@ describe("manual control", () => {
     const manual = store.searchActions({ manualOnly: true });
     expect(manual).toHaveLength(1);
     expect(manual[0]).toMatchObject({ cmd: "open", args: ["gateA"], actor: "oper", ok: true });
+    expect(store.listAudit(10)).toEqual(expect.arrayContaining([expect.objectContaining({ action: "gate.open", actor: "oper", ok: true })]));
   });
 
   it("lets an admin close an entrance: arriving cars are turned away", async () => {
@@ -203,5 +217,16 @@ describe("statistics", () => {
     expect(stats.penalties_by_reason[0].reason).toBe("Car is being charged wrongly with amount: (…).");
     expect(stats.spot_usage).toEqual([{ spot: "S1", visits: 1 }]);
     expect(stats.buckets.reduce((n: number, b: { arrivals: number }) => n + b.arrivals, 0)).toBe(1);
+  });
+
+  it("protects financial reports and rejects impossible dates", async () => {
+    const { app, signIn } = await testServer();
+    const operator = await signIn("oper", "oper-password");
+    expect((await app.inject({ url: "/api/reports/daily?kind=financial", headers: { cookie: operator } })).statusCode).toBe(403);
+    expect((await app.inject({ url: "/api/reports/daily?day=2026-99-99", headers: { cookie: operator } })).statusCode).toBe(400);
+    const admin = await signIn("admin", "admin-password");
+    const report = await app.inject({ url: "/api/reports/daily?kind=financial", headers: { cookie: admin } });
+    expect(report.statusCode).toBe(200);
+    expect(report.json()).toMatchObject({ kind: "financial", provisional: true });
   });
 });

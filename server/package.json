@@ -24,7 +24,9 @@
     "report:level": "tsx tools/levelReport.ts",
     "discover": "tsx tools/discover.ts",
     "user:password": "tsx tools/setPassword.ts",
-    "fake-sim": "tsx tools/fakeSim.ts"
+    "fake-sim": "tsx tools/fakeSim.ts",
+    "test:level2": "vitest run test/level2.acceptance.test.ts",
+    "simulate:level2": "tsx tools/level2Acceptance.ts"
   },
   "dependencies": {
     "@gpa/shared": "^0.1.0",

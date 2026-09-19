@@ -2,7 +2,8 @@
 import { describe, expect, it } from "vitest";
 import { Controller } from "../src/controller";
 import type { EventRecord } from "../src/store";
-import { carEv, FakeSim, feed, fireTimers, gateEv, LVL1, make, parkAndReachExit, payEv, RecordingQueue, silentLog } from "./helpers";
+import { carEv, FakeSim, feed, fireTimers, gateEv, LVL1, make, parkAndReachExit, payEv, RecordingQueue, silentLog, TWO_ZONES, twoZoneSim } from "./helpers";
+import { SimError } from "../src/simClient";
 
 let n = 0;
 const broken = (type: string, name: string, fine = "20.00"): EventRecord =>
@@ -85,6 +86,110 @@ describe("component health", () => {
     expect(c.components.usable("fan", "fan0")).toBe(true);
   });
 
+  it("accounts for fan runtime when it starts or stops between housekeeping ticks", async () => {
+    const sim = FakeSim.lvl1();
+    sim.fans = [{ name: "fan0", zoneParent: "ZONE1", broken: false, isUnderMaintenance: false, isOn: false }];
+    const { c, advance } = await make({ sim, cfg: { gameSpeed: 1 } });
+    c.components.setOn("fan", "fan0", true);
+    advance(5);
+    c.components.setOn("fan", "fan0", false);
+    expect(c.components.get("fan", "fan0")?.uses).toBeGreaterThan(0);
+  });
+
+  it("turns guide lights on for moving cars at night and clears them after traffic stops", async () => {
+    const sim = FakeSim.lvl1();
+    sim.lights = [
+      { name: "t_0", group: "G1", zoneParent: "ZONE1", isOn: false },
+      { name: "t_1", group: "G1", zoneParent: "ZONE1", isOn: false },
+    ];
+    const { c, advance } = await make({ sim, cfg: { gameSpeed: 1, lightClearanceGameS: 2 } });
+    await c.handle(carEv("NIGHT", "ENTRY1", "CarIn", "20:00:00"));
+    expect(sim.calls.some((call) => (call[0] === "light-on" && call[1] === "t_0") || (call[0] === "group-on" && call[1] === "G1"))).toBe(true);
+    expect(sim.calls.some((call) => (call[0] === "light-on" && call[1] === "t_1") || (call[0] === "group-on" && call[1] === "G1"))).toBe(true);
+    await c.handle(carEv("NIGHT", "S1", "CarIn", "20:00:02"));
+    advance(3);
+    await fireTimers(c);
+    expect(sim.calls.some((call) => call[0] === "group-off" && call[1] === "G1") ||
+      (sim.calls.some((call) => call[0] === "light-off" && call[1] === "t_0") &&
+       sim.calls.some((call) => call[0] === "light-off" && call[1] === "t_1"))).toBe(true);
+    expect(c.components.get("light", "t_0")?.on).toBe(false);
+    expect(c.components.get("light", "t_1")?.on).toBe(false);
+  });
+
+  it("reconciles lights again on sync instead of carrying a daytime light state forward", async () => {
+    const sim = FakeSim.lvl1();
+    sim.lights = [{ name: "t_0", group: "G1", zoneParent: "ZONE1", isOn: true }];
+    const { c } = await make({ sim });
+
+    // Establish a deterministic daytime policy, then emulate a simulator restart/state drift.
+    await c.handle(carEv("DAY", "ENTRY1", "CarIn", "12:00:00"));
+    sim.calls.length = 0;
+    sim.lights[0].isOn = true;
+    await c.sync();
+
+    expect(sim.calls.some((call) =>
+      (call[0] === "group-off" && call[1] === "G1") || (call[0] === "light-off" && call[1] === "t_0"))).toBe(true);
+    expect(c.components.get("light", "t_0")?.on).toBe(false);
+  });
+
+  it("does not turn on an idle zone when a shared light group serves a moving zone", async () => {
+    const sim = twoZoneSim();
+    sim.lights = [
+      { name: "z1-light", group: "SHARED", zoneParent: "ZONE1", isOn: false },
+      { name: "z2-light", group: "SHARED", zoneParent: "ZONE2", isOn: false },
+    ];
+    const { c } = await make({ sim, topo: TWO_ZONES });
+
+    await c.handle(carEv("Z1", "ENTRY1", "CarIn", "20:00:00"));
+
+    expect(sim.calls).toContainEqual(["light-on", "z1-light"]);
+    expect(sim.calls).not.toContainEqual(["light-on", "z2-light"]);
+    expect(sim.calls.findIndex((call) => call[0] === "light-on" && call[1] === "z1-light"))
+      .toBeLessThan(sim.calls.findIndex((call) => call[0] === "open" && call[1] === "g1"));
+    expect(c.components.get("light", "z1-light")?.on).toBe(true);
+    expect(c.components.get("light", "z2-light")?.on).toBe(false);
+  });
+
+  it("ignores an older calendar event so it cannot switch night policy back to daytime", async () => {
+    const sim = FakeSim.lvl1();
+    sim.lights = [{ name: "t_0", group: "G1", zoneParent: "ZONE1", isOn: false }];
+    const { c } = await make({ sim });
+
+    await c.handle(carEv("NIGHT", "ENTRY1", "CarIn", "20:00:00"));
+    await c.handle({ EventClass: "test_event", EventId: "older-day", ServerDateTime: "2026-09-19 12:00:00", _received_at: "" });
+
+    expect(c.snapshot().environment!.calendar_time).toBe("2026-09-19 20:00:00");
+    expect(c.snapshot().environment!.zones[0]?.nighttime).toBe(true);
+  });
+
+  it("ignores an older movement event so delayed webhooks cannot keep lights on", async () => {
+    const sim = FakeSim.lvl1();
+    sim.lights = [{ name: "t_0", group: "G1", zoneParent: "ZONE1", isOn: false }];
+    const { c } = await make({ sim, cfg: { lightClearanceGameS: 0 } });
+
+    await c.handle(carEv("ORDERED", "ENTRY1", "CarIn", "20:00:00"));
+    await c.handle(carEv("ORDERED", "S1", "CarIn", "20:00:10"));
+    await c.handle(carEv("ORDERED", "ENTRY1", "CarIn", "20:00:05"));
+    await fireTimers(c);
+
+    expect(c.snapshot().environment!.zones.find((z) => z.zone === "ZONE1")?.moving).toBe(0);
+    expect(c.components.get("light", "t_0")?.on).toBe(false);
+  });
+
+  it("changes light policy at a day/night boundary even when no webhook arrives", async () => {
+    const sim = FakeSim.lvl1();
+    sim.lights = [{ name: "t_0", group: "G1", zoneParent: "ZONE1", isOn: false }];
+    const { c, advance } = await make({ sim, cfg: { gameSpeed: 1 } });
+
+    await c.handle(carEv("BOUNDARY", "ENTRY1", "CarIn", "17:59:00"));
+    sim.calls.length = 0;
+    advance(61);
+    await c.tick();
+
+    expect(c.snapshot().environment!.zones[0]?.nighttime).toBe(true);
+    expect(sim.calls.some((call) => (call[0] === "light-on" && call[1] === "t_0") || (call[0] === "group-on" && call[1] === "G1"))).toBe(true);
+  });
+
   it("retries a repair the simulator rejected", async () => {
     const { c, sim, advance } = await make({ cfg: { gameSpeed: 1 } });
     sim.failing.add("repair");
@@ -97,6 +202,17 @@ describe("component health", () => {
     await c.tick();
     expect(repairs(sim)).toHaveLength(2);
     expect(c.gates.get("gateA")!.maintenance).toBe(true);
+  });
+
+  it("does not blindly repeat a repair when the simulator response is unknown", async () => {
+    const { c, sim, advance } = await make({ cfg: { gameSpeed: 1 } });
+    sim.repairGate = async (name) => { sim.calls.push(["repair", name]); throw new SimError("request timed out", true); };
+    await c.handle(broken("BarrierGate", "gateA"));
+    expect(repairs(sim)).toHaveLength(1);
+    advance(c.cfg.repairRetryGameS + 1);
+    await c.tick();
+    expect(repairs(sim)).toHaveLength(1);
+    expect(c.components.views().find((v) => v.name === "gateA")?.waiting).toMatch(/outcome unknown/);
   });
 
   it("records breakdowns and usage in the database, and keeps them across a restart", async () => {
@@ -126,6 +242,6 @@ describe("component health", () => {
     sim.listExhaustFans = async () => { throw new Error("404"); };
     const { c } = await make({ sim });
     expect(c.components.views().filter((v) => v.kind === "gate")).toHaveLength(3);
-    expect(c.feed.some((f) => f.msg.includes("could not list fans/lights"))).toBe(true);
+    expect(c.feed.some((f) => f.msg.includes("could not list exhaust fans") || f.msg.includes("could not list lights"))).toBe(true);
   });
 });

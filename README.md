@@ -67,10 +67,19 @@ Sign in with a dashboard account (the admin creates the others under **Admin**).
 | **Operations** - hold a gate open/closed, return it to automatic, start gate/spot maintenance | ✓ | ✓ |
 | **Logs** - search visits (arrival, parking time, departure, charges), simulator events, commands | ✓ | ✓ |
 | **Statistics** - traffic, revenue, outcomes, stay lengths, spot usage, penalties, gate cycles, command health | ✓ | ✓ |
+| **Equipment** - CO safety, zone restrictions, component health and usage | ✓ | ✓ |
+| **Maintenance** - preventive, breakdown and uncertain-outcome repair jobs | ✓ | ✓ |
+| **Incidents** - unresolved exceptions, evidence and audited resolution | ✓ | ✓ |
+| **Penalties** - accepted simulator penalties and fine evidence | ✓ | ✓ |
+| **Reports** - dynamic daily operations reports; financial reports/export | ✓ | ✓ |
 | Close / reopen an entrance | | ✓ |
 | **Admin** - users (create, role, disable, reset password), resync, audit trail, configuration | | ✓ |
 
 - Every permission is enforced by the server; the dashboard only hides what a role cannot use.
+- Level 2 automatically switches to strict signed-webhook intake when an `lvl2`/`lvl3` topology is loaded;
+  rejected deliveries remain in the raw event log and do not affect occupancy, revenue, penalties or reports.
+- A manual/unknown visit is held at the exit until an operator records duration evidence or an admin authorizes
+  an adjustment/emergency release. Invoice intent and uncertain simulator command outcomes survive restart.
 - Manual commands the simulator would penalise are refused with the reason: operating a
   broken gate, repairing an occupied spot or a gate a car is passing.
 - A held gate stays as the operator left it until **Automatic** hands it back.
@@ -84,8 +93,12 @@ Sign in with a dashboard account (the admin creates the others under **Admin**).
 | `POST /api/auth/login`, `/logout`, `GET /api/auth/me` | - |
 | `GET /api/state`, `/api/stream` (server-sent events), `/api/timeseries`, `/api/stats?minutes=` | operator |
 | `GET /api/sessions`, `/api/events`, `/api/actions` (`?plate= &status= &class= &since= &before=`) | operator |
+| `GET /api/equipment`, `/api/maintenance`, `/api/incidents`, `/api/penalties`, `/api/auth/login-attempts` | operator |
+| `POST /api/equipment/:id/maintenance`, `/api/incidents/:id/resolve`, unknown-visit review | operator |
+| `GET /api/reports/daily` (operations) and `/api/reports/daily/export` | operator |
 | `POST /api/control/gates/:name/(open\|close\|auto\|repair)`, `/api/control/spots/:name/repair` | operator |
 | `POST /api/control/entries/:spot/(open\|close)`, `/api/resync`, `GET /api/config`, `/api/users` (+ `POST`, `PATCH /:id`) | admin |
+| Financial daily reports/export, visit adjustments, emergency releases, audit and security login history | admin |
 | `POST /webhook` | public (the simulator) |
 | `/debug/*` | this machine, or an admin |
 
@@ -99,6 +112,8 @@ Sign in with a dashboard account (the admin creates the others under **Admin**).
 | `npm run dev:web` | dashboard dev server (proxies `/api` to the server) |
 | `npm run build` | build the dashboard into `web/dist` |
 | `npm test` | controller, webhook and HTTP tests against a fake simulator |
+| `npm run test:level2` | focused Level 2 acceptance suite |
+| `npm run simulate:level2` | unattended deterministic Level 2 replay; writes `logs/level2-acceptance.log` |
 | `npm run typecheck` | typecheck every package |
 | `npm run smoke` | live check: API both ways + webhook delivery (`-- --gates` to cycle a gate) |
 | `npm run single-car` | drive one car by hand (server must run with `GPA_CONTROLLER_ENABLED=false`) |
@@ -127,10 +142,12 @@ one file per level.
 | `shared/src/protocol.ts` | every literal the simulator sends or expects, and its payload shapes |
 | `shared/src/api.ts` | our HTTP API types - server and dashboard both compile against them |
 | `server/src/controller.ts` | car park logic: per-lane entry queues, gates, billing, payments, recovery |
+| `server/src/components.ts` | Level 2 health, usage counters, preventive maintenance and repair recovery |
+| `server/src/environment.ts` | zone CO/fan control, night lighting and admission restrictions |
 | `server/src/topology.ts` | discovers entry/exit lanes and pairs them with gates |
 | `server/src/allocation.ts` | spot allocation strategies (`GPA_ALLOCATION_STRATEGY`) |
 | `server/src/billing.ts` | parking charge rules |
-| `server/src/store.ts` | SQLite: `events`, `sessions`, `actions` tables |
+| `server/src/store.ts` | SQLite: event inbox, visits, commands, components, invoices/payments, incidents, audit and login history |
 | `server/src/webhook.ts` | webhook parsing, signature check, dedupe, sequence tracking |
 | `server/src/simClient.ts` | simulator REST API client |
 | `server/src/app.ts` | Fastify routes |
@@ -181,6 +198,12 @@ Learned from live runs; each has a test in `server/test/controller.test.ts`.
 - A car sent to an occupied spot is fined *and parks there anyway*, so a spot can hold two
   cars. Spots track every car in them, and an "occupied spot" penalty marks the spot taken
   and redirects the car to a free one.
+- Level 2 zones are enclosed: `lane_zone_first_free` deliberately allocates only inside
+  the zone belonging to the entry lane. The supplied simulator `settings/lvl2.json` has
+  three entry sensors but its car emitters are `A -> P2` and `39 -> 45`; it does not
+  generate traffic at `ENTRY2` or `ENTRY3`. That is why a run can show Zone 1 traffic
+  only. Do not change to a cross-zone allocator unless the simulator routes are verified
+  reachable; otherwise cars sent across the enclosure receive reachability penalties.
 - Webhooks are at-most-once and can arrive out of order (a Level 1 run: 1 of 3,406 lost,
   7 reordered), and a simulator restart makes cars vanish without events. Car records
   whose closing event never arrives are retired: when another car parks in their spot,

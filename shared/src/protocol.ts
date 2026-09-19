@@ -110,7 +110,8 @@ export interface SimParkingSpot {
   parkingForCarType: string;
   zoneParent: string;
   /** A count on Level 1 (the docs claim a list of plates). */
-  detectedCars: number;
+  /** Level 1 reports a count; some Level 2 builds report plate names. */
+  detectedCars: number | string[];
   broken: boolean;
   isUnderMaintenance: boolean;
 }
@@ -129,6 +130,8 @@ export interface SimLight {
   group: string;
   zoneParent: string;
   isOn: boolean;
+  broken?: boolean;
+  isUnderMaintenance?: boolean;
 }
 
 /** list-exhaust-fans (Level 2+). */
