@@ -999,9 +999,17 @@ export class Controller implements Engine {
     this.note("error", `FAKE payment ${e.Amount} from ${plate} (bad signature) - not releasing`);
     if (!car || car.payment_ok || car.status !== "invoiced") return;
     car.fakePayments++;
-    if (this.cfg.rechargeAfterFakePayment && car.fakePayments === 1) {
-      this.note("warn", `${plate}: asking for payment again after the fake one`);
-      this.rebill(car, car.charge_parking);
+    // Some cars fake twice in a row (04:44 run: ZLP 294, BCA 039, LCC 468 - each then sat on
+    // the exit, fined every ~45 s). Asking again has never been fined, so keep asking.
+    if (this.cfg.rechargeAfterFakePayment && car.fakePayments <= this.cfg.fakePaymentRecharges) {
+      this.note("warn", `${plate}: asking for payment again after fake #${car.fakePayments}`);
+      const amount = car.charge_parking;
+      car.charge_parking = car.charge_electric = null;
+      car.charge_override = amount;
+      car.status = "at_exit";
+      this.scheduleCharge(car.plate, this.cfg.exitChargeRetryGameS); // not limited by maxChargeAttempts (that is for rejected bills)
+    } else {
+      this.note("error", `${plate}: ${car.fakePayments} fake payments - holding it at ${car.exit_lane}, not letting it out unpaid`);
     }
   }
 
