@@ -9,3 +9,4 @@ coverage/
 .scratch/
 tmp/
 skills-lock.json
+src/ParkingSimulator-win-x64/
