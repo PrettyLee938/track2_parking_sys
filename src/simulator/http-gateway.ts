@@ -26,7 +26,7 @@ export class HttpSimulatorGateway implements SimulatorGateway {
   async login() {
     if (!this.config.simulatorName || !this.config.simulatorPassword) throw new Error('simulator-credentials-missing');
     const result = await this.request<{ token?: string; accessToken?: string }>('/api/v1/auth/login', {
-      method: 'POST', body: JSON.stringify({ Name: this.config.simulatorName, Password: this.config.simulatorPassword })
+      method: 'POST', body: JSON.stringify({ Email: this.config.simulatorName, Password: this.config.simulatorPassword })
     });
     this.token = result.token || result.accessToken;
     if (!this.token) throw new Error('simulator-token-missing');
