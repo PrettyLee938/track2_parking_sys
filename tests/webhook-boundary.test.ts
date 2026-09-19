@@ -18,4 +18,10 @@ describe('simulator webhook boundary', () => {
     const payload = { EventClass: 'test_webhook', EventId: 'event-2', SequenceId: 5 };
     expect(boundary.accept({ ...payload, Signature: signatureDigest(payload) }).runId).toBe('local-run');
   });
+
+  it('accepts unsigned payloads only when local compatibility is enabled', () => {
+    const payload = { EventClass: 'car_spot_action', EventId: 'event-3', SequenceId: 1, Signature: null };
+    expect(new WebhookBoundary(true).accept(payload)).toMatchObject({ valid: true, signatureMode: 'local-unsigned' });
+    expect(new WebhookBoundary().accept(payload)).toMatchObject({ valid: false, signatureMode: 'invalid', reason: 'invalid-signature' });
+  });
 });

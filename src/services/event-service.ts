@@ -15,7 +15,7 @@ export class EventService {
   ingest(payload: Record<string, unknown>): IngestResult {
     const envelope = this.boundary.accept(payload);
     const eventId = envelope.eventId;
-    if (!envelope.valid) { const reason = envelope.reason || 'invalid-signature'; this.audit.record('webhook-rejected', 'event', eventId, { reason, calculatedDigest: envelope.calculatedDigest, payload }); return { accepted: false, ordering: 'out-of-order', reason }; }
+    if (!envelope.valid) { const reason = envelope.reason || 'invalid-signature'; this.audit.record('webhook-rejected', 'event', eventId, { reason, calculatedDigest: envelope.calculatedDigest, signatureMode: envelope.signatureMode, payload }); return { accepted: false, ordering: 'out-of-order', reason }; }
     const existing = this.db.get<{ event_id: string; type: string; sequence_id: number; run_id: string | null; received_at: string; raw_json: string; processed: number }>('SELECT event_id, type, sequence_id, run_id, received_at, raw_json, processed FROM events WHERE event_id = :id', { ':id': eventId });
     if (existing) {
       if (existing.processed) return { accepted: true, ordering: 'duplicate' };
@@ -29,10 +29,11 @@ export class EventService {
     const previous = this.db.get<{ value: string }>('SELECT value FROM meta WHERE key = :key', { ':key': 'last_sequence' });
     const previousRun = this.db.get<{ value: string }>('SELECT value FROM meta WHERE key = :key', { ':key': 'run_id' })?.value;
     const previousSequence = previous ? Number(previous.value) : 0;
-    const ordering: Ordering = runText && previousRun && runText !== previousRun ? 'reset' : sequenceId === 0 && previousSequence > 0 ? 'out-of-order' : sequenceId === 0 || previousSequence === 0 || sequenceId === previousSequence + 1 ? 'in-order' : sequenceId > previousSequence + 1 ? 'gap' : 'out-of-order';
+    const sequenceReset = sequenceId > 0 && previousSequence > 0 && sequenceId < previousSequence;
+    const ordering: Ordering = runText && previousRun && runText !== previousRun ? 'reset' : sequenceReset ? 'reset' : sequenceId === 0 && previousSequence > 0 ? 'out-of-order' : sequenceId === 0 || previousSequence === 0 || sequenceId === previousSequence + 1 ? 'in-order' : sequenceId > previousSequence + 1 ? 'gap' : 'out-of-order';
     const event = { eventId, type, sequenceId, runId: runText, receivedAt, payload };
     this.db.transaction(() => {
-      this.db.run('INSERT INTO events (event_id, type, sequence_id, run_id, received_at, signature_valid, signature_digest, raw_json) VALUES (:id, :type, :sequence, :run, :received, 1, :digest, :raw)', { ':id': eventId, ':type': type, ':sequence': sequenceId, ':run': runText || null, ':received': receivedAt, ':digest': envelope.calculatedDigest, ':raw': JSON.stringify(payload) });
+      this.db.run('INSERT INTO events (event_id, type, sequence_id, run_id, received_at, signature_valid, signature_digest, raw_json) VALUES (:id, :type, :sequence, :run, :received, :signatureValid, :digest, :raw)', { ':id': eventId, ':type': type, ':sequence': sequenceId, ':run': runText || null, ':received': receivedAt, ':signatureValid': envelope.signatureMode === 'verified' ? 1 : 0, ':digest': envelope.calculatedDigest, ':raw': JSON.stringify(payload) });
       if (ordering === 'in-order') {
         this.db.run('INSERT INTO meta (key, value) VALUES (:key, :value) ON CONFLICT(key) DO UPDATE SET value = excluded.value', { ':key': 'last_sequence', ':value': String(sequenceId) });
         if (runText && !previousRun) this.db.run('INSERT INTO meta (key, value) VALUES (:key, :value) ON CONFLICT(key) DO UPDATE SET value = excluded.value', { ':key': 'run_id', ':value': runText });
@@ -45,7 +46,7 @@ export class EventService {
         this.db.run('INSERT INTO meta (key, value) VALUES (:key, :value) ON CONFLICT(key) DO UPDATE SET value = excluded.value', { ':key': 'run_status', ':value': 'reconciling' });
         this.db.run('INSERT INTO meta (key, value) VALUES (:key, :value) ON CONFLICT(key) DO UPDATE SET value = excluded.value', { ':key': 'reconcile_reason', ':value': 'sequence-gap' });
       }
-      this.audit.record('webhook-accepted', 'event', eventId, { type, sequenceId, ordering });
+      this.audit.record('webhook-accepted', 'event', eventId, { type, sequenceId, ordering, signatureMode: envelope.signatureMode });
     });
     if (ordering !== 'in-order') return { accepted: true, ordering, event };
     const readyEvents = this.collectReady(event);

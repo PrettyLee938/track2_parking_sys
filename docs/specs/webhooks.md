@@ -53,5 +53,14 @@ WAW 228|CarOut|car_spot_action|efa2d3ac-1a6e-47d4-9099-3457270e30ee|0|2026-09-12
 ```
 
 Store the raw payload, calculated digest, received digest, and validation
-result. A missing or `null` signature is not valid evidence; reject it before
-changing parking, payment, or equipment state and record a security incident.
+result. A missing or `null` signature is not valid evidence in normal operation;
+reject it before changing parking, payment, or equipment state and record a
+security incident.
+
+The supplied local simulator build currently sends `Signature: null`. For a
+loopback simulator URL, the backend therefore has an explicit compatibility
+mode enabled by default so the event can be exercised locally. Set
+`ALLOW_UNSIGNED_SIMULATOR_WEBHOOKS=false` to enforce signatures even on
+loopback, and never enable the compatibility mode for a non-local simulator.
+Accepted unsigned events are recorded with `signature_valid = 0` and an
+`unsigned-local` audit mode so they are distinguishable from verified events.

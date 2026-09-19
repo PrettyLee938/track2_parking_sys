@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { Config } from '../config.js';
 import type { SimulatorCommand, SimulatorSnapshot, SpotCandidate } from '../domain/types.js';
 import type { CommandAcceptance, GatewayHealth, SimulatorGateway } from './contracts.js';
@@ -47,12 +47,13 @@ function normalizeDevices(rows: Json[], kind: string) {
 
 export class HttpSimulatorGateway implements SimulatorGateway {
   private token: string | undefined;
-  private readonly fallbackRunId = `local-${randomUUID()}`;
   private discoveryWarnings: string[] = [];
   private state: GatewayHealth = { connected: false, runId: undefined, discoveryComplete: false, lastError: undefined, checkedAt: undefined };
-  private readonly boundary = new WebhookBoundary();
+  private readonly boundary: WebhookBoundary;
 
-  constructor(private readonly config: Config, private readonly fetcher: Fetcher = fetch) {}
+  constructor(private readonly config: Config, private readonly fetcher: Fetcher = fetch) {
+    this.boundary = new WebhookBoundary(config.allowUnsignedSimulatorWebhooks);
+  }
 
   private async request<T>(path: string, init: RequestInit = {}, retry = true): Promise<T> {
     const headers = new Headers(init.headers);
@@ -113,12 +114,14 @@ export class HttpSimulatorGateway implements SimulatorGateway {
       ]);
       if (this.discoveryWarnings.length) throw new Error(`simulator-discovery-incomplete:${this.discoveryWarnings.join(',')}`);
       const spots = rawSpots.map(normalizeSpot).filter((spot): spot is SpotCandidate => Boolean(spot));
+      if (!spots.length) throw new Error('simulator-level-not-loaded');
       const barriers = normalizeDevices(rawBarriers, 'barrier-gate');
       const lights = normalizeDevices(rawLights, 'light');
       const fans = normalizeDevices(rawFans, 'exhaust-fan');
       const alarms = normalizeDevices(rawAlarms, 'alarm');
-      const runId = String(value(status, 'runId', 'RunId') || this.fallbackRunId);
       const levelId = String(value(status, 'levelId', 'LevelId', 'level', 'Level') || 'lvl1');
+      const remoteRunId = value(status, 'runId', 'RunId');
+      const runId = String(remoteRunId || `local-${createHash('sha256').update(`${this.config.simulatorBaseUrl}|${levelId}`).digest('hex').slice(0, 24)}`);
       const snapshot = { runId, levelId, spots, components: [], zones, barriers, lights, fans, alarms, topology: [] };
       this.boundary.setRunId(runId);
       this.state = { connected: true, runId, discoveryComplete: true, lastError: undefined, checkedAt: new Date().toISOString() };

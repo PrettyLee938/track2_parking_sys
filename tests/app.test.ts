@@ -8,7 +8,7 @@ describe('backend HTTP boundary', () => {
   it('serves health, authentication, webhook ingestion, and arrival allocation', async () => {
     const payload = { EventId: 'e-http', SequenceId: '1', Type: 'test_webhook' };
     const gateway = new FixtureGateway({ runId: 'run-http', spots: [{ id: 'N-1', type: 'any', accessible: false, occupied: false, reserved: false, broken: false, underMaintenance: false, reachable: true, zoneSafe: true, rank: 1 }] });
-    const config = { host: '127.0.0.1', port: 3000, databasePath: ':memory:', simulatorBaseUrl: 'http://fixture', simulatorName: undefined, simulatorPassword: undefined, adminUsername: 'admin', adminInitialPassword: 'secret', sessionIdleMs: 30_000 };
+    const config = { host: '127.0.0.1', port: 3000, databasePath: ':memory:', simulatorBaseUrl: 'http://fixture', simulatorName: undefined, simulatorPassword: undefined, adminUsername: 'admin', adminInitialPassword: 'secret', allowUnsignedSimulatorWebhooks: false, sessionIdleMs: 30_000 };
     const { app } = buildApp({ db: new Database(':memory:'), gateway, config });
     expect((await app.inject({ method: 'GET', url: '/health' })).statusCode).toBe(200);
     expect((await app.inject({ method: 'GET', url: '/ready' })).statusCode).toBe(200);

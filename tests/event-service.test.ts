@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { Database } from '../src/db/database.js';
 import { EventService } from '../src/services/event-service.js';
 import { signatureDigest } from '../src/simulator/signature.js';
+import { WebhookBoundary } from '../src/simulator/webhook-boundary.js';
 
 const signed = (payload: Record<string, unknown>) => ({ ...payload, Signature: signatureDigest(payload) });
 
@@ -26,5 +27,16 @@ describe('webhook event boundary', () => {
     const service = new EventService(db);
     expect(service.ingest({ EventId: 'bad', SequenceId: '1', Type: 'test_webhook', Signature: 'bad' }).accepted).toBe(false);
     expect(service.list()).toHaveLength(0);
+  });
+
+  it('pauses when an unsigned-run simulator sequence moves backwards', () => {
+    const db = new Database(':memory:');
+    db.run("INSERT INTO meta (key, value) VALUES ('run_id', 'local-run'), ('run_status', 'active')");
+    const boundary = new WebhookBoundary(true);
+    boundary.setRunId('local-run');
+    const service = new EventService(db, undefined, () => Date.now(), boundary);
+    expect(service.ingest({ EventId: 'e-5', SequenceId: 5, Type: 'test_webhook', Signature: null }).ordering).toBe('in-order');
+    expect(service.ingest({ EventId: 'e-2', SequenceId: 2, Type: 'test_webhook', Signature: null }).ordering).toBe('reset');
+    expect(db.get<{ value: string }>('SELECT value FROM meta WHERE key = :key', { ':key': 'run_status' })?.value).toBe('ambiguous');
   });
 });

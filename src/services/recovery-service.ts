@@ -28,10 +28,28 @@ export class RecoveryService {
   beginStartupReconciliation() {
     const status = this.meta('run_status');
     if (!status || status === 'active' || status === 'reconciling') this.setMeta('run_status', 'reconciling');
+    if (status === 'ambiguous' && this.canAdoptLegacyLocalRun(this.meta('run_id'), this.meta('pending_run_id'))) this.setMeta('run_status', 'reconciling');
   }
 
   private meta(key: string) { return this.db.get<{ value: string }>('SELECT value FROM meta WHERE key = :key', { ':key': key })?.value; }
   private setMeta(key: string, value: string) { this.db.run('INSERT INTO meta (key, value) VALUES (:key, :value) ON CONFLICT(key) DO UPDATE SET value = excluded.value', { ':key': key, ':value': value }); }
+
+  private hasOperationalState(runId: string) {
+    const checks = [
+      this.db.get('SELECT 1 FROM parking_sessions WHERE run_id = :run LIMIT 1', { ':run': runId }),
+      this.db.get('SELECT 1 FROM commands WHERE run_id = :run LIMIT 1', { ':run': runId }),
+      this.db.get('SELECT 1 FROM invoices WHERE session_id IN (SELECT id FROM parking_sessions WHERE run_id = :run) LIMIT 1', { ':run': runId }),
+      this.db.get('SELECT 1 FROM payments WHERE session_id IN (SELECT id FROM parking_sessions WHERE run_id = :run) LIMIT 1', { ':run': runId }),
+      this.db.get('SELECT 1 FROM events WHERE run_id = :run LIMIT 1', { ':run': runId }),
+      this.db.get('SELECT 1 FROM spots WHERE run_id = :run LIMIT 1', { ':run': runId }),
+      this.db.get('SELECT 1 FROM components LIMIT 1')
+    ];
+    return checks.some(Boolean);
+  }
+
+  private canAdoptLegacyLocalRun(previous: string | undefined, observed: string | undefined) {
+    return Boolean(previous?.startsWith('local-') && observed?.startsWith('local-') && previous !== observed && !this.hasOperationalState(previous));
+  }
 
   async reconcile() {
     this.setMeta('run_status', 'reconciling');
@@ -39,11 +57,18 @@ export class RecoveryService {
       const snapshot = await this.gateway.reconcile();
       const current = this.meta('run_id');
       if (current && current !== snapshot.runId) {
-        this.setMeta('run_status', 'ambiguous');
-        this.setMeta('pending_run_id', snapshot.runId);
-        this.pendingSnapshot = snapshot;
-        this.audit.record('run-ambiguous', 'simulator-run', snapshot.runId, { previousRunId: current, observedRunId: snapshot.runId });
-        return { status: 'ambiguous' as const, runId: snapshot.runId };
+        if (this.canAdoptLegacyLocalRun(current, snapshot.runId)) {
+          this.setMeta('run_id', snapshot.runId);
+          this.setMeta('pending_run_id', '');
+          this.setMeta('last_sequence', '0');
+          this.audit.record('run-identity-adopted', 'simulator-run', snapshot.runId, { previousRunId: current, observedRunId: snapshot.runId });
+        } else {
+          this.setMeta('run_status', 'ambiguous');
+          this.setMeta('pending_run_id', snapshot.runId);
+          this.pendingSnapshot = snapshot;
+          this.audit.record('run-ambiguous', 'simulator-run', snapshot.runId, { previousRunId: current, observedRunId: snapshot.runId });
+          return { status: 'ambiguous' as const, runId: snapshot.runId };
+        }
       }
       await this.parking.refreshSnapshot(snapshot);
       if (!current) this.setMeta('run_id', snapshot.runId);
