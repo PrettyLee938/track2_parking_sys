@@ -20,6 +20,7 @@ import type { Settings } from "./config";
 import { Environment } from "./environment";
 import type { Car, EntryLane, ExitLane, Gate, Spot } from "./controller";
 import type { EventRecord, Store } from "./store";
+import type { Topology } from "./topology";
 import type { GameClock } from "./gameClock";
 import type { SimApi } from "./simClient";
 
@@ -44,6 +45,9 @@ export interface Engine {
   readonly entryLanes: Map<string, EntryLane>;
   readonly exitLanes: Map<string, ExitLane>;
   readonly cars: Map<string, Car>;
+  /** The site layout in use. Null until the first sync. Carries the level file it came
+   * from, which is the only source of component coordinates (list-* has none). */
+  readonly topology: Topology | null;
   /** Every gate, spot, fan and light with health and usage (core, always present). */
   readonly components: ComponentRegistry;
   /** Dashboard feed + server log. */

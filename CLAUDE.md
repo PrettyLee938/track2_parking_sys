@@ -120,30 +120,29 @@ expand `r`n; `"`n"` inside double quotes becomes a newline).
   penalties; 0 gate breakdowns (all repairs preventive); only penalties were 3 cars that faked
   twice (fixed after that run: up to 3 re-asks - not yet verified live).
 
-## NEXT: lights (the major part left) - design to implement in `server/src/environment.ts`
-Spec: lights guide drivers in dark zones and cost electricity; "make sure they run only at
-night"; "no need to be on if all cars are parking, they must be on if a car is moving in the
-zone". API: `POST lights/{name}/on|off`, `POST lights/group/{group}/on|off`; `list-lights`
--> {name, group, zoneParent, isOn}. Level 2: 30 lights, groups G1/G2/G3 = ZONE1/2/3 (10 each),
-all ON at level start. SimClient already has lightOn/Off/lightGroupOn/Off; FakeSim records
-them as ["light-on", name], ["group-on", group] etc.; ComponentRegistry already lists lights
-(kind "light", `setOn`, `addUsage`).
-1. **Find out how the simulator shows day/night first** (unknown!): look at the simulator
-   window (does it darken, show a clock?); check list-lights / lvl2.json for a field that
-   changes; check whether ServerDateTime's hour is meant as the game's time of day.
-   Until known, implement a configurable night window on the simulator's clock:
-   `lightsMode: auto|always|never` (default auto), `nightStartHour` 18, `nightEndHour` 6,
-   time of day = hour of the latest event's ServerDateTime.
-2. Zone "moving" = any car in that zone with status dispatching/dispatched/entering (driving to
-   a spot there - use car.spot's zone, and zones on its route) or to_exit/at_exit/released
-   (driving out), plus a short hold (~5 game-s) so lights do not flicker between cars.
-3. Want(zone) = night && moving. Switch per GROUP (one command per zone), only on change;
-   record `components.setOn("light", ...)` for each light in the group; add on-time as usage
-   (game hours) like fans. At onSync, when it is day, switch every lit group off.
-4. Snapshot: per zone lights on/total + reason; show in health.tsx next to the fans table and
-   in `tools/live.ts`.
-5. Tests in `test/components.test.ts` (describe "lights"): day -> off even with traffic; night
-   + car moving -> group on; all parked -> off after the hold; broken/unknown lights untouched.
+## Lights (`environment.ts`, done - not yet verified live)
+Rule is movement, not occupancy: a full car park with nobody driving needs no light, one car
+crossing an empty one does. Want = night && a car is driving in that zone.
+- **Night**: no event carries the simulator time of day (ServerDateTime is the wall clock), so
+  it is the configured window `nightStartHour` 18 .. `nightEndHour` 6, read off the latest
+  event hour. `lightsMode` auto|always|never.
+- **What is lit** (`lightsDetail`): `route` (default) lights only what a car uses - the middle
+  aisle of its zone, plus the bay light over the spot it is heading for; a car leaving lights
+  the aisle only. `group` sends one command per zone (all ten). Route needs light positions:
+  `placementFromLevelsDir()` in topology.ts reads `Lights[]` + `ParkingSpots[]` from the level
+  file and calls a light "road" when it sits between the zone two rows of bays - verified
+  against the real lvl2.json: ZONE1 4 road/6 bay, ZONE2 3/7, ZONE3 4/6. Without the level
+  file it falls back to group.
+- **Holds**: a light stays on `lightsHoldGameS` (20) after the last car needed it so a stream
+  does not flicker it; if nothing moves anywhere for `lightsIdleOffGameS` (300) every light
+  goes off regardless, holds cleared - that also catches a dropped command.
+- A group command operates every light in the group including a broken one (a penalty), so a
+  group with a part out of service is switched light by light instead.
+- On-time is usage in game hours, like fans. Snapshot: `subsystems.environment.lights`
+  {on,total,mode,detail,night,hour,reason} + per-zone lights_on/lights.
+- Tests: `test/components.test.ts` describe "lights" (11), `test/lights.test.ts` (6 geometry).
+- **Still to do**: show it in `web/.../health.tsx` and `tools/live.ts`; verify live at night
+  (or with `GPA_LIGHTS_MODE=always`) that the right lights follow the cars.
 
 ## Other open items
 - Team split: B environment (lights), C RBAC (enforce ROLE_PERMISSIONS: repair +
