@@ -16,6 +16,15 @@ export interface AllocSpot {
   accepts(carType: string): boolean;
 }
 
+/** What the controller knows beyond the spots themselves (optional for every strategy). */
+export interface AllocContext {
+  /** Extra cost of sending this car to a zone - a worn or broken exit gate, say.
+   * null = do not use this zone at all (e.g. learned unreachable from this entrance). */
+  zoneCost?(zone: string): number | null;
+  /** How worn a spot is (uses since its last repair): spread wear among equal spots. */
+  spotWear?(name: string): number;
+}
+
 export function spotNumber(name: string): number {
   const digits = name.replace(/\D/g, "");
   return digits ? Number(digits) : 1e9;
@@ -29,9 +38,10 @@ export class Allocator {
     return true;
   }
 
-  candidates<S extends AllocSpot>(carType: string, laneZone: string, spots: Iterable<S>): S[] {
+  candidates<S extends AllocSpot>(carType: string, laneZone: string, spots: Iterable<S>, ctx: AllocContext = {}): S[] {
     const all = [...spots];
-    return all.filter((s) => s.available && s.accepts(carType) && this.inScope(s, laneZone, all));
+    return all.filter((s) => s.available && s.accepts(carType) && this.inScope(s, laneZone, all) &&
+      (!ctx.zoneCost || ctx.zoneCost(s.zone) !== null));
   }
 
   /** Whether cars queued at lanes of these two zones compete for the same spots. */
@@ -45,12 +55,50 @@ export class Allocator {
     return [s.car_type === CarType.Any ? 1 : 0, spotNumber(s.name)];
   }
 
-  choose<S extends AllocSpot>(carType: string, laneZone: string, spots: Iterable<S>): S | null {
-    const found = this.candidates(carType, laneZone, spots);
+  choose<S extends AllocSpot>(carType: string, laneZone: string, spots: Iterable<S>, ctx: AllocContext = {}): S | null {
+    const found = this.candidates(carType, laneZone, spots, ctx);
     if (!found.length) return null;
     return found.reduce((best, s) => {
       const [a1, a2] = this.rank(s), [b1, b2] = this.rank(best);
       return a1 < b1 || (a1 === b1 && a2 < b2) ? s : best;
+    });
+  }
+}
+
+/**
+ * Spread cars - and so wear - across zones. Every free spot the car may take is scored:
+ *   zone load      share of the zone's spots taken: fuller zones cost more
+ *   home zone      the entrance's own zone is preferred by HOME_PREFERENCE (a car only goes
+ *                  elsewhere once its own zone is that much busier)
+ *   zone cost      from the controller: a broken, under-repair or worn exit gate (context)
+ *   spot type      a spot built for the car's type (charger, accessible) first
+ * then, among equal spots, the least worn one. 2026-09-20 run: every car came in at ENTRY1,
+ * ZONE1's 30 spots were full while ZONE2/3's 60 sat empty, and 36% of arrivals were turned
+ * away; its one exit gate took all the exits' wear.
+ */
+export class ZoneBalancedAllocator extends Allocator {
+  static override readonly id = "zone_balanced";
+  static readonly HOME_PREFERENCE = 0.25;
+  static readonly TYPE_MISMATCH = 0.3;
+
+  override choose<S extends AllocSpot>(carType: string, laneZone: string, spots: Iterable<S>, ctx: AllocContext = {}): S | null {
+    const all = [...spots];
+    const found = this.candidates(carType, laneZone, all, ctx);
+    if (!found.length) return null;
+    const load = new Map<string, number>();
+    for (const zone of new Set(found.map((s) => s.zone))) {
+      const park = all.filter((s) => s.zone === zone && s.purpose === SpotPurpose.Park);
+      load.set(zone, park.filter((s) => !s.available).length / Math.max(1, park.length));
+    }
+    const score = (s: S): [number, number, number] => [
+      load.get(s.zone)! + (laneZone && s.zone !== laneZone ? ZoneBalancedAllocator.HOME_PREFERENCE : 0) +
+        (ctx.zoneCost?.(s.zone) ?? 0) + (this.rank(s)[0] ? ZoneBalancedAllocator.TYPE_MISMATCH : 0),
+      ctx.spotWear?.(s.name) ?? 0,
+      spotNumber(s.name),
+    ];
+    return found.reduce((best, s) => {
+      const a = score(s), b = score(best);
+      return a[0] < b[0] - 1e-9 || (Math.abs(a[0] - b[0]) < 1e-9 && (a[1] < b[1] || (a[1] === b[1] && a[2] < b[2]))) ? s : best;
     });
   }
 }
@@ -87,8 +135,8 @@ export class LaneZoneOverflowAllocator extends Allocator {
     return [(laneZone && s.zone !== laneZone ? 2 : 0) + typed, number];
   }
 
-  override choose<S extends AllocSpot>(carType: string, laneZone: string, spots: Iterable<S>): S | null {
-    const found = this.candidates(carType, laneZone, spots);
+  override choose<S extends AllocSpot>(carType: string, laneZone: string, spots: Iterable<S>, ctx: AllocContext = {}): S | null {
+    const found = this.candidates(carType, laneZone, spots, ctx);
     if (!found.length) return null;
     return found.reduce((best, s) => {
       const [a1, a2] = this.rank(s, laneZone), [b1, b2] = this.rank(best, laneZone);
@@ -101,6 +149,7 @@ export const STRATEGIES: Record<string, new () => Allocator> = {
   [Allocator.id]: Allocator,
   [LaneZoneAllocator.id]: LaneZoneAllocator,
   [LaneZoneOverflowAllocator.id]: LaneZoneOverflowAllocator,
+  [ZoneBalancedAllocator.id]: ZoneBalancedAllocator,
 };
 
 export function getAllocator(name: string): Allocator {

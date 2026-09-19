@@ -29,7 +29,7 @@ import {
   type GateHold, type SessionView, type SimParkingSpot, type StateSnapshot, type TimeScaleSource, type TimeseriesPoint,
   type ZoneSummary,
 } from "@gpa/shared";
-import { getAllocator, spotNumber, type Allocator, type AllocSpot } from "./allocation";
+import { getAllocator, spotNumber, type AllocContext, type Allocator, type AllocSpot } from "./allocation";
 import { chargingCost, parkingCost } from "./billing";
 import { readSimGameSpeed, type Settings } from "./config";
 import { ComponentRegistry } from "./components";
@@ -218,6 +218,8 @@ export class Controller implements Engine {
   private replayPending = false;
   /** Why the parts on site are new (simulator restarted, level changed), until usage is reset. */
   private freshSite: string | null = null;
+  /** "ENTRY1>ZONE2": cars from this entrance cannot reach that zone (learned from penalties). */
+  readonly unreachable = new Set<string>();
   private started = false; // real timers only once running (tests drive time by hand)
   private readonly replayedIds = new Set<string>();
   private lastResyncRequest = 0;
@@ -677,7 +679,7 @@ export class Controller implements Engine {
 
     // Spots are reserved at dispatch time, so every car already queued for the same
     // pool of spots still needs one.
-    const free = this.allocator.candidates(car.car_type, lane.zone, this.spots.values()).length;
+    const free = this.allocator.candidates(car.car_type, lane.zone, this.spots.values(), this.allocContext(lane.spot)).length;
     const waiting = [...this.entryLanes.values()]
       .filter((l) => this.allocator.sharesPool(l.zone, lane.zone))
       .reduce((n, l) => n + l.queue.length, 0);
@@ -694,7 +696,7 @@ export class Controller implements Engine {
     if (lane.gate && (!gate || !gate.operable)) return; // held; onComponent() pumps again once fixed
     const plate = lane.queue.shift()!;
     const car = this.cars.get(plate)!;
-    const spot = this.allocator.choose(car.car_type, lane.zone, this.spots.values());
+    const spot = this.allocator.choose(car.car_type, lane.zone, this.spots.values(), this.allocContext(lane.spot));
     if (!spot) {
       await this.turnAway(car, "no suitable spot");
       return this.pumpEntry(lane);
@@ -1017,6 +1019,7 @@ export class Controller implements Engine {
     const car = this.carByComponent(str(e, "ComponentName"));
     const lowered = reason.toLowerCase();
     if (lowered.includes(PenaltyReason.OccupiedSpot)) return this.onOccupiedSpotPenalty(reason, car);
+    if (lowered.includes(PenaltyReason.CannotReach)) return this.onUnreachablePenalty(car);
     if (car && lowered.includes(PenaltyReason.AlreadyPaid) && ["at_exit", "invoiced", "payment_mismatch"].includes(car.status)) {
       // Our record missed its payment (e.g. across a restart); the simulator knows it paid.
       this.note("warn", `${car.plate} has already paid according to the simulator - releasing`);
@@ -1048,17 +1051,38 @@ export class Controller implements Engine {
     if (!spot.occupants.size) spot.occupants.add("?"); // cleared by that spot's next CarOut
     if (spot.reserved_for === car?.plate) spot.reserved_for = null;
     if (this.replaying || !car || car.spot !== spot.name || !(MID_ENTRY.includes(car.status) || car.status === "entering")) return;
+    await this.redirect(car, `${spot.name} is occupied`);
+  }
+
+  /**
+   * "If the car cannot reach the specified spot ... a penalty will be applied" (spec). The
+   * zone-spreading allocator sends cars to other zones; if the simulator says a car cannot
+   * get there from its entrance, never send cars from that entrance to that zone again.
+   */
+  private async onUnreachablePenalty(car: Car | undefined) {
+    if (this.replaying || !car?.spot || !car.entry_lane || !(MID_ENTRY.includes(car.status) || car.status === "entering")) return;
+    const zone = this.spots.get(car.spot)?.zone;
+    if (!zone) return;
+    this.unreachable.add(`${car.entry_lane}>${zone}`);
+    this.note("error", `cars from ${car.entry_lane} cannot reach ${zone} - not sending them there again`);
+    const old = this.spots.get(car.spot);
+    if (old?.reserved_for === car.plate) old.reserved_for = null;
+    await this.redirect(car, `${car.spot} cannot be reached`);
+  }
+
+  /** Send a car that is on its way in to another spot. */
+  private async redirect(car: Car, why: string) {
     const lane = car.entry_lane ? this.entryLanes.get(car.entry_lane) : undefined;
-    const alt = this.allocator.choose(car.car_type, lane?.zone ?? "", this.spots.values());
+    const alt = this.allocator.choose(car.car_type, lane?.zone ?? "", this.spots.values(), this.allocContext(lane?.spot ?? null));
     if (!alt) {
-      this.note("error", `${car.plate}: ${spot.name} is taken and no other spot is free`);
+      this.note("error", `${car.plate}: ${why} and no other spot is free`);
       return;
     }
     alt.reserved_for = car.plate;
     car.spot = alt.name;
     car.gotoResends = 0;
     car.dispatchedG = this.clock.now();
-    this.note("warn", `${spot.name} is occupied - redirecting ${car.plate} to ${alt.name}`);
+    this.note("warn", `${why} - redirecting ${car.plate} to ${alt.name}`);
     if (await this.cmd("goto", () => this.sim.carGoto(car.plate, alt.name), [car.plate, alt.name])) car.gotoG = this.clock.now();
   }
 
@@ -1207,6 +1231,29 @@ export class Controller implements Engine {
     // Waiting cars are resumed by the components subsystem once it has reset the part's
     // usage - resuming here, first, would find the gate still "worn out" and repair it again.
     if (!broken) this.note("info", `${kind} ${name} fixed`);
+  }
+
+  /**
+   * What spot allocation should know besides the spots: per zone, how its exit gate is doing
+   * (broken / under repair, and wear towards its limit - spreading cars spreads exit-gate
+   * wear), whether cars from this entrance can reach it at all, and how worn each spot is.
+   */
+  private allocContext(entry: string | null): AllocContext {
+    const gateLimit = this.components.limit("gate");
+    return {
+      zoneCost: (zone) => {
+        if (entry && this.unreachable.has(`${entry}>${zone}`)) return null;
+        let cost = 0;
+        for (const lane of this.exitLanes.values()) {
+          if (lane.zone !== zone || !lane.gate) continue;
+          const gate = this.gates.get(lane.gate);
+          if (gate && !gate.operable) cost += this.cfg.zoneExitDownCost;
+          if (gateLimit) cost += this.cfg.zoneExitWearCost * Math.min(1, (this.components.get("gate", lane.gate)?.uses ?? 0) / gateLimit);
+        }
+        return cost;
+      },
+      spotWear: (name) => this.components.get("spot", name)?.uses ?? 0,
+    };
   }
 
   /** Why a gate cannot be worked on right now: a car is driving through it. */
