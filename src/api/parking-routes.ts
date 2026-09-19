@@ -25,6 +25,13 @@ export function registerParkingRoutes(app: FastifyInstance, auth: AuthService, p
     catch (error) { return reply.code(409).send({ error: error instanceof Error ? error.message : 'payment-rejected' }); }
   });
 
+  app.post('/api/v1/parking/sessions/:id/charge', { schema: schema.charge }, async (request, reply) => {
+    const user = await currentUser(request, reply, auth); if (!user) return;
+    const body = request.body as { parkingCost: number; chargingCost: number };
+    try { return reply.code(201).send(await payments.requestCharge((request.params as { id: string }).id, body.parkingCost, body.chargingCost, user.id)); }
+    catch (error) { return reply.code(409).send({ error: error instanceof Error ? error.message : 'charge-rejected' }); }
+  });
+
   app.post('/api/v1/parking/sessions/:id/departure', { schema: schema.idParams }, async (request, reply) => {
     const user = await currentUser(request, reply, auth); if (!user) return;
     try { return await payments.requestDeparture((request.params as { id: string }).id, user.id); } catch (error) { return reply.code(409).send({ error: error instanceof Error ? error.message : 'departure-rejected' }); }

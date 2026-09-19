@@ -5,6 +5,7 @@ export interface Config {
   simulatorBaseUrl: string;
   simulatorName: string | undefined;
   simulatorPassword: string | undefined;
+  entryGateName: string;
   adminUsername: string | undefined;
   adminInitialPassword: string | undefined;
   allowUnsignedSimulatorWebhooks: boolean;
@@ -35,6 +36,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     simulatorBaseUrl,
     simulatorName: env.SIMULATOR_NAME || undefined,
     simulatorPassword: env.SIMULATOR_PASSWORD || undefined,
+    entryGateName: env.ENTRY_GATE_NAME || 'gateA',
     adminUsername: env.ADMIN_USERNAME || undefined,
     adminInitialPassword: env.ADMIN_INITIAL_PASSWORD || undefined,
     allowUnsignedSimulatorWebhooks: isLocalSimulator(simulatorBaseUrl) && (unsignedSetting === undefined || unsignedSetting === '' || unsignedSetting === 'true'),

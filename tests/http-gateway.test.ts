@@ -4,7 +4,7 @@ import { HttpSimulatorGateway } from '../src/simulator/http-gateway.js';
 
 const config: Config = {
   host: '127.0.0.1', port: 3000, databasePath: ':memory:', simulatorBaseUrl: 'http://simulator',
-  simulatorName: 'moha', simulatorPassword: 'moha', adminUsername: 'admin', adminInitialPassword: 'admin', allowUnsignedSimulatorWebhooks: false, sessionIdleMs: 1_000
+  simulatorName: 'moha', simulatorPassword: 'moha', entryGateName: 'gateA', adminUsername: 'admin', adminInitialPassword: 'admin', allowUnsignedSimulatorWebhooks: false, sessionIdleMs: 1_000
 };
 
 const response = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });

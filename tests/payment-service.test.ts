@@ -32,6 +32,8 @@ describe('billing and departure', () => {
     const departure = await payments.requestDeparture(session.id);
     expect(departure.status).toBe('departure-pending');
     expect((commands.list()[0] as { kind: string }).kind).toBe('car.depart');
+    expect((commands.list()[0] as { target: string }).target).toContain('/goto/leavepark');
+    expect(JSON.parse((commands.list()[0] as { payload_json: string }).payload_json).sourceEventId).toBe(session.id);
   });
 
   it('requires Admin re-authentication for an unpaid-release authorization', async () => {
@@ -48,5 +50,16 @@ describe('billing and departure', () => {
     await payments.createInvoice(session.id, { durationMinutes: 60, parkingRateCentsPerHour: 100, electricityKwh: 0, electricityRateCentsPerKwh: 40 });
     await payments.applyEvent('payment_made', { EventClass: 'payment_made', CarPlateNumber: 'ABC-123', Amount: '1.00', EventId: 'payment-1' });
     expect((db.get<{ status: string }>('SELECT status FROM payments WHERE id = :id', { ':id': 'payment-1' }))?.status).toBe('valid');
+    expect((db.get<{ status: string }>('SELECT status FROM invoices WHERE session_id = :id', { ':id': session.id }))?.status).toBe('paid');
+  });
+
+  it('creates the simulator charge command once and uses simulator cost units', async () => {
+    const { payments, session, commands, db } = await fixture();
+    const charge = await payments.requestCharge(session.id, 1.25, 0.5);
+    expect(charge.invoice.totalCents).toBe(175);
+    expect((commands.list()[0] as { kind: string }).kind).toBe('car.charge');
+    expect((commands.list()[0] as { target: string }).target).toContain('parkingCost=1.25');
+    expect((await payments.requestCharge(session.id, 1.25, 0.5)).commandId).toBe(charge.commandId);
+    expect(db.all('SELECT id FROM invoices WHERE session_id = :id', { ':id': session.id })).toHaveLength(1);
   });
 });

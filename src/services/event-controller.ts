@@ -14,6 +14,8 @@ export class EventController {
 
   async apply(event: NormalizedEvent) {
     await this.equipment.applyEvent({ type: event.type, payload: event.payload, eventId: event.eventId });
+    if (event.type === 'car_spot_action') await this.parking.handleEntryEvent(event.payload, event.eventId);
+    if (event.type === 'gate_action') await this.parking.handleGateEvent(event.payload);
     this.parking.applyEvent(event.type, event.payload);
     await this.payments.applyEvent(event.type, event.payload);
     this.commands.confirmFromEvent(event.payload);

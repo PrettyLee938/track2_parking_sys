@@ -36,6 +36,32 @@ export class PaymentService {
     return { id, sessionId, ...total, status: 'open' as const };
   }
 
+  async requestCharge(sessionId: string, parkingCost: number, chargingCost: number, actorId?: string) {
+    const session = this.currentSession(sessionId);
+    if (session.status !== 'at-exit') throw new Error('car-not-at-exit');
+    if (![parkingCost, chargingCost].every((value) => Number.isFinite(value) && value >= 0)) throw new Error('invalid-charge');
+    const parkingCents = Math.round(parkingCost * 100);
+    const electricityCents = Math.round(chargingCost * 100);
+    const totalCents = parkingCents + electricityCents;
+    const existing = this.db.get<{ id: string; parking_cents: number; electricity_cents: number; total_cents: number; status: string }>('SELECT id, parking_cents, electricity_cents, total_cents, status FROM invoices WHERE session_id = :session ORDER BY created_at DESC LIMIT 1', { ':session': sessionId });
+    const invoice = existing || { id: randomUUID(), parking_cents: parkingCents, electricity_cents: electricityCents, total_cents: totalCents, status: 'open' };
+    if (existing && (existing.parking_cents !== parkingCents || existing.electricity_cents !== electricityCents)) throw new Error('invoice-already-created');
+    if (!existing) {
+      this.db.transaction(() => {
+        this.db.run('INSERT INTO invoices (id, session_id, parking_cents, electricity_cents, total_cents, status, created_at) VALUES (:id, :session, :parking, :electricity, :total, :status, :created)', { ':id': invoice.id, ':session': sessionId, ':parking': parkingCents, ':electricity': electricityCents, ':total': totalCents, ':status': 'open', ':created': new Date(this.clock()).toISOString() });
+        this.audit.record('invoice-created', 'invoice', invoice.id, { sessionId, parkingCents, electricityCents, totalCents }, actorId);
+      });
+    }
+    const command = await this.commands.issue({
+      kind: 'car.charge',
+      target: `/api/v1/car/${encodeURIComponent(session.plate)}/charge?parkingCost=${encodeURIComponent(parkingCost.toFixed(2))}&chargingCost=${encodeURIComponent(chargingCost.toFixed(2))}`,
+      payload: { plate: session.plate, sessionId, parkingCost, chargingCost, destination: 'charge', sourceEventId: `charge:${sessionId}` }
+    }, actorId);
+    if (command.status === 'rejected') throw new Error('charge-command-rejected');
+    this.audit.record('charge-requested', 'parking-session', sessionId, { invoiceId: invoice.id, commandId: command.id }, actorId);
+    return { invoice: { id: invoice.id, sessionId, parkingCents, electricityCents, totalCents, status: invoice.status }, commandId: command.id };
+  }
+
   async recordPayment(sessionId: string, amountCents: number, paymentId: string = randomUUID(), allowReconciling = false) {
     const session = this.currentSession(sessionId, allowReconciling);
     if (session.status !== 'at-exit' && session.status !== 'departure-pending') throw new Error('car-not-at-exit');
@@ -53,6 +79,7 @@ export class PaymentService {
       this.db.run('INSERT OR IGNORE INTO payment_notifications (id, session_id, amount_cents, received_at, raw_json) VALUES (:id, :session, :amount, :received, :raw)', { ':id': paymentId, ':session': sessionId, ':amount': amountCents, ':received': receivedAt, ':raw': JSON.stringify({ paymentId, sessionId, amountCents }) });
       this.db.run('INSERT INTO payment_validations (id, notification_id, status, reason, validated_at) VALUES (:id, :notification, :status, :reason, :validated)', { ':id': randomUUID(), ':notification': paymentId, ':status': status, ':reason': reason || null, ':validated': receivedAt });
       this.db.run('INSERT OR IGNORE INTO payments (id, session_id, amount_cents, status, received_at) VALUES (:id, :session, :amount, :status, :received)', { ':id': paymentId, ':session': sessionId, ':amount': amountCents, ':status': status, ':received': receivedAt });
+      if (status === 'valid') this.db.run('UPDATE invoices SET status = :status WHERE session_id = :session AND status = :open', { ':status': 'paid', ':session': sessionId, ':open': 'open' });
       if (status === 'valid') this.db.run('UPDATE overrides SET status = :invalidated WHERE session_id = :session AND status = :active', { ':invalidated': 'invalidated', ':session': sessionId, ':active': 'active' });
       this.audit.record('payment-recorded', 'payment', paymentId, { sessionId, amountCents, status, reason });
     });
@@ -87,7 +114,7 @@ export class PaymentService {
     const paid = this.db.get('SELECT id FROM payments WHERE session_id = :session AND status = :status', { ':session': sessionId, ':status': 'valid' });
     const override = this.db.get('SELECT id FROM overrides WHERE session_id = :session AND status = :status', { ':session': sessionId, ':status': 'active' });
     if (!paid && !override) throw new Error('payment-required');
-    const command = await this.commands.issue({ kind: 'car.depart', target: `/api/v1/car/${encodeURIComponent(session.plate)}/goto/exit`, payload: { plate: session.plate, destination: 'exit', sessionId } }, actorId);
+    const command = await this.commands.issue({ kind: 'car.depart', target: `/api/v1/car/${encodeURIComponent(session.plate)}/goto/leavepark`, payload: { plate: session.plate, destination: 'leavepark', sessionId, sourceEventId: sessionId } }, actorId);
     if (command.status === 'rejected') throw new Error('departure-command-rejected');
     this.db.transaction(() => {
       this.db.run('UPDATE parking_sessions SET status = :status WHERE id = :id', { ':status': 'departure-pending', ':id': sessionId });
@@ -119,7 +146,13 @@ export class PaymentService {
         : toCents(payload.Amount ?? payload.amount);
       const paymentId = String(payload.EventId || payload.eventId || randomUUID());
       if (sessionId && Number.isFinite(amount)) {
-        try { await this.recordPayment(sessionId, amount, paymentId, true); }
+        try {
+          const result = await this.recordPayment(sessionId, amount, paymentId, true);
+          if (result.status === 'valid') {
+            try { await this.requestDeparture(sessionId); }
+            catch (error) { this.audit.record('departure-deferred', 'parking-session', sessionId, { reason: error instanceof Error ? error.message : String(error) }); }
+          }
+        }
         catch (error) {
           const receivedAt = new Date(this.clock()).toISOString();
           this.db.transaction(() => {
