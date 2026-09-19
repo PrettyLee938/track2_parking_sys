@@ -132,8 +132,23 @@ Open / next:
   `lane_zone_then_any` (own zone first, overflow to others; opt-in via
   GPA_ALLOCATION_STRATEGY). 98 tests pass. Remaining for step 2: a live Level 2 run to verify
   repairs (`report:level`, look for "repairing broken" in the log and the health card).
-  Next after that: step 3 preventive maintenance using `uses_at_breakdown` (repair a part
-  when idle once uses reach ~80% of the smallest limit seen for its kind).
+  **Live run 2026-09-20 01:50-02:15 (step 2 verified) found:** auto repairs worked, but
+  gates break on EXACTLY their 10th opening (10/10 breakdowns), a repair takes ~2.3 min,
+  so each entrance/exit was down 55% of the time (20 fine per breakdown); 6 payments had
+  a BAD SIGNATURE = the spec's fake payments -> 9 "Car escaped without paying" penalties
+  (unpaid car sits at the exit, fined every ~3 min until it drives out).
+  **Step 3 BUILT (fixes):** preventive maintenance in components.ts (limit learned =
+  min uses_at_breakdown per kind, or GPA_GATE_CYCLE_LIMIT etc.; repair when one more use
+  would break it, or at GPA_PREVENTIVE_IDLE_RATIO=0.8 when nothing needs it; controller
+  never opens a worn-out gate); entry gates stay open GPA_ENTRY_GATE_CLOSE_DELAY_GAME_S=10
+  after the last car (cars never enter without a goto: 7,124 entries checked; each
+  closing costs a cycle) while exit gates still close in 1.5 game-s (unpaid cars at an
+  exit DO drive out through an open gate); bad-signature payment_made -> app.ts
+  controller.submitRejected() -> counted (counters.fake_payments), never released, car
+  asked to pay once more (GPA_RECHARGE_AFTER_FAKE_PAYMENT; watch for a "charged twice"
+  penalty in the next run - if so set it false). 103 tests. NEXT: live run to verify,
+  then zone distribution (user wants a smarter spread across zones: full/broken-gate zones,
+  balance wear so one zone's gates/spots don't take all the maintenance).
   Team split (4 people): A = core engine/repairs/maintenance (Miro + Claude), B = environment
   subsystem (CO fans, day/night lights) plugging into subsystems.ts, C = RBAC permissions
   (ROLE_PERMISSIONS in shared/api.ts), login attempt log + last 3 after login, audit log,

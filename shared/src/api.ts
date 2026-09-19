@@ -109,6 +109,8 @@ export interface Counters {
   penalties: number;
   fines: number;
   command_errors: number;
+  /** payment_made webhooks with a bad signature: fake payments, never released for. */
+  fake_payments: number;
 }
 
 /** Where the game speed figure came from (see the server's config.ts, "game clock"). */

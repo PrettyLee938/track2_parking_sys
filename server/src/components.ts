@@ -81,6 +81,25 @@ export class ComponentRegistry implements Subsystem {
     return !!p && this.health(p) === "ok";
   }
 
+  /**
+   * How many uses this kind of part survives, learned from breakdowns: the smallest count
+   * any part of the kind had when it broke (a configured limit wins). Level 2 gates broke on
+   * exactly their 10th opening, 10 times out of 10.
+   */
+  limit(kind: ComponentKind): number | null {
+    const configured = kind === "gate" ? this.engine.cfg.gateCycleLimit : kind === "spot" ? this.engine.cfg.spotUseLimit
+      : kind === "fan" ? this.engine.cfg.fanHourLimit : 0;
+    if (configured) return configured;
+    const seen = this.all(kind).flatMap((p) => p.usesAtBreakdown).filter((u) => u > 0);
+    return seen.length ? Math.min(...seen) : null;
+  }
+
+  /** One more use would break it: repair first. (For a gate, "use" = an opening.) */
+  wornOut(kind: ComponentKind, name: string): boolean {
+    const p = this.get(kind, name), limit = this.limit(kind);
+    return !!p && limit !== null && p.uses >= limit - 1;
+  }
+
   views(): ComponentView[] {
     const order: ComponentKind[] = ["gate", "spot", "fan", "light"];
     return [...this.parts.values()]
@@ -153,7 +172,47 @@ export class ComponentRegistry implements Subsystem {
 
   async onTick(): Promise<void> {
     await this.repairWhatWeCan();
+    await this.preventiveMaintenance();
     for (const p of this.parts.values()) if (p.dirty) this.save(p);
+  }
+
+  /**
+   * Repair parts before they break. A breakdown costs a fine (20 per gate) and takes the part
+   * out for ~2.3 min; the 2026-09-20 run lost each entrance 55% of the time to it. A part is
+   * repaired when one more use would break it (the controller will not use it again until
+   * then), or earlier when it is well worn and nobody needs it right now - so the repair
+   * happens in a quiet moment rather than while cars queue.
+   */
+  private async preventiveMaintenance() {
+    const { engine } = this;
+    if (!engine.cfg.preventiveMaintenance || engine.replaying) return;
+    for (const p of this.parts.values()) {
+      const limit = this.limit(p.kind);
+      if (limit === null || this.health(p) !== "ok" || p.uses < limit * engine.cfg.preventiveIdleRatio) continue;
+      const due = p.uses >= limit - 1;
+      if (!due && this.demand(p)) continue; // well worn but in demand: use it a little longer
+      if (engine.clock.now() < p.retryAfterG) continue;
+      p.waiting = this.inUse(p);
+      if (p.waiting) continue;
+      const send = this.repairCommand(p);
+      if (!send) continue;
+      if (await engine.cmd("repair", send, [p.name])) {
+        this.markMaintenance(p);
+        this.record(p, "preventive_repair", null, `${Math.round(p.uses)} of ~${limit} uses${due ? "" : ", while idle"}`);
+        engine.note("info", `preventive repair of ${p.kind} ${p.name} (${Math.round(p.uses)}/${limit} uses)`);
+      } else {
+        p.retryAfterG = engine.clock.now() + engine.cfg.repairRetryGameS;
+      }
+    }
+  }
+
+  /** Whether cars are waiting on this part right now. */
+  private demand(p: Part): boolean {
+    if (p.kind !== "gate") return false;
+    const { engine } = this;
+    return [...engine.entryLanes.values()].some((l) => l.gate === p.name && (l.queue.length > 0 || l.current !== null)) ||
+      [...engine.exitLanes.values()].some((l) => l.gate === p.name && (l.releasing.size > 0 ||
+        [...engine.cars.values()].some((c) => c.exit_lane === l.spot && ["at_exit", "invoiced"].includes(c.status))));
   }
 
   // ---------------------------------------------------------------------------

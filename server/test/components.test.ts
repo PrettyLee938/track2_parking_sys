@@ -2,7 +2,9 @@
 import { describe, expect, it } from "vitest";
 import { Controller } from "../src/controller";
 import type { EventRecord } from "../src/store";
-import { carEv, FakeSim, feed, fireTimers, gateEv, LVL1, make, parkAndReachExit, payEv, RecordingQueue, silentLog } from "./helpers";
+import {
+  carEv, FakeSim, feed, fireTimers, gateEv, LVL1, make, parkAndReachExit, payEv, RecordingQueue, silentLog, testServer,
+} from "./helpers";
 
 let n = 0;
 const broken = (type: string, name: string, fine = "20.00"): EventRecord =>
@@ -121,11 +123,70 @@ describe("component health", () => {
     expect(c.components.views().find((v) => v.name === "gateA")).toMatchObject({ uses: 0, breakdowns: 0 });
   });
 
+  it("learns how many openings a gate survives from its breakdowns", async () => {
+    const { c } = await make();
+    expect(c.components.limit("gate")).toBeNull();
+    for (let i = 0; i < 10; i++) await c.handle(gateEv("gateA", "Open"));
+    await c.handle(broken("BarrierGate", "gateA"));
+    expect(c.components.limit("gate")).toBe(10); // 2026-09-20: 10 of 10 breakdowns on the 10th opening
+  });
+
+  it("repairs a gate before its breaking opening instead of opening it", async () => {
+    const { c, sim } = await make({ cfg: { gateCycleLimit: 10 } });
+    for (let i = 0; i < 9; i++) await feed(c, gateEv("gateA", "Open"), gateEv("gateA", "Closed")); // 9 openings
+    await c.handle(carEv("A", "ENTRY1", "CarIn", "10:00:00"));
+    expect(sim.calls.filter((x) => x[0] === "open")).toEqual([]); // the 10th opening would break it
+    await c.tick();
+    expect(repairs(sim)).toEqual([["repair", "gateA"]]);
+    expect(c.store.listComponentEvents()[0]).toMatchObject({ event: "preventive_repair", name: "gateA" });
+    await c.handle(fixed("BarrierGate", "gateA"));
+    expect(sim.last()).toEqual(["open", "gateA"]); // A goes in once it is repaired
+    expect(c.components.views().find((v) => v.name === "gateA")).toMatchObject({ uses: 0, breakdowns: 0 });
+  });
+
+  it("repairs a well-worn gate early while nobody needs it, but not while cars wait", async () => {
+    const { c, sim } = await make({ cfg: { gateCycleLimit: 10, preventiveIdleRatio: 0.8 } });
+    for (let i = 0; i < 8; i++) await feed(c, gateEv("gateA", "Open"), gateEv("gateA", "Closed"));
+    await feed(c, gateEv("gateA", "Open"), carEv("A", "ENTRY1", "CarIn", "10:00:00")); // opening 9, A in the lane
+    await c.tick();
+    expect(repairs(sim)).toEqual([]); // in demand: keep using it while it is open
+    await c.handle(carEv("A", "ENTRY1", "CarOut", "10:00:02"));
+    await c.tick();
+    expect(repairs(sim)).toEqual([["repair", "gateA"]]); // idle now, and one more opening would break it
+  });
+
   it("keeps working when the level has no fans or lights to list (Level 1)", async () => {
     const sim = FakeSim.lvl1();
     sim.listExhaustFans = async () => { throw new Error("404"); };
     const { c } = await make({ sim });
     expect(c.components.views().filter((v) => v.kind === "gate")).toHaveLength(3);
     expect(c.feed.some((f) => f.msg.includes("could not list fans/lights"))).toBe(true);
+  });
+});
+
+describe("fake payments", () => {
+  it("never releases a car for a payment with a bad signature, and asks it to pay once more", async () => {
+    // 2026-09-20: six payments had a bad signature; each car sat unpaid at the exit and was
+    // fined every ~3 min as "escaped without paying".
+    const { c, sim } = await make();
+    await parkAndReachExit(c);
+    await fireTimers(c);
+    expect(sim.charges()).toEqual([["charge", "A", 2, 0]]);
+    c.submitRejected({ ...payEv("A", 2), Signature: "f99787f8972b89bdeee80a9434a0eb6c", _sig: "invalid" });
+    await (c.queue as RecordingQueue).tasks.at(-1)!();
+    expect(c.counters.fake_payments).toBe(1);
+    expect(sim.gotos().filter((g) => g[2] === "leavepark")).toEqual([]);
+    await fireTimers(c);
+    expect(sim.charges()).toEqual([["charge", "A", 2, 0], ["charge", "A", 2, 0]]); // asked again, same amount
+    await c.handle(payEv("A", 2)); // a real payment this time
+    expect(sim.last()).toEqual(["goto", "A", "leavepark"]);
+  });
+
+  it("hands a badly signed payment to the controller without acting on it", async () => {
+    const { app, queue } = await testServer({ cfg: { signatureMode: "strict" } });
+    const body = JSON.stringify({ EventClass: "payment_made", CarPlateNumber: "VWW 515", Amount: "4.00", Reason: "Car Payment",
+      EventId: "x1", SequenceId: "1", Signature: "f99787f8972b89bdeee80a9434a0eb6c", ServerDateTime: "2026-09-20 01:59:32" });
+    await app.inject({ method: "POST", url: "/webhook", headers: { "content-type": "application/json" }, payload: body });
+    expect(queue.tasks).toHaveLength(1); // submitRejected, not submit: see the test above
   });
 });

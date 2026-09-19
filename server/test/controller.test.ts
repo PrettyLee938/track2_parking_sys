@@ -251,7 +251,7 @@ describe("game speed", () => {
     for (const speed of [0.5, 1, 2, 4]) {
       const { c } = await make({ cfg: { gameSpeed: speed } });
       await parkAndReachExit(c);
-      expect(dueIn(c, "close gateA")).toBeCloseTo(c.cfg.gateCloseDelayGameS / speed, 1);
+      expect(dueIn(c, "close gateA")).toBeCloseTo(c.cfg.entryGateCloseDelayGameS / speed, 1);
       expect(dueIn(c, "charge A")).toBeCloseTo(c.cfg.exitChargeDelayGameS / speed, 1);
     }
   });
@@ -641,7 +641,8 @@ describe("simulator quirks", () => {
     const { c, sim } = await make();
     await parkAndReachExit(c); // A cleared ENTRY1 -> entry gate close is scheduled
     const entryClose = c.timers.find((t) => t.label === "close gateA")!;
-    expect(entryClose.due - c.clock.now()).toBeCloseTo(c.cfg.gateCloseDelayGameS, 1);
+    // Entry: held open across a stream of cars (each closing is a gate cycle); exit: closed fast.
+    expect(entryClose.due - c.clock.now()).toBeCloseTo(c.cfg.entryGateCloseDelayGameS, 1);
     expect(c.cfg.gateCloseDelayGameS).toBe(1.5);
     await fireTimers(c);
     c.gates.get("gateB")!.state = "Closed";
