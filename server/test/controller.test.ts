@@ -733,6 +733,19 @@ describe("dropped gotos", () => {
     expect(c.cars.has("A")).toBe(false);
   });
 
+  it("does not re-release a paid car that is still waiting for the exit gate to open", async () => {
+    // 2026-09-20 02:30 run: its old entry goto made it look stuck - 49 double leaveparks.
+    const { c, sim, advance } = await make();
+    c.gates.get("gateB")!.state = "Closed";
+    await parkAndReachExit(c);
+    await fireTimers(c);
+    await c.handle(payEv("A", 2));
+    wait(advance, c, c.cfg.gotoConfirmGameS + 1);
+    await c.tick();
+    await c.handle(gateEv("gateB", "Open"));
+    expect(sim.gotos().filter((g) => g[1] === "A" && g[2] === "leavepark")).toHaveLength(1);
+  });
+
   it("re-sends leavepark to a turned-away car still on the entry sensor", async () => {
     const { c, sim, advance } = await make({ sim: FakeSim.lvl1(1) });
     await feed(c, gateEv("gateA", "Open"), carEv("A", "ENTRY1", "CarIn", "10:00:00"), carEv("A", "ENTRY1", "CarOut", "10:00:01"),
