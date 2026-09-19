@@ -2,7 +2,7 @@
 
 IoT hackathon, **Track 2**, team of 4. We control a simulated car park: the Parking
 Simulator (a Windows app) sends us webhooks and we drive it through its REST API.
-**Current stage: Level 1 is built and running; not yet on Level 2.** Deep walkthrough of
+**Current stage: Level 1 done (branch main); Level 2 in progress on branch `miro_level2` - see Status below.** Deep walkthrough of
 every mechanism: `docs/GUIDE.md` (22 sections). Setup/API/behaviours: `README.md`.
 
 ## Level 1 requirements (from the spec)
