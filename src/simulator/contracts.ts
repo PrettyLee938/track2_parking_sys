@@ -4,6 +4,7 @@ import type { WebhookBoundary } from './webhook-boundary.js';
 export interface GatewayHealth {
   connected: boolean;
   runId: string | undefined;
+  discoveryComplete: boolean;
   lastError: string | undefined;
   checkedAt: string | undefined;
 }

@@ -10,8 +10,11 @@ export class CommandService {
   async issue(input: Omit<SimulatorCommand, 'id'>, actorId?: string) {
     const run = this.db.get<{ value: string }>('SELECT value FROM meta WHERE key = :key', { ':key': 'run_status' })?.value;
     if (run !== 'active') throw new Error('run-not-active');
-    if (!this.gateway.health().connected) throw new Error('gateway-not-connected');
     const runId = this.db.get<{ value: string }>('SELECT value FROM meta WHERE key = :key', { ':key': 'run_id' })?.value || null;
+    const health = this.gateway.health();
+    if (!health.connected || !health.discoveryComplete) throw new Error('gateway-not-connected');
+    if (!runId || runId.startsWith('pending-new-') || !health.runId) throw new Error('run-identity-unknown');
+    if (health.runId !== runId) throw new Error('run-identity-mismatch');
     const command: SimulatorCommand = { ...input, id: randomUUID() };
     const now = new Date(this.clock()).toISOString();
     this.db.run('INSERT INTO commands (id, kind, target, payload_json, status, created_at, updated_at, run_id, external_id) VALUES (:id, :kind, :target, :payload, :status, :created, :updated, :run, :external)', { ':id': command.id, ':kind': command.kind, ':target': command.target, ':payload': JSON.stringify(command.payload), ':status': 'pending', ':created': now, ':updated': now, ':run': runId, ':external': null });
@@ -20,16 +23,22 @@ export class CommandService {
     catch (error) { acceptance = { accepted: false, outcome: 'unknown' as const, externalId: undefined, error: error instanceof Error ? error.message : String(error) }; }
     const status: CommandStatus = acceptance.outcome === 'accepted' ? 'pending' : acceptance.outcome === 'rejected' ? 'rejected' : 'unknown';
     if (status === 'unknown') this.db.run('INSERT INTO meta (key, value) VALUES (:key, :value) ON CONFLICT(key) DO UPDATE SET value = excluded.value', { ':key': 'run_status', ':value': 'reconciling' });
-    this.db.run('UPDATE commands SET status = :status, external_status = :external, external_id = :externalId, error = :error, updated_at = :updated WHERE id = :id', { ':status': status, ':external': acceptance.accepted ? 'accepted' : 'failed', ':externalId': acceptance.externalId || null, ':error': acceptance.error || null, ':updated': new Date(this.clock()).toISOString(), ':id': command.id });
-    this.audit.record('command-issued', 'command', command.id, { ...command, acceptance }, actorId);
+    this.db.transaction(() => {
+      this.db.run('UPDATE commands SET status = :status, external_status = :external, external_id = :externalId, error = :error, updated_at = :updated WHERE id = :id', { ':status': status, ':external': acceptance.accepted ? 'accepted' : 'failed', ':externalId': acceptance.externalId || null, ':error': acceptance.error || null, ':updated': new Date(this.clock()).toISOString(), ':id': command.id });
+      this.audit.record('command-issued', 'command', command.id, { ...command, acceptance }, actorId);
+    });
     return { ...command, status, acceptance };
   }
 
   list(limit = 100) { return this.db.all('SELECT * FROM commands ORDER BY created_at DESC LIMIT :limit', { ':limit': limit }); }
 
   markConfirmed(id: string, actorId?: string) {
-    this.db.run('UPDATE commands SET status = :status, updated_at = :updated WHERE id = :id AND status = :pending', { ':status': 'confirmed', ':updated': new Date(this.clock()).toISOString(), ':id': id, ':pending': 'pending' });
-    this.audit.record('command-confirmed', 'command', id, {}, actorId);
+    const command = this.db.get<{ id: string }>('SELECT id FROM commands WHERE (id = :id OR external_id = :id) AND status IN (:pending, :unknown)', { ':id': id, ':pending': 'pending', ':unknown': 'unknown' });
+    if (!command) return;
+    this.db.transaction(() => {
+      this.db.run('UPDATE commands SET status = :status, updated_at = :updated WHERE id = :id AND status IN (:pending, :unknown)', { ':status': 'confirmed', ':updated': new Date(this.clock()).toISOString(), ':id': command.id, ':pending': 'pending', ':unknown': 'unknown' });
+      this.audit.record('command-confirmed', 'command', command.id, { evidenceId: id }, actorId);
+    });
   }
 
   confirmFromEvent(payload: Record<string, unknown>) {

@@ -99,7 +99,18 @@ export class PaymentService {
     if (type === 'payment_made') {
       const sessionId = String(payload.SessionId || payload.sessionId || '');
       const amount = Number(payload.AmountCents || payload.amountCents || payload.Amount || 0);
-      if (sessionId && Number.isFinite(amount)) await this.recordPayment(sessionId, amount, String(payload.EventId || payload.eventId || randomUUID()), true);
+      const paymentId = String(payload.EventId || payload.eventId || randomUUID());
+      if (sessionId && Number.isFinite(amount)) {
+        try { await this.recordPayment(sessionId, amount, paymentId, true); }
+        catch (error) {
+          const receivedAt = new Date(this.clock()).toISOString();
+          this.db.transaction(() => {
+            this.db.run('INSERT OR IGNORE INTO payment_notifications (id, session_id, amount_cents, received_at, raw_json) VALUES (:id, :session, :amount, :received, :raw)', { ':id': paymentId, ':session': sessionId, ':amount': amount, ':received': receivedAt, ':raw': JSON.stringify(payload) });
+            this.db.run('INSERT INTO payment_validations (id, notification_id, status, reason, validated_at) VALUES (:id, :notification, :status, :reason, :validated)', { ':id': randomUUID(), ':notification': paymentId, ':status': 'invalid', ':reason': error instanceof Error ? error.message : String(error), ':validated': receivedAt });
+            this.audit.record('payment-rejected', 'payment-notification', paymentId, { sessionId, amount, reason: error instanceof Error ? error.message : String(error) });
+          });
+        }
+      }
     }
     if (type === 'car_spot_action') {
       const plate = String(payload.CarName || payload.carName || payload.Plate || payload.plate || '');

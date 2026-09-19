@@ -8,7 +8,7 @@ import { ParkingService } from '../src/services/parking-service.js';
 describe('parking arrival controller', () => {
   it('persists a snapshot and creates a legal entry session', async () => {
     const db = new Database(':memory:');
-    const gateway = new FixtureGateway();
+    const gateway = new FixtureGateway({ runId: 'run-1' });
     await gateway.login();
     const commands = new CommandService(db, gateway, new AuditService(db));
     const parking = new ParkingService(db, commands, new AuditService(db));
@@ -16,7 +16,7 @@ describe('parking arrival controller', () => {
     const session = await parking.createArrival({ plate: 'ABC-123', type: 'electric', accessible: false, needsCharging: true });
     expect(session.spotId).toBe('E-1');
     expect(session.status).toBe('entry-pending');
-    expect((db.get<{ reserved: number }>('SELECT reserved FROM spots WHERE id = :id', { ':id': 'E-1' }))?.reserved).toBe(1);
+    expect((db.get<{ reserved: number }>('SELECT reserved FROM spots WHERE id = :id', { ':id': 'E-1' }))?.reserved).toBe(0);
     expect(gateway.commands[0]?.kind).toBe('car.goto');
     parking.applyEvent('car_spot_action', { Plate: 'ABC-123', Destination: 'E-1' });
     expect((parking.getSession(session.id) as { status: string }).status).toBe('parked');

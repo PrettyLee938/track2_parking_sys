@@ -9,7 +9,7 @@ import { PaymentService } from '../src/services/payment-service.js';
 
 async function fixture() {
   const db = new Database(':memory:');
-  const gateway = new FixtureGateway();
+  const gateway = new FixtureGateway({ runId: 'run-1' });
   await gateway.login();
   const audit = new AuditService(db);
   const commands = new CommandService(db, gateway, audit);

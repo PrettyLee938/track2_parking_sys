@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE TABLE IF NOT EXISTS events (
   event_id TEXT PRIMARY KEY, type TEXT NOT NULL, sequence_id INTEGER NOT NULL,
   run_id TEXT, received_at TEXT NOT NULL, signature_valid INTEGER NOT NULL,
-  signature_digest TEXT NOT NULL,
+  signature_digest TEXT NOT NULL, processed INTEGER NOT NULL DEFAULT 0,
   raw_json TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS events_sequence_idx ON events(sequence_id);

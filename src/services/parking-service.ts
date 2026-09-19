@@ -46,7 +46,6 @@ export class ParkingService {
         const assigned = this.db.get('SELECT id FROM parking_sessions WHERE spot_id = :spot AND run_id = (SELECT value FROM meta WHERE key = :runKey) AND status IN (\'entry-pending\', \'parked\', \'at-exit\', \'departure-pending\')', { ':spot': choice.spotId, ':runKey': 'run_id' });
         if (assigned) throw new Error('spot-unavailable');
         this.db.run('INSERT INTO parking_sessions (id, plate, status, spot_id, needs_charging, started_at, run_id) VALUES (:id, :plate, :status, :spot, :charging, :started, (SELECT value FROM meta WHERE key = :run))', { ':id': sessionId, ':plate': input.plate, ':status': 'entry-pending', ':spot': choice.spotId, ':charging': +input.needsCharging, ':started': now, ':run': 'run_id' });
-        this.db.run('UPDATE spots SET reserved = 1 WHERE id = :spot AND run_id = (SELECT value FROM meta WHERE key = :runKey)', { ':spot': choice.spotId, ':runKey': 'run_id' });
       });
     } catch (error) { this.audit.record('arrival-rejected', 'car', input.plate, { reason: error instanceof Error ? error.message : String(error) }, actorId); throw error; }
     let command;

@@ -34,7 +34,7 @@ export class FixtureGateway implements SimulatorGateway {
   }
 
   health(): GatewayHealth {
-    return { connected: this.connected, runId: this.connected ? this.snapshot.runId : undefined, lastError: undefined, checkedAt: new Date().toISOString() };
+    return { connected: this.connected, runId: this.connected ? this.snapshot.runId : undefined, discoveryComplete: this.connected, lastError: undefined, checkedAt: new Date().toISOString() };
   }
 
   webhookBoundary() { return this.boundary; }

@@ -8,7 +8,7 @@ import { EquipmentService } from '../src/services/equipment-service.js';
 describe('equipment and environment controller', () => {
   it('keeps repair pending until a fixed event arrives', async () => {
     const db = new Database(':memory:');
-    const gateway = new FixtureGateway();
+    const gateway = new FixtureGateway({ runId: 'run-1' });
     await gateway.login();
     const audit = new AuditService(db);
     const service = new EquipmentService(db, new CommandService(db, gateway, audit), audit);
@@ -23,7 +23,7 @@ describe('equipment and environment controller', () => {
 
   it('does not allow a fan to be disabled while CO is high', async () => {
     const db = new Database(':memory:');
-    const gateway = new FixtureGateway(); await gateway.login();
+    const gateway = new FixtureGateway({ runId: 'run-1' }); await gateway.login();
     const audit = new AuditService(db);
     const service = new EquipmentService(db, new CommandService(db, gateway, audit), audit, () => Date.now(), 50);
     db.run("INSERT INTO meta (key, value) VALUES ('run_id', 'run-1'), ('run_status', 'active')");

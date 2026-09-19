@@ -7,16 +7,18 @@ type Fetcher = typeof fetch;
 
 export class HttpSimulatorGateway implements SimulatorGateway {
   private token: string | undefined;
-  private state: GatewayHealth = { connected: false, runId: undefined, lastError: undefined, checkedAt: undefined };
+  private discoveryWarnings: string[] = [];
+  private state: GatewayHealth = { connected: false, runId: undefined, discoveryComplete: false, lastError: undefined, checkedAt: undefined };
   private readonly boundary = new WebhookBoundary();
 
   constructor(private readonly config: Config, private readonly fetcher: Fetcher = fetch) {}
 
-  private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  private async request<T>(path: string, init: RequestInit = {}, retry = true): Promise<T> {
     const headers = new Headers(init.headers);
     headers.set('content-type', 'application/json');
     if (this.token) headers.set('authorization', `Bearer ${this.token}`);
     const response = await this.fetcher(`${this.config.simulatorBaseUrl}${path}`, { ...init, headers });
+    if (response.status === 401 && retry && this.token) { this.token = undefined; await this.login(); return this.request(path, init, false); }
     if (!response.ok) throw new Error(`simulator-http-${response.status}`);
     return response.status === 204 ? (undefined as T) : response.json() as Promise<T>;
   }
@@ -28,7 +30,7 @@ export class HttpSimulatorGateway implements SimulatorGateway {
     });
     this.token = result.token || result.accessToken;
     if (!this.token) throw new Error('simulator-token-missing');
-    this.state = { connected: true, runId: undefined, lastError: undefined, checkedAt: new Date().toISOString() };
+    this.state = { connected: true, runId: undefined, discoveryComplete: false, lastError: undefined, checkedAt: new Date().toISOString() };
   }
 
   private async list<T>(path: string): Promise<T[]> {
@@ -37,12 +39,18 @@ export class HttpSimulatorGateway implements SimulatorGateway {
   }
 
   private async optionalList<T>(path: string): Promise<T[]> {
-    try { return await this.list<T>(path); } catch { return []; }
+    try { return await this.list<T>(path); }
+    catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!message.endsWith('404')) this.discoveryWarnings.push(`${path}:${message}`);
+      return [];
+    }
   }
 
   async discover(): Promise<SimulatorSnapshot> {
     try {
       if (!this.token) await this.login();
+      this.discoveryWarnings = [];
       const [spots, barriers, lights, fans, alarms, zones, topology] = await Promise.all([
         this.list<SpotCandidate>('/api/v1/parking-spots'),
         this.optionalList<Record<string, unknown>>('/api/v1/barriers'),
@@ -52,22 +60,22 @@ export class HttpSimulatorGateway implements SimulatorGateway {
         this.optionalList<Record<string, unknown>>('/api/v1/zones'),
         this.optionalList<Record<string, unknown>>('/api/v1/topology')
       ]);
-      const status = await this.optionalStatus();
+      const status = await this.status();
       const runId = String(status?.runId || status?.RunId || 'unknown-run');
+      if (runId === 'unknown-run') throw new Error('simulator-run-unknown');
+      if (this.discoveryWarnings.length) throw new Error(`simulator-discovery-incomplete:${this.discoveryWarnings.join(',')}`);
       const components = [...barriers, ...lights, ...fans, ...alarms];
       const snapshot = { runId, levelId: String(status?.levelId || status?.LevelId || 'lvl1'), spots, components, zones, barriers, lights, fans, alarms, topology };
-      this.state = { connected: true, runId, lastError: undefined, checkedAt: new Date().toISOString() };
+      this.state = { connected: true, runId, discoveryComplete: true, lastError: undefined, checkedAt: new Date().toISOString() };
       return snapshot;
     } catch (error) {
       const lastError = error instanceof Error ? error.message : String(error);
-      this.state = { connected: false, runId: undefined, lastError, checkedAt: new Date().toISOString() };
+      this.state = { connected: false, runId: undefined, discoveryComplete: false, lastError, checkedAt: new Date().toISOString() };
       throw error;
     }
   }
 
-  private async optionalStatus() {
-    try { return await this.request<Record<string, unknown>>('/api/v1/status'); } catch { return undefined; }
-  }
+  private async status() { return this.request<Record<string, unknown>>('/api/v1/status'); }
 
   async send(command: SimulatorCommand): Promise<CommandAcceptance> {
     try {
@@ -77,7 +85,7 @@ export class HttpSimulatorGateway implements SimulatorGateway {
       return { accepted: true, outcome: 'accepted', externalId: result?.id, error: undefined };
     } catch (error) {
       const lastError = error instanceof Error ? error.message : String(error);
-      this.state = { connected: false, runId: undefined, lastError, checkedAt: new Date().toISOString() };
+      this.state = { connected: false, runId: undefined, discoveryComplete: false, lastError, checkedAt: new Date().toISOString() };
       const rejected = lastError.startsWith('simulator-http-4');
       return { accepted: false, outcome: rejected ? 'rejected' : 'unknown', externalId: undefined, error: lastError };
     }

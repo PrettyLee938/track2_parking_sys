@@ -16,7 +16,12 @@ export class EventService {
     const envelope = this.boundary.accept(payload);
     const eventId = envelope.eventId;
     if (!envelope.valid) { const reason = envelope.reason || 'invalid-signature'; this.audit.record('webhook-rejected', 'event', eventId, { reason, calculatedDigest: envelope.calculatedDigest, payload }); return { accepted: false, ordering: 'out-of-order', reason }; }
-    if (this.db.get('SELECT event_id FROM events WHERE event_id = :id', { ':id': eventId })) return { accepted: true, ordering: 'duplicate' };
+    const existing = this.db.get<{ event_id: string; type: string; sequence_id: number; run_id: string | null; received_at: string; raw_json: string; processed: number }>('SELECT event_id, type, sequence_id, run_id, received_at, raw_json, processed FROM events WHERE event_id = :id', { ':id': eventId });
+    if (existing) {
+      if (existing.processed) return { accepted: true, ordering: 'duplicate' };
+      const active = this.db.get<{ value: string }>('SELECT value FROM meta WHERE key = :key', { ':key': 'run_status' })?.value === 'active';
+      return active ? { accepted: true, ordering: 'duplicate', readyEvents: this.pendingEvents(existing.run_id || undefined) } : { accepted: true, ordering: 'duplicate' };
+    }
     const sequenceId = envelope.sequenceId;
     const type = envelope.type;
     const runText = envelope.runId;
@@ -53,7 +58,7 @@ export class EventService {
 
   private collectReady(current: NormalizedEvent) {
     if (current.sequenceId <= 0) return [current];
-    const rows = this.db.all<{ event_id: string; type: string; sequence_id: number; run_id: string | null; received_at: string; raw_json: string }>('SELECT event_id, type, sequence_id, run_id, received_at, raw_json FROM events WHERE sequence_id > :sequence AND ((run_id = :run) OR (:run IS NULL AND run_id IS NULL)) ORDER BY sequence_id', { ':sequence': current.sequenceId, ':run': current.runId || null });
+    const rows = this.db.all<{ event_id: string; type: string; sequence_id: number; run_id: string | null; received_at: string; raw_json: string }>('SELECT event_id, type, sequence_id, run_id, received_at, raw_json FROM events WHERE processed = 0 AND sequence_id > :sequence AND ((run_id = :run) OR (:run IS NULL AND run_id IS NULL)) ORDER BY sequence_id', { ':sequence': current.sequenceId, ':run': current.runId || null });
     const ready = [current];
     let cursor = current.sequenceId;
     for (const row of rows) {
@@ -64,6 +69,13 @@ export class EventService {
     if (cursor !== current.sequenceId) this.db.run('INSERT INTO meta (key, value) VALUES (:key, :value) ON CONFLICT(key) DO UPDATE SET value = excluded.value', { ':key': 'last_sequence', ':value': String(cursor) });
     return ready;
   }
+
+  private pendingEvents(runId?: string) {
+    const rows = this.db.all<{ event_id: string; type: string; sequence_id: number; run_id: string | null; received_at: string; raw_json: string }>('SELECT event_id, type, sequence_id, run_id, received_at, raw_json FROM events WHERE processed = 0 AND ((run_id = :run) OR (:run IS NULL AND run_id IS NULL)) ORDER BY sequence_id', { ':run': runId || null });
+    return rows.map((row) => ({ eventId: row.event_id, type: row.type, sequenceId: row.sequence_id, runId: row.run_id || undefined, receivedAt: row.received_at, payload: JSON.parse(row.raw_json) as Record<string, unknown> }));
+  }
+
+  markProcessed(eventId: string) { this.db.run('UPDATE events SET processed = 1 WHERE event_id = :id', { ':id': eventId }); }
 
   list(limit = 100) { return this.db.all('SELECT * FROM events ORDER BY sequence_id DESC LIMIT :limit', { ':limit': limit }); }
 }

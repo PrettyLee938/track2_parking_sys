@@ -62,7 +62,7 @@ export class RecoveryService {
 
   startNewRun(actorId: string) {
     const previous = this.meta('run_id');
-    const runId = `run-${randomUUID()}`;
+    const runId = `pending-new-${randomUUID()}`;
     this.db.transaction(() => {
       this.db.run('DELETE FROM spots');
       this.db.run('DELETE FROM components');
@@ -71,7 +71,7 @@ export class RecoveryService {
         this.db.run("UPDATE overrides SET status = 'closed' WHERE session_id IN (SELECT id FROM parking_sessions WHERE run_id = :run) AND status = 'active'", { ':run': previous });
       }
       this.setMeta('run_id', runId);
-      this.setMeta('run_status', 'active');
+      this.setMeta('run_status', 'reconciling');
       this.setMeta('last_sequence', '0');
       this.setMeta('pending_run_id', '');
       this.audit.record('run-started', 'simulator-run', runId, { previousRunId: previous }, actorId);

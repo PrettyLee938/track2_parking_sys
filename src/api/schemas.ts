@@ -12,3 +12,4 @@ export const invoice = { ...idParams, body: { type: 'object', required: ['durati
 export const payment = { ...idParams, body: { type: 'object', required: ['amountCents'], properties: { amountCents: integer, paymentId: string }, additionalProperties: false } };
 export const override = { ...idParams, body: { type: 'object', required: ['password', 'reason'], properties: { password: string, reason: string }, additionalProperties: false } };
 export const equipment = { ...idParams, body: { type: 'object', required: ['enabled'], properties: { enabled: boolean }, additionalProperties: false } };
+export const correction = { ...idParams, body: { type: 'object', minProperties: 1, additionalProperties: true } };
