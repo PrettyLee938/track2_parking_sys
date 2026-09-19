@@ -6,6 +6,14 @@ import { calculateInvoice } from '../domain/billing.js';
 import { AuditService } from './audit.js';
 import type { CommandService } from './command-service.js';
 
+function toCents(value: unknown) {
+  const match = /^([+-]?)(\d+)(?:\.(\d{1,2}))?$/.exec(String(value ?? '').trim());
+  if (!match) return Number.NaN;
+  const fraction = `${match[3] || ''}00`.slice(0, 2);
+  const cents = Number(match[2]) * 100 + Number(fraction);
+  return match[1] === '-' ? -cents : cents;
+}
+
 export class PaymentService {
   constructor(private readonly db: Database, private readonly commands: CommandService, private readonly auth: AuthService, private readonly audit = new AuditService(db), private readonly clock = () => Date.now()) {}
 
@@ -29,9 +37,12 @@ export class PaymentService {
   }
 
   async recordPayment(sessionId: string, amountCents: number, paymentId: string = randomUUID(), allowReconciling = false) {
-    const existing = this.db.get<{ status: 'valid' | 'invalid'; reason: string | null }>('SELECT status, reason FROM payment_validations WHERE notification_id = :id ORDER BY validated_at DESC LIMIT 1', { ':id': paymentId });
+    const session = this.currentSession(sessionId, allowReconciling);
+    if (session.status !== 'at-exit' && session.status !== 'departure-pending') throw new Error('car-not-at-exit');
+    const notification = this.db.get<{ session_id: string }>('SELECT session_id FROM payment_notifications WHERE id = :id', { ':id': paymentId });
+    if (notification && notification.session_id !== sessionId) throw new Error('payment-id-session-mismatch');
+    const existing = this.db.get<{ status: 'valid' | 'invalid'; reason: string | null }>('SELECT v.status, v.reason FROM payment_validations v JOIN payment_notifications n ON n.id = v.notification_id WHERE v.notification_id = :id AND n.session_id = :session ORDER BY v.validated_at DESC LIMIT 1', { ':id': paymentId, ':session': sessionId });
     if (existing) return { id: paymentId, status: existing.status, reason: existing.reason || undefined };
-    this.currentSession(sessionId, allowReconciling);
     const invoice = this.db.get<{ id: string; total_cents: number }>('SELECT id, total_cents FROM invoices WHERE session_id = :session ORDER BY created_at DESC LIMIT 1', { ':session': sessionId });
     if (!invoice) throw new Error('invoice-missing');
     const duplicate = this.db.get('SELECT id FROM payments WHERE session_id = :session AND status = :status', { ':session': sessionId, ':status': 'valid' });
@@ -76,7 +87,7 @@ export class PaymentService {
     const paid = this.db.get('SELECT id FROM payments WHERE session_id = :session AND status = :status', { ':session': sessionId, ':status': 'valid' });
     const override = this.db.get('SELECT id FROM overrides WHERE session_id = :session AND status = :status', { ':session': sessionId, ':status': 'active' });
     if (!paid && !override) throw new Error('payment-required');
-    const command = await this.commands.issue({ kind: 'car.depart', target: `/api/v1/car/${encodeURIComponent(session.plate)}/goto/Exit`, payload: { plate: session.plate, destination: 'Exit', sessionId } }, actorId);
+    const command = await this.commands.issue({ kind: 'car.depart', target: `/api/v1/car/${encodeURIComponent(session.plate)}/goto/exit`, payload: { plate: session.plate, destination: 'exit', sessionId } }, actorId);
     if (command.status === 'rejected') throw new Error('departure-command-rejected');
     this.db.transaction(() => {
       this.db.run('UPDATE parking_sessions SET status = :status WHERE id = :id', { ':status': 'departure-pending', ':id': sessionId });
@@ -99,8 +110,13 @@ export class PaymentService {
 
   async applyEvent(type: string, payload: Record<string, unknown>) {
     if (type === 'payment_made') {
-      const sessionId = String(payload.SessionId || payload.sessionId || '');
-      const amount = Number(payload.AmountCents || payload.amountCents || payload.Amount || 0);
+      const plate = String(payload.CarPlateNumber || payload.carPlateNumber || payload.Plate || payload.plate || '');
+      const explicitSessionId = String(payload.SessionId || payload.sessionId || '');
+      const runId = this.db.get<{ value: string }>('SELECT value FROM meta WHERE key = :key', { ':key': 'run_id' })?.value;
+      const sessionId = explicitSessionId || (plate ? this.db.get<{ id: string }>('SELECT id FROM parking_sessions WHERE plate = :plate AND run_id = :run AND status IN (\'at-exit\', \'departure-pending\') ORDER BY started_at DESC LIMIT 1', { ':plate': plate, ':run': runId || '' })?.id || '' : '');
+      const amount = payload.AmountCents !== undefined || payload.amountCents !== undefined
+        ? Number(payload.AmountCents ?? payload.amountCents)
+        : toCents(payload.Amount ?? payload.amount);
       const paymentId = String(payload.EventId || payload.eventId || randomUUID());
       if (sessionId && Number.isFinite(amount)) {
         try { await this.recordPayment(sessionId, amount, paymentId, true); }
@@ -115,11 +131,13 @@ export class PaymentService {
       }
     }
     if (type === 'car_spot_action') {
-      const plate = String(payload.CarName || payload.carName || payload.Plate || payload.plate || '');
+      const plate = String(payload.CarPlateNumber || payload.carPlateNumber || payload.CarName || payload.carName || payload.Plate || payload.plate || '');
       const destination = String(payload.SpotName || payload.spotName || payload.Destination || payload.destination || '').toLowerCase();
+      const spotType = String(payload.SpotType || payload.spotType || '').toLowerCase();
+      const direction = String(payload.Direction || payload.direction || '').toLowerCase();
       const runId = this.db.get<{ value: string }>('SELECT value FROM meta WHERE key = :key', { ':key': 'run_id' })?.value;
       const session = this.db.get<{ id: string; status: string }>('SELECT id, status FROM parking_sessions WHERE plate = :plate AND run_id = :run ORDER BY started_at DESC LIMIT 1', { ':plate': plate, ':run': runId || '' });
-      if (session?.status === 'departure-pending' && destination.includes('exit')) await this.confirmDeparture(session.id, true);
+      if (session?.status === 'departure-pending' && (spotType === 'exitspot' && direction === 'carout' || !spotType && !direction && destination.includes('exit'))) await this.confirmDeparture(session.id, true);
     }
   }
 }

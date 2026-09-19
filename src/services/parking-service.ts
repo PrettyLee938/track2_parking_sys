@@ -21,7 +21,10 @@ export class ParkingService {
       this.db.run('INSERT INTO meta (key, value) VALUES (:key, :value) ON CONFLICT(key) DO UPDATE SET value = excluded.value', { ':key': 'level_id', ':value': snapshot.levelId });
       this.db.run('INSERT INTO meta (key, value) VALUES (:key, :value) ON CONFLICT(key) DO UPDATE SET value = excluded.value', { ':key': 'run_status', ':value': 'active' });
       this.db.run('INSERT INTO meta (key, value) VALUES (:key, :value) ON CONFLICT(key) DO UPDATE SET value = excluded.value', { ':key': 'topology', ':value': JSON.stringify(snapshot.topology || []) });
-      for (const spot of snapshot.spots) this.db.run('INSERT INTO spots (id, type, accessible, occupied, reserved, broken, under_maintenance, reachable, zone_safe, rank, run_id) VALUES (:id, :type, :accessible, :occupied, :reserved, :broken, :maintenance, :reachable, :safe, :rank, :run) ON CONFLICT(id) DO UPDATE SET type=excluded.type, accessible=excluded.accessible, occupied=excluded.occupied, broken=excluded.broken, under_maintenance=excluded.under_maintenance, reachable=excluded.reachable, zone_safe=excluded.zone_safe, rank=excluded.rank, run_id=excluded.run_id', { ':id': spot.id, ':type': spot.type, ':accessible': +spot.accessible, ':occupied': +spot.occupied, ':reserved': +spot.reserved, ':broken': +spot.broken, ':maintenance': +spot.underMaintenance, ':reachable': +spot.reachable, ':safe': +spot.zoneSafe, ':rank': spot.rank, ':run': snapshot.runId });
+      for (const spot of snapshot.spots) {
+        this.db.run('INSERT INTO spots (id, type, accessible, occupied, reserved, broken, under_maintenance, reachable, zone_safe, rank, run_id) VALUES (:id, :type, :accessible, :occupied, :reserved, :broken, :maintenance, :reachable, :safe, :rank, :run) ON CONFLICT(id) DO UPDATE SET type=excluded.type, accessible=excluded.accessible, occupied=excluded.occupied, broken=excluded.broken, under_maintenance=excluded.under_maintenance, reachable=excluded.reachable, zone_safe=excluded.zone_safe, rank=excluded.rank, run_id=excluded.run_id', { ':id': spot.id, ':type': spot.type, ':accessible': +spot.accessible, ':occupied': +spot.occupied, ':reserved': +spot.reserved, ':broken': +spot.broken, ':maintenance': +spot.underMaintenance, ':reachable': +spot.reachable, ':safe': +spot.zoneSafe, ':rank': spot.rank, ':run': snapshot.runId });
+        this.db.run('INSERT INTO components (id, kind, zone_id, status, updated_at) VALUES (:id, :kind, :zone, :status, :updated) ON CONFLICT(id) DO UPDATE SET zone_id=excluded.zone_id, status=excluded.status, updated_at=excluded.updated_at', { ':id': spot.id, ':kind': 'parking-spot', ':zone': spot.zoneId || null, ':status': spot.broken ? 'broken' : spot.underMaintenance ? 'under-maintenance' : 'healthy', ':updated': new Date(this.clock()).toISOString() });
+      }
       const devices = [...(snapshot.components || []), ...(snapshot.barriers || []), ...(snapshot.lights || []), ...(snapshot.fans || []), ...(snapshot.alarms || [])];
       for (const device of devices) {
         const id = String(device.id || device.Id || device.name || device.Name || randomUUID());
@@ -70,19 +73,26 @@ export class ParkingService {
 
   applyEvent(type: string, payload: Record<string, unknown>) {
     if (type !== 'car_spot_action') return;
-    const plate = String(payload.CarName || payload.carName || payload.Plate || payload.plate || '');
+    const plate = String(payload.CarPlateNumber || payload.carPlateNumber || payload.CarName || payload.carName || payload.Plate || payload.plate || '');
     const spot = String(payload.SpotName || payload.spotName || payload.Destination || payload.destination || '');
+    const spotType = String(payload.SpotType || payload.spotType || '').toLowerCase();
+    const direction = String(payload.Direction || payload.direction || '').toLowerCase();
     if (!plate) return;
     const runId = this.db.get<{ value: string }>('SELECT value FROM meta WHERE key = :key', { ':key': 'run_id' })?.value;
     const session = this.db.get<{ id: string; spot_id: string | null }>('SELECT id, spot_id FROM parking_sessions WHERE plate = :plate AND run_id = :run ORDER BY started_at DESC LIMIT 1', { ':plate': plate, ':run': runId || '' });
     if (!session) return;
-    if (spot.toLowerCase().includes('exit')) {
+    const legacyExit = !spotType && !direction && spot.toLowerCase().includes('exit');
+    const legacyPark = !spotType && !direction;
+    if ((spotType === 'exitspot' && direction === 'carin') || legacyExit) {
       const current = this.db.get<{ status: string }>('SELECT status FROM parking_sessions WHERE id = :id', { ':id': session.id });
       if (current?.status !== 'departure-pending') this.markAtExit(session.id);
     }
-    else {
+    else if ((spotType === 'park' && direction === 'carin') || legacyPark) {
       this.db.run('UPDATE parking_sessions SET status = :status WHERE id = :id', { ':status': 'parked', ':id': session.id });
       if (session.spot_id) this.db.run('UPDATE spots SET occupied = 1, reserved = 0 WHERE id = :id', { ':id': session.spot_id });
+    }
+    else if (spotType === 'park' && direction === 'carout' && session.spot_id) {
+      this.db.run('UPDATE spots SET occupied = 0 WHERE id = :id', { ':id': session.spot_id });
     }
   }
 }

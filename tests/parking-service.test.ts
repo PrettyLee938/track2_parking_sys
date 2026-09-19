@@ -18,7 +18,7 @@ describe('parking arrival controller', () => {
     expect(session.status).toBe('entry-pending');
     expect((db.get<{ reserved: number }>('SELECT reserved FROM spots WHERE id = :id', { ':id': 'E-1' }))?.reserved).toBe(0);
     expect(gateway.commands[0]?.kind).toBe('car.goto');
-    parking.applyEvent('car_spot_action', { Plate: 'ABC-123', Destination: 'E-1' });
+    parking.applyEvent('car_spot_action', { EventClass: 'car_spot_action', CarPlateNumber: 'ABC-123', SpotName: 'E-1', SpotType: 'Park', Direction: 'CarIn' });
     expect((parking.getSession(session.id) as { status: string }).status).toBe('parked');
     expect((db.get<{ reserved: number }>('SELECT reserved FROM spots WHERE id = :id', { ':id': 'E-1' }))?.reserved).toBe(0);
   });

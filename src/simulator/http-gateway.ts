@@ -1,12 +1,53 @@
+import { randomUUID } from 'node:crypto';
 import type { Config } from '../config.js';
 import type { SimulatorCommand, SimulatorSnapshot, SpotCandidate } from '../domain/types.js';
 import type { CommandAcceptance, GatewayHealth, SimulatorGateway } from './contracts.js';
 import { WebhookBoundary } from './webhook-boundary.js';
 
 type Fetcher = typeof fetch;
+type Json = Record<string, unknown>;
+
+const value = (row: Json, ...keys: string[]) => keys.map((key) => row[key]).find((item) => item !== undefined && item !== null);
+const bool = (item: unknown) => item === true || item === 1 || item === '1' || String(item).toLowerCase() === 'true';
+
+function normalizeSpot(row: Json, rank: number): SpotCandidate | undefined {
+  const purpose = String(value(row, 'purpose', 'Purpose') || '').toLowerCase();
+  if (purpose !== 'park') return undefined;
+  const rawType = String(value(row, 'parkingForCarType', 'type', 'Type') || 'Any').toLowerCase();
+  const type = rawType === 'electric' ? 'electric' : rawType === 'accessible' ? 'accessible' : 'any';
+  const detectedCars = value(row, 'detectedCars', 'DetectedCars');
+  return {
+    id: String(value(row, 'name', 'Name', 'id', 'Id') || `spot-${rank}`),
+    zoneId: String(value(row, 'zoneParent', 'ZoneParent') || ''),
+    type,
+    accessible: type === 'accessible' || bool(value(row, 'accessible', 'Accessible')),
+    occupied: Array.isArray(detectedCars) ? detectedCars.length > 0 : bool(value(row, 'occupied', 'Occupied')),
+    reserved: bool(value(row, 'reserved', 'Reserved')),
+    broken: bool(value(row, 'broken', 'Broken')),
+    underMaintenance: bool(value(row, 'isUnderMaintenance', 'underMaintenance', 'UnderMaintenance')),
+    reachable: value(row, 'reachable', 'Reachable') === undefined ? true : bool(value(row, 'reachable', 'Reachable')),
+    zoneSafe: value(row, 'zoneSafe', 'ZoneSafe') === undefined ? true : bool(value(row, 'zoneSafe', 'ZoneSafe')),
+    rank
+  };
+}
+
+function normalizeDevices(rows: Json[], kind: string) {
+  return rows.map((row) => {
+    const broken = bool(value(row, 'broken', 'Broken'));
+    const underMaintenance = bool(value(row, 'isUnderMaintenance', 'underMaintenance', 'UnderMaintenance'));
+    return {
+      ...row,
+      id: String(value(row, 'name', 'Name', 'id', 'Id') || randomUUID()),
+      kind,
+      zoneId: value(row, 'zoneParent', 'ZoneParent', 'zoneId', 'ZoneId') || null,
+      status: broken ? 'broken' : underMaintenance ? 'under-maintenance' : value(row, 'isOn', 'IsOn') !== undefined ? (bool(value(row, 'isOn', 'IsOn')) ? 'on' : 'off') : String(value(row, 'state', 'State') || 'healthy')
+    };
+  });
+}
 
 export class HttpSimulatorGateway implements SimulatorGateway {
   private token: string | undefined;
+  private readonly fallbackRunId = `local-${randomUUID()}`;
   private discoveryWarnings: string[] = [];
   private state: GatewayHealth = { connected: false, runId: undefined, discoveryComplete: false, lastError: undefined, checkedAt: undefined };
   private readonly boundary = new WebhookBoundary();
@@ -15,12 +56,14 @@ export class HttpSimulatorGateway implements SimulatorGateway {
 
   private async request<T>(path: string, init: RequestInit = {}, retry = true): Promise<T> {
     const headers = new Headers(init.headers);
-    headers.set('content-type', 'application/json');
+    if (init.body !== undefined) headers.set('content-type', 'application/json');
     if (this.token) headers.set('authorization', `Bearer ${this.token}`);
     const response = await this.fetcher(`${this.config.simulatorBaseUrl}${path}`, { ...init, headers });
     if (response.status === 401 && retry && this.token) { this.token = undefined; await this.login(); return this.request(path, init, false); }
     if (!response.ok) throw new Error(`simulator-http-${response.status}`);
-    return response.status === 204 ? (undefined as T) : response.json() as Promise<T>;
+    if (response.status === 204) return undefined as T;
+    const body = await response.text();
+    return (body ? JSON.parse(body) : undefined) as T;
   }
 
   async login() {
@@ -39,11 +82,19 @@ export class HttpSimulatorGateway implements SimulatorGateway {
   }
 
   private async optionalList<T>(path: string): Promise<T[]> {
-    try { return await this.list<T>(path); }
+    return this.optional(path, () => this.list<T>(path), []);
+  }
+
+  private async optionalObject(path: string): Promise<Json> {
+    return this.optional(path, () => this.request<Json>(path), {});
+  }
+
+  private async optional<T>(path: string, request: () => Promise<T>, fallback: T): Promise<T> {
+    try { return await request(); }
     catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (!message.endsWith('404')) this.discoveryWarnings.push(`${path}:${message}`);
-      return [];
+      return fallback;
     }
   }
 
@@ -51,21 +102,25 @@ export class HttpSimulatorGateway implements SimulatorGateway {
     try {
       if (!this.token) await this.login();
       this.discoveryWarnings = [];
-      const [spots, barriers, lights, fans, alarms, zones, topology] = await Promise.all([
-        this.list<SpotCandidate>('/api/v1/parking-spots'),
-        this.optionalList<Record<string, unknown>>('/api/v1/barriers'),
-        this.optionalList<Record<string, unknown>>('/api/v1/lights'),
-        this.optionalList<Record<string, unknown>>('/api/v1/fans'),
-        this.optionalList<Record<string, unknown>>('/api/v1/alarms'),
-        this.optionalList<Record<string, unknown>>('/api/v1/zones'),
-        this.optionalList<Record<string, unknown>>('/api/v1/topology')
+      const [rawSpots, rawBarriers, rawLights, rawFans, rawAlarms, zones, status] = await Promise.all([
+        this.list<Json>('/api/v1/list-parking-spots'),
+        this.optionalList<Json>('/api/v1/list-barriers'),
+        this.optionalList<Json>('/api/v1/list-lights'),
+        this.optionalList<Json>('/api/v1/list-exhaust-fans'),
+        this.optionalList<Json>('/api/v1/list-alarms'),
+        this.optionalList<Json>('/api/v1/list-zones'),
+        this.optionalObject('/api/v1/status')
       ]);
-      const status = await this.status();
-      const runId = String(status?.runId || status?.RunId || 'unknown-run');
-      if (runId === 'unknown-run') throw new Error('simulator-run-unknown');
       if (this.discoveryWarnings.length) throw new Error(`simulator-discovery-incomplete:${this.discoveryWarnings.join(',')}`);
-      const components = [...barriers, ...lights, ...fans, ...alarms];
-      const snapshot = { runId, levelId: String(status?.levelId || status?.LevelId || 'lvl1'), spots, components, zones, barriers, lights, fans, alarms, topology };
+      const spots = rawSpots.map(normalizeSpot).filter((spot): spot is SpotCandidate => Boolean(spot));
+      const barriers = normalizeDevices(rawBarriers, 'barrier-gate');
+      const lights = normalizeDevices(rawLights, 'light');
+      const fans = normalizeDevices(rawFans, 'exhaust-fan');
+      const alarms = normalizeDevices(rawAlarms, 'alarm');
+      const runId = String(value(status, 'runId', 'RunId') || this.fallbackRunId);
+      const levelId = String(value(status, 'levelId', 'LevelId', 'level', 'Level') || 'lvl1');
+      const snapshot = { runId, levelId, spots, components: [], zones, barriers, lights, fans, alarms, topology: [] };
+      this.boundary.setRunId(runId);
       this.state = { connected: true, runId, discoveryComplete: true, lastError: undefined, checkedAt: new Date().toISOString() };
       return snapshot;
     } catch (error) {
@@ -75,13 +130,11 @@ export class HttpSimulatorGateway implements SimulatorGateway {
     }
   }
 
-  private async status() { return this.request<Record<string, unknown>>('/api/v1/status'); }
-
   async send(command: SimulatorCommand): Promise<CommandAcceptance> {
     try {
       if (!this.token) await this.login();
       const target = command.target.startsWith('/') ? command.target : `/api/v1/${command.target}`;
-      const result = await this.request<{ id?: string }>(target, { method: 'POST', body: JSON.stringify(command.payload) });
+      const result = await this.request<{ id?: string }>(target, { method: 'POST' });
       return { accepted: true, outcome: 'accepted', externalId: result?.id, error: undefined };
     } catch (error) {
       const lastError = error instanceof Error ? error.message : String(error);

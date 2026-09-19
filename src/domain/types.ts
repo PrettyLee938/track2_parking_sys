@@ -5,6 +5,7 @@ export type RunStatus = 'active' | 'reconciling' | 'ambiguous' | 'closed';
 
 export interface SpotCandidate {
   id: string;
+  zoneId?: string;
   type: 'any' | 'electric' | 'accessible';
   accessible: boolean;
   occupied: boolean;

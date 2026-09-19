@@ -42,4 +42,11 @@ describe('billing and departure', () => {
     expect(override.status).toBe('active');
     expect((await payments.requestDeparture(session.id)).status).toBe('departure-pending');
   });
+
+  it('maps a simulator payment webhook by plate and decimal amount', async () => {
+    const { payments, session, db } = await fixture();
+    await payments.createInvoice(session.id, { durationMinutes: 60, parkingRateCentsPerHour: 100, electricityKwh: 0, electricityRateCentsPerKwh: 40 });
+    await payments.applyEvent('payment_made', { EventClass: 'payment_made', CarPlateNumber: 'ABC-123', Amount: '1.00', EventId: 'payment-1' });
+    expect((db.get<{ status: string }>('SELECT status FROM payments WHERE id = :id', { ':id': 'payment-1' }))?.status).toBe('valid');
+  });
 });

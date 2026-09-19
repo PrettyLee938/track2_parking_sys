@@ -30,4 +30,15 @@ describe('equipment and environment controller', () => {
     await service.applyEvent({ type: 'carbon_monoxide_event', payload: { ZoneId: 'z1', CoLevel: 80 } });
     await expect(service.setFan('fan-1', false)).rejects.toThrow('fan-required-for-co');
   });
+
+  it('maps gate state evidence and commands to the simulator API', async () => {
+    const db = new Database(':memory:');
+    const gateway = new FixtureGateway({ runId: 'run-1' }); await gateway.login();
+    const audit = new AuditService(db);
+    const service = new EquipmentService(db, new CommandService(db, gateway, audit), audit);
+    db.run("INSERT INTO meta (key, value) VALUES ('run_id', 'run-1'), ('run_status', 'active')");
+    await service.applyEvent({ type: 'gate_action', payload: { Name: 'gate0', Action: 'Open' } });
+    await service.setGate('gate0', 'close');
+    expect(gateway.commands[0]?.target).toBe('/api/v1/barrier-gates/gate0/close');
+  });
 });
