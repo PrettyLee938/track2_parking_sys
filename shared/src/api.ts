@@ -275,19 +275,28 @@ export interface MaintenanceJobView {
 
 export interface EnvironmentZoneView {
   zone: string;
+  fans_on: number;
+  fans: number;
+  lights_on: number;
+  lights: number;
   co: number | null;
   risk: string | null;
-  fresh_at: string | null;
-  source_event_id?: string | null;
-  restricted: boolean;
-  ventilation: "off" | "running" | "recovery_pending" | "unknown";
-  moving: number;
-  nighttime: boolean | null;
+  forced: boolean;
+  want: boolean;
 }
+export interface EnvironmentLightView {
+  on: number;
+  total: number;
+  mode: "auto" | "always" | "never";
+  detail: "route" | "group";
+  night: boolean;
+  hour: number | null;
+  reason: string;
+}
+/** The snapshot emitted by the Level 2 CO/fan/light subsystem. */
 export interface EnvironmentSnapshot {
-  calendar_time: string | null;
-  calendar_source: "event_timestamp" | "system_clock" | "admin_anchor" | "unknown";
-  calendar_confidence: "calibrated" | "provisional" | "unknown";
+  polls: number;
+  lights: EnvironmentLightView;
   zones: EnvironmentZoneView[];
 }
 

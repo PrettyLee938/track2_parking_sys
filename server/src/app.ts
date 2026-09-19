@@ -344,6 +344,13 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
     return reply.code(result.ok ? 200 : 409).send(result);
   };
 
+  app.post<{ Params: { plate: string } }>("/api/control/cars/:plate/reconcile", operator, async (req, reply) => {
+    const body = jsonBody<{ minutes?: number }>(req);
+    if (!body || !Number.isInteger(body.minutes)) return err(reply, 400, "minutes must be an integer");
+    return control(reply, () => controller.exclusive(() => controller.manualReconcileCar(decodeURIComponent(req.params.plate), body.minutes!, req.user!.username)),
+      { actor: req.user!.username, action: "car.manual_reconcile", target: decodeURIComponent(req.params.plate), permission: "reconcile" });
+  });
+
   app.post<{ Params: { name: string; action: string } }>("/api/control/gates/:name/:action", operator, async (req, reply) => {
     const action = req.params.action as GateAction;
     if (!GATE_ACTIONS.includes(action)) return err(reply, 400, `action must be one of ${GATE_ACTIONS.join(", ")}`);

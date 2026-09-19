@@ -45,7 +45,7 @@ const schema = z.object({
   //   lenient - signed or unsigned, never a wrong signature (Level 1 sends Signature=null)
   //   monitor - all of them, status only recorded: to check how a new level signs
   //             (npm run report:level -w server) before switching to strict
-  signatureMode: z.enum(["strict", "lenient", "monitor"]).default("lenient"),
+  signatureMode: z.enum(["strict", "lenient", "monitor"]).default("strict"),
   /** Profile used by the route layer to apply Level 2 ingress policy automatically. */
   levelProfile: z.enum(["auto", "level1", "level2", "level3"]).default("auto"),
   /** Level 2 webhooks are expected to arrive from the local simulator process. */

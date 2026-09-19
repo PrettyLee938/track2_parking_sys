@@ -238,11 +238,19 @@ export class ComponentRegistry implements Subsystem {
     if (!due && (urgent || this.demand(p))) return; // well worn but in demand: use it a little longer
     if (engine.clock.now() < p.retryAfterG) return;
     p.waiting = this.inUse(p);
-    if (p.waiting) return;
+    if (p.waiting) {
+      this.engine.store.createMaintenanceJob({ kind: p.kind, name: p.name, zone: p.zone, status: "waiting_for_clearance",
+        reason: `preventive maintenance waiting: ${p.waiting}`, evidence: { uses: p.uses, limit } });
+      return;
+    }
     const send = this.repairCommand(p);
     if (!send) return;
+    this.engine.store.createMaintenanceJob({ kind: p.kind, name: p.name, zone: p.zone, status: "requested",
+      reason: due ? "preventive maintenance due before next use" : "preventive maintenance while idle",
+      evidence: { uses: p.uses, limit } });
     if (await engine.cmd("repair", send, [p.name])) {
       this.markMaintenance(p);
+      this.engine.store.updateMaintenanceJob(p.kind, p.name, "in_progress", { uses: p.uses, limit });
       p.blockedSinceG = null;
       this.record(p, "preventive_repair", null, `${Math.round(p.uses)} of ~${limit} uses${due ? "" : ", while idle"}`);
       engine.note("info", `preventive repair of ${p.kind} ${p.name} (${Math.round(p.uses)}/${limit} uses)`);
@@ -250,6 +258,7 @@ export class ComponentRegistry implements Subsystem {
       // The simulator refused: do not hold the part hostage to a repair that will not come.
       p.retryAfterG = engine.clock.now() + engine.cfg.repairRetryGameS;
       p.useAnyway = true;
+      this.engine.store.updateMaintenanceJob(p.kind, p.name, "failed", { reason: "preventive repair refused" });
       this.record(p, "repair_failed", null, "preventive repair refused - using it until it breaks");
       engine.note("error", `preventive repair of ${p.kind} ${p.name} refused - using it until it breaks`);
     }
@@ -306,6 +315,7 @@ export class ComponentRegistry implements Subsystem {
     p.lastFixedAt = e.ServerDateTime ?? new Date().toISOString();
     this.save(p);
     this.record(p, "fixed", Number(e.RepairCost) || null, null);
+    this.engine.store.updateMaintenanceJob(p.kind, p.name, "completed", { repair_cost: Number(e.RepairCost) || 0 });
     await this.engine.resume();
   }
 
@@ -320,18 +330,26 @@ export class ComponentRegistry implements Subsystem {
     const now = engine.clock.now();
     if (now < p.retryAfterG) return;
     p.waiting = this.inUse(p);
-    if (p.waiting) return;
+    if (p.waiting) {
+      this.engine.store.createMaintenanceJob({ kind: p.kind, name: p.name, zone: p.zone, status: "waiting_for_clearance",
+        reason: `repair waiting: ${p.waiting}`, evidence: { uses: p.uses, breakdowns: p.breakdowns } });
+      return;
+    }
     const send = this.repairCommand(p);
     if (!send) {
       p.waiting = "the simulator has no repair command for it";
       return;
     }
+    this.engine.store.createMaintenanceJob({ kind: p.kind, name: p.name, zone: p.zone, status: "requested",
+      reason: "automatic repair after component failure", evidence: { uses: p.uses, breakdowns: p.breakdowns } });
     if (await engine.cmd("repair", send, [p.name])) {
       this.markMaintenance(p);
+      this.engine.store.updateMaintenanceJob(p.kind, p.name, "in_progress", { uses: p.uses });
       this.record(p, "repair_sent", null, "automatic, as soon as it was free");
       engine.note("warn", `repairing broken ${p.kind} ${p.name}`);
     } else {
       p.retryAfterG = now + engine.cfg.repairRetryGameS;
+      this.engine.store.updateMaintenanceJob(p.kind, p.name, "failed", { reason: "automatic repair command failed" });
       this.record(p, "repair_failed", null, `retrying in ${engine.cfg.repairRetryGameS} game-s`);
     }
   }
@@ -340,7 +358,10 @@ export class ComponentRegistry implements Subsystem {
   repairStarted(kind: ComponentKind, name: string, actor: string, preventive = false): void {
     const p = this.get(kind, name);
     if (!p) return;
+    this.engine.store.createMaintenanceJob({ kind, name, zone: p.zone, status: "requested",
+      reason: preventive ? "operator preventive maintenance" : "operator repair", actor });
     this.markMaintenance(p);
+    this.engine.store.updateMaintenanceJob(kind, name, "in_progress", { actor });
     this.record(p, preventive ? "preventive_repair" : "repair_sent", null, `by ${actor}`);
   }
 

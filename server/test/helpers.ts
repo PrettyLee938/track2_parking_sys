@@ -124,7 +124,9 @@ export const at = (realS: number) => new Date(realS * 1000).toISOString();
 export const silentLog: Logger = { info() {}, warn() {}, error() {} };
 
 export function testSettings(overrides: Partial<Settings> = {}): Settings {
-  return loadSettings({}, overrides);
+  // Unit/integration fixtures model the unsigned Level 1 simulator. Production
+  // Level 2 defaults are strict; tests opt into the legacy fixture explicitly.
+  return loadSettings({}, { signatureMode: "lenient", levelProfile: "level1", ...overrides });
 }
 
 export async function make(opts: { sim?: FakeSim; topo?: Topology; topologies?: Topology[]; cfg?: Partial<Settings> } = {}) {

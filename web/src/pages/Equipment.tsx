@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import type { ComponentView, StateSnapshot } from "@gpa/shared";
+import type { ComponentView, EnvironmentSnapshot, StateSnapshot } from "@gpa/shared";
 import { Badge, Button, Card, Empty, Tile, useCommand } from "../components/ui";
 import { api } from "../lib/api";
 import { useAuth } from "../lib/auth";
@@ -7,33 +7,13 @@ import { fmtDateTime, fmtInt } from "../lib/format";
 
 const healthTone = (health: ComponentView["health"]) => health === "ok" ? "good" : health === "broken" ? "critical" : "warning";
 
-interface EnvironmentZone {
-  zone: string;
-  co: number | null;
-  risk?: string | null;
-  ventilation?: string;
-  moving?: number;
-  restricted?: boolean;
-  forced?: boolean;
-  want?: boolean;
-  fans_on?: number;
-  fans?: number;
-  lights_on?: number;
-  lights?: number;
-}
-
-interface EnvironmentView {
-  zones: EnvironmentZone[];
-  lights?: { on: number; total: number; mode: string; detail: string; night: boolean; hour: number | null; reason: string };
-}
-
 export function Equipment({ s }: { s: StateSnapshot }) {
   const { can } = useAuth();
   const { busy, run } = useCommand();
   const [jobs, setJobs] = useState<Awaited<ReturnType<typeof api.maintenance>>["items"]>([]);
   const load = () => api.maintenance(100).then((r) => setJobs(r.items)).catch(() => undefined);
   useEffect(() => { load(); const id = setInterval(load, 5000); return () => clearInterval(id); }, []);
-  const environment = (s.environment ?? s.subsystems?.environment) as EnvironmentView | undefined;
+  const environment: EnvironmentSnapshot | undefined = s.environment;
   const zones = environment?.zones ?? [];
   const lighting = environment?.lights;
   const byKind = useMemo(() => {
@@ -62,8 +42,8 @@ export function Equipment({ s }: { s: StateSnapshot }) {
               <tbody>{zones.map((z) => (
                 <tr key={z.zone}>
                   <td><b>{z.zone}</b></td><td className="right">{z.co === null ? "-" : `${z.co}`}</td><td>{z.risk ?? "-"}</td>
-                  <td>{z.ventilation ?? (z.want ? "running" : "off")}</td><td className="right">{z.moving ?? "-"}</td>
-                  <td>{z.restricted || z.forced ? <Badge tone="critical">Admission restricted</Badge> : <Badge tone="good">Operating</Badge>}</td>
+                  <td>{z.want ? "running" : "off"}</td><td className="right">{z.lights_on + z.fans_on ? "active" : "idle"}</td>
+                  <td>{z.forced ? <Badge tone="critical">CO recovery</Badge> : <Badge tone="good">Operating</Badge>}</td>
                 </tr>
               ))}</tbody>
             </table>
