@@ -1,0 +1,17 @@
+{
+  "name": "grand-park-auto-control-api",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Parking management REST API and webhook processor for the Grand Park Auto simulator",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "start": "node src/main.cjs",
+    "test": "node --test",
+    "check": "node --check src/main.cjs && node --check src/server.cjs && node --check src/database.cjs",
+    "level1": "node scripts/run-level1.cjs",
+    "import:legacy": "node scripts/import-legacy-webhooks.cjs"
+  }
+}

@@ -1,0 +1,6 @@
+logs/
+ParkingSimulator-win-x64/
+data/
+tmp/
+.env
+postman
