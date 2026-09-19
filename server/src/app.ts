@@ -69,7 +69,7 @@ const isLoopback = (ip: string) => ip === "127.0.0.1" || ip === "::1" || ip === 
 
 export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
   const { cfg, controller, store, auth } = deps;
-  const intake = deps.intake ?? new Intake(cfg.requireSignature);
+  const intake = deps.intake ?? new Intake(cfg.signatureMode);
   const recent: EventRecord[] = [];
 
   // Fastify logs every request at info level; one line per webhook is noise.

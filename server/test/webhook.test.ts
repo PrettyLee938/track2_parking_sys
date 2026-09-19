@@ -27,15 +27,29 @@ describe("signature", () => {
 
 describe("intake", () => {
   it("drops duplicates and flags sequence gaps", () => {
-    const intake = new Intake(false);
+    const intake = new Intake("lenient");
     expect(intake.check({ EventClass: "x", EventId: "1", SequenceId: "10" }).accept).toBe(true);
     expect(intake.check({ EventClass: "x", EventId: "1", SequenceId: "10" })).toMatchObject({ accept: false, duplicate: true, seqNote: "" });
     expect(intake.check({ EventClass: "x", EventId: "2", SequenceId: "12" }).seqNote).toBe("expected 11, got 12");
   });
 
-  it("drops unsigned events once signatures are required", () => {
-    expect(new Intake(true).check({ EventClass: "x", EventId: "1", Signature: null }).accept).toBe(false);
-    expect(new Intake(false).check({ EventClass: "x", EventId: "1", Signature: null }).accept).toBe(true);
+  it("acts on signed, unsigned and badly signed events according to the signature mode", () => {
+    const event = (id: string) => ({ ...parseRaw(SPEC_EXAMPLE), EventId: id });
+    const signed = (id: string) => ({ ...event(id), Signature: computeSignature(event(id)) });
+    const cases = [
+      ["strict", { valid: true, unsigned: false, invalid: false }],
+      ["lenient", { valid: true, unsigned: true, invalid: false }],
+      ["monitor", { valid: true, unsigned: true, invalid: true }],
+    ] as const;
+    for (const [mode, expected] of cases) {
+      const intake = new Intake(mode);
+      expect({
+        valid: intake.check(signed("a")).accept,
+        unsigned: intake.check({ ...event("b"), Signature: null }).accept,
+        invalid: intake.check({ ...event("c"), Signature: "0".repeat(32) }).accept,
+      }, mode).toEqual(expected);
+      expect(intake.stats).toMatchObject({ sig_valid: 1, sig_unsigned: 1, sig_invalid: 1 });
+    }
   });
 });
 
