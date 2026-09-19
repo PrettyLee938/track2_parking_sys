@@ -1,0 +1,27 @@
+{
+  "name": "lvl1",
+  "entry_lanes": [
+    {
+      "spot": "ENTRY1",
+      "gate": "gateA",
+      "zone": "ZONE1"
+    }
+  ],
+  "exit_lanes": [
+    {
+      "spot": "EXIT_EXIT",
+      "gate": "gateB",
+      "zone": "ZONE1"
+    }
+  ],
+  "notes": {
+    "generated_from": "lvl1.json",
+    "gate_distance": {
+      "ENTRY1": 178.4,
+      "EXIT_EXIT": 113.4
+    },
+    "gates_not_on_a_lane": [
+      "gateC"
+    ]
+  }
+}

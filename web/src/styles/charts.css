@@ -1,0 +1,31 @@
+﻿/* ---------- charts ---------- */
+.chart { position: relative; width: 100%; }
+.chart svg { display: block; overflow: visible; }
+.chart .grid { stroke: var(--grid); stroke-width: 1; }
+.chart .axis { stroke: var(--axis); stroke-width: 1; }
+.chart .reference { stroke: var(--axis); stroke-width: 1; }
+.chart .crosshair { stroke: var(--muted); stroke-width: 1; }
+.chart .tick { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.chart .value-label { fill: var(--ink); font-size: 12px; font-weight: 600; }
+.chart .ring { stroke: var(--surface); stroke-width: 2; }
+.tooltip { position: absolute; pointer-events: none; background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+  padding: 8px 10px; font-size: 12px; box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12); min-width: 150px; z-index: 5; }
+.tt-title { font-weight: 600; margin-bottom: 4px; }
+.tt-row { display: flex; align-items: center; gap: 6px; }
+.tt-row b { margin-left: auto; font-variant-numeric: tabular-nums; }
+.legend { list-style: none; display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 0 0 8px; padding: 0; font-size: 12px; color: var(--ink-2); }
+.legend li { display: inline-flex; align-items: center; gap: 6px; }
+.key { display: inline-block; flex: none; }
+.key.box { width: 10px; height: 10px; border-radius: 3px; }
+.key.line { width: 14px; height: 2px; border-radius: 1px; }
+.stackbar { display: flex; gap: 2px; height: 12px; border-radius: 4px; overflow: hidden; background: var(--surface); }
+.stackbar span { display: block; height: 100%; }
+.zone-row { margin-bottom: 12px; }
+.zone-head { display: flex; justify-content: space-between; margin-bottom: 4px; }
+.barlist { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.barlist li { display: grid; grid-template-columns: minmax(90px, 40%) 1fr auto; align-items: center; gap: 10px; font-size: 13px; }
+.bl-label { overflow-wrap: anywhere; }
+.bl-track { height: 10px; }
+.bl-fill { display: block; height: 100%; border-radius: 0 4px 4px 0; min-width: 2px; }
+.bl-value { font-variant-numeric: tabular-nums; white-space: nowrap; text-align: right; }
+

@@ -1,26 +1,26 @@
 {
-  "name": "track2-parking-system",
+  "name": "grand-park-control",
   "private": true,
   "type": "module",
+  "workspaces": [
+    "shared",
+    "server",
+    "web"
+  ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "dev": "node --env-file-if-exists=.env --import tsx src/server.ts",
-    "start": "node --env-file-if-exists=.env dist/server.js",
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "check:lines": "node scripts/check-lines.mjs",
-    "check": "npm run build && npm run check:lines && npm test"
+    "dev": "npm run dev -w server",
+    "dev:watch": "npm run dev:watch -w server",
+    "dev:web": "npm run dev -w web",
+    "start": "npm run start -w server",
+    "build": "npm run build -w web",
+    "test": "npm test -w server",
+    "lint": "node tools/lint.mjs",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "topology": "npm run topology -w server --",
+    "smoke": "npm run smoke -w server --",
+    "single-car": "npm run single-car -w server --"
   },
   "engines": {
-    "node": ">=24"
-  },
-  "dependencies": {
-    "fastify": "^5.6.1"
-  },
-  "devDependencies": {
-    "@types/node": "^24.5.2",
-    "tsx": "^4.20.5",
-    "typescript": "^5.9.2",
-    "vitest": "^3.2.4"
+    "node": ">=22"
   }
 }

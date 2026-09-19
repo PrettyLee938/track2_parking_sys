@@ -1,12 +1,16 @@
 node_modules/
 dist/
 .env
-data/*.db
-data/*.db-shm
-data/*.db-wal
-coverage/
-.agents/
-.scratch/
-tmp/
-skills-lock.json
-src/ParkingSimulator-win-x64/
+*.log
+
+# leftovers from the Python prototype (branch miro_testing)
+.venv/
+__pycache__/
+*.jsonl
+
+# runtime data (SQLite database, logs)
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm

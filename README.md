@@ -1,31 +1,174 @@
-# Track 2 Grand Park Auto parking system
+# track2_parking_sys
 
-This repository contains the backend baseline for the Level 1 Grand Park Auto challenge. It is a TypeScript modular monolith with a Fastify HTTP boundary, SQLite persistence through Node 24’s SQLite API, and one `SimulatorGateway` seam for live or fixture-backed simulator access.
+Grand Park Auto control centre (IoT hackathon, Track 2).
+TypeScript · Fastify · React/Vite · SQLite, as an npm workspace.
 
-## Run locally
+> The Python prototype this was ported from lives on branch `miro_testing`.
 
-Use Node.js 24 or newer. Configure the simulator credentials and the first Admin credentials in `.env`, then run the backend before starting the simulator:
+## Setup
 
-```bash
+Requires Node 22+ (developed on 24).
+
+```
 npm install
-npm run dev
+copy .env.example .env      (optional - only to override defaults)
 ```
 
-The backend listens on `http://127.0.0.1:3000` by default. Run the Windows simulator on port `9898` and configure its webhook URL as `http://127.0.0.1:3000/webhooks/simulator`. Start the backend before starting the simulator so the webhook receiver is ready. Keep credentials and the SQLite database outside Git. If the backend was previously offline, it safely baselines missed car events when no parking sessions or commands exist; active work remains protected behind reconciliation.
+In the simulator's `settings/settings.json` set:
 
-Useful checks are:
-
-```bash
-npm run check
-npm test
+```
+"WebhookUrl": "http://127.0.0.1:8000/webhook"
 ```
 
-The check includes TypeScript compilation, the authored source/test 200-line limit, and the full Vitest suite.
+Use `127.0.0.1`, not `localhost`: on Windows `localhost` adds ~2 s to every call.
+The simulator only reads its settings at startup.
 
-## Backend shape
+Point the server at that same settings folder in your `.env`, so it knows the game speed
+from the first car:
 
-Application code is grouped by responsibility: `domain` contains deterministic parking and billing policies, `simulator` contains the live and fixture gateway adapters, `db` contains migrations and SQLite access, `auth` contains application identity, `services` contain use-case controllers, and `api` contains the HTTP routes. Tests observe the public service or HTTP boundary; they do not mock internal collaborators.
+```
+GPA_SIM_LEVELS_DIR=C:/path/to/ParkingSimulator-win-x64/settings
+```
 
-The backend distinguishes simulator command acceptance from physical confirmation. Signed webhooks are deduplicated by event identity, sequence gaps remain visible, commands are durable, and reconnect reconciliation must complete before new actions resume. Admin unpaid-release authorization remains an auditable business exception and never fabricates payment or bypasses physical restrictions.
+Choose the first admin's password before the first start (otherwise one is generated and
+printed once in the server log):
 
-Jev is intentionally not part of the baseline control loop. The parking system remains usable with Jev disabled and without internet access.
+```
+GPA_ADMIN_PASSWORD=something-long
+```
+
+## Run
+
+1. Start the server first, so no arriving car goes unseen: `npm run dev`
+2. Start a level in the simulator. The server detects which level is loaded and picks
+   the matching `topology/*.json`; restarts and level switches are picked up automatically.
+3. Dashboard: `npm run dev:web` and open http://localhost:5173 - or `npm run build` once and
+   the server serves it at http://127.0.0.1:8000 itself.
+
+> **Never run the live server in watch mode.** `npm run dev:watch` restarts the server on
+> every source change; each restart during a run loses the webhooks sent while it is down.
+> A restart in the middle of a run is survivable (the server replays its recent events *and*
+> commands), but it is not free. Use `npm run dev` / `npm start` for simulator runs.
+
+Forgot the admin password? `npm run user:password -w server -- admin "new password"`.
+
+## Dashboard & roles
+
+Sign in with a dashboard account (the admin creates the others under **Admin**).
+
+| | Operator | Admin |
+|---|:-:|:-:|
+| **Overview** - occupancy, zones, gates, entry queue, cars inside, live activity | ✓ | ✓ |
+| **Operations** - hold a gate open/closed, return it to automatic, start gate/spot maintenance | ✓ | ✓ |
+| **Logs** - search visits (arrival, parking time, departure, charges), simulator events, commands | ✓ | ✓ |
+| **Statistics** - traffic, revenue, outcomes, stay lengths, spot usage, penalties, gate cycles, command health | ✓ | ✓ |
+| Close / reopen an entrance | | ✓ |
+| **Admin** - users (create, role, disable, reset password), resync, audit trail, configuration | | ✓ |
+
+- Every permission is enforced by the server; the dashboard only hides what a role cannot use.
+- Manual commands the simulator would penalise are refused with the reason: operating a
+  broken gate, repairing an occupied spot or a gate a car is passing.
+- A held gate stays as the operator left it until **Automatic** hands it back.
+- Every manual command is stored with who sent it (Admin → Audit trail).
+- Sessions: HttpOnly, SameSite=Strict cookie; only a hash of the token is stored; passwords
+  are scrypt-hashed; repeated failed sign-ins are throttled. Changing a user's password,
+  role or disabling them signs them out everywhere.
+
+| API | Role |
+|---|---|
+| `POST /api/auth/login`, `/logout`, `GET /api/auth/me` | - |
+| `GET /api/state`, `/api/stream` (server-sent events), `/api/timeseries`, `/api/stats?minutes=` | operator |
+| `GET /api/sessions`, `/api/events`, `/api/actions` (`?plate= &status= &class= &since= &before=`) | operator |
+| `POST /api/control/gates/:name/(open\|close\|auto\|repair)`, `/api/control/spots/:name/repair` | operator |
+| `POST /api/control/entries/:spot/(open\|close)`, `/api/resync`, `GET /api/config`, `/api/users` (+ `POST`, `PATCH /:id`) | admin |
+| `POST /webhook` | public (the simulator) |
+| `/debug/*` | this machine, or an admin |
+
+## Scripts (repo root)
+
+| Command | What |
+|---|---|
+| `npm run dev` | server with reload on change |
+| `npm start` | server |
+| `npm run dev:web` | dashboard dev server (proxies `/api` to the server) |
+| `npm run build` | build the dashboard into `web/dist` |
+| `npm test` | controller, webhook and HTTP tests against a fake simulator |
+| `npm run typecheck` | typecheck every package |
+| `npm run lint` | check source/test file size and structural cleanup invariants |
+| `npm run smoke` | live check: API both ways + webhook delivery (`-- --gates` to cycle a gate) |
+| `npm run single-car` | drive one car by hand (server must run with `GPA_CONTROLLER_ENABLED=false`) |
+| `npm run topology -- --levels-dir "<sim>/settings"` | regenerate `topology/*.json` from the simulator's layouts |
+| `npm run fake-sim -w server` | a stand-in simulator API on :9899 for dashboard work (`GPA_SIM_BASE_URL=http://127.0.0.1:9899/api/v1`) |
+| `npm run report:gates \| report:turnaways \| report:gaps \| report:timeline -w server` | reports from the database |
+| `npm run report:plate -w server -- "ABC 123"` | one plate's full history |
+
+Dashboard chart gallery (no server or sign-in needed): run `npm run dev:web` and open
+http://localhost:5173/gallery.html - every chart rendered from `web/dev-fixtures` (a real run).
+
+## Configuration
+
+All settings are in `server/src/config.ts` (zod schema: typed, validated, with defaults
+and a comment each). Override them in `.env` or as environment variables with the `GPA_`
+prefix, e.g. `GPA_BILLING_ROUNDING=ceil`. See `.env.example`.
+
+Simulator strings (event classes, spot purposes, penalty texts...) are defined once in
+`shared/src/protocol.ts`. Which gate serves which entry/exit is in `topology/*.json`,
+one file per level.
+
+## Layout
+
+| Path | What |
+|---|---|
+| `shared/src/protocol.ts` | every literal the simulator sends or expects, and its payload shapes |
+| `shared/src/api.ts` | compatibility export for HTTP API contracts split by domain |
+| `server/src/controller.ts` | compatibility facade for the parking controller |
+| `server/src/parking/` | parking state, entry/exit flows, gates, billing, recovery, replay, and snapshots |
+| `server/src/topology.ts` | discovers entry/exit lanes and pairs them with gates |
+| `server/src/allocation.ts` | spot allocation strategies (`GPA_ALLOCATION_STRATEGY`) |
+| `server/src/billing.ts` | parking charge rules |
+| `server/src/store.ts` | stable SQLite facade |
+| `server/src/storage/` | SQLite schema, statistics, and user/session persistence |
+| `server/src/webhook.ts` | webhook parsing, signature check, dedupe, sequence tracking |
+| `server/src/simClient.ts` | simulator REST API client |
+| `server/src/app.ts` | Fastify middleware and route wiring |
+| `server/src/routes/` | HTTP routes grouped by responsibility |
+| `server/test/` | Vitest suites grouped by controller behavior and API area |
+| `server/tools/` | live tools (smoke test, single-car diagnostic, topology builder) |
+| `web/` | React dashboard (starter) |
+| `topology/` | one layout file per level |
+| `data/` | runtime: SQLite database (git-ignored) |
+
+The current event order and Level 1 rules are shown in [docs/current-workflow.md](docs/current-workflow.md).
+
+## Simulator behaviour the controller relies on
+
+Learned from live runs; each has coverage in the behavior-focused `server/test/controller.*.test.ts` suites.
+
+- Level 1 webhooks are unsigned (`Signature: null`); the MD5 check is ready for later levels.
+- `detectedCars` in `list-parking-spots` is a count, not a list of plates.
+- Parked cars drive to an exit on their own; we never send `goto exit`.
+- Charging the instant a car reaches the exit is rejected - wait ~1.5 s.
+- The simulator checks the bill against the **planned** minutes, so billing is right at
+  any game speed.
+- Webhook timestamps are wall-clock, but cars, gates and sensors move in game time. Every
+  timer that waits on the simulator (gate close, billing delay, gate/dispatch timeouts,
+  silence detection) is set in **game seconds** (`*_GAME_S`) and converted with the current
+  game speed: `GPA_GAME_SPEED` if set, else learned from completed stays (follows
+  Shift+PgUp), else `GameSpeedMultiplier` from the simulator's `settings.json`, else 1.0.
+  `/api/state` shows it as `time_scale` and `time_scale_source`.
+- From a spot next to the exit, the exit `CarIn` arrives ~0.2 s *before* the spot `CarOut`.
+- An `open` sent while a gate is still closing is silently ignored.
+- The simulator autosaves cars into its `lvl*.json` and reuses plates across restarts.
+- Spots beyond the exit sensor (S15, S30 on Level 1) are reached by driving over it: a car on
+  its way in fires exit CarIn/CarOut before it parks. These are ignored while a car is still
+  driving in.
+- A car sent to an occupied spot is fined *and parks there anyway*, so a spot can hold two
+  cars. Spots track every car in them, and an "occupied spot" penalty marks the spot taken
+  and redirects the car to a free one.
+- Webhooks are at-most-once and can arrive out of order (a Level 1 run: 1 of 3,406 lost,
+  7 reordered), and a simulator restart makes cars vanish without events. Car records
+  whose closing event never arrives are retired: when another car parks in their spot,
+  when they reach an exit, or after a timeout (`GPA_RELEASE_TIMEOUT_GAME_S`,
+  `GPA_PARKED_OVERSTAY_GAME_S`, `GPA_STALE_CAR_GAME_S`). A lost exit event can therefore
+  never hold an exit gate open. Retired records count as `ghosts_retired` and are stored
+  with status `lost`. `npm run report:gaps -w server` shows silences and lost events.

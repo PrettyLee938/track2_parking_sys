@@ -1,0 +1,56 @@
+﻿/* Tokens: the dataviz reference palette (categorical slots validated for light and dark),
+   status colors reserved for state, a one-hue sequential ramp for magnitude. */
+:root {
+  color-scheme: light;
+  --page: #f9f9f7;
+  --surface: #fcfcfb;
+  --surface-2: #f3f2ee;
+  --ink: #0b0b0b;
+  --ink-2: #52514e;
+  --muted: #6f6d68;
+  --grid: #e1e0d9;
+  --axis: #c3c2b7;
+  --border: rgba(11, 11, 11, 0.1);
+  --s1: #2a78d6;
+  --s2: #eb6834;
+  --s1-ink: #fff;       /* text on a --s1 fill */
+  --s2-ink: #0b0b0b;    /* text on a --s2 fill */
+  --free-fill: #e6e5e0;
+  --good: #0ca30c;
+  --good-text: #006300;
+  --warning: #fab219;
+  --warning-text: #8a5a00;
+  --serious: #ec835a;
+  --critical: #d03b3b;
+  --info: #2a78d6;
+  --seq-1: #cde2fb; --seq-2: #9ec5f4; --seq-3: #6da7ec; --seq-4: #3987e5; --seq-5: #1c5cab;
+  --seq-ink-light: #0b0b0b; --seq-ink-dark: #fff;
+  --radius: 10px;
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: var(--ink);
+  background: var(--page);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --page: #0d0d0d;
+    --surface: #1a1a19;
+    --surface-2: #232321;
+    --ink: #fff;
+    --ink-2: #c3c2b7;
+    --muted: #9a988f;
+    --grid: #2c2c2a;
+    --axis: #383835;
+    --border: rgba(255, 255, 255, 0.1);
+    --s1: #3987e5;
+    --s2: #d95926;
+    --s2-ink: #fff;
+    --free-fill: #2e2e2b;
+    --good-text: #0ca30c;
+    --warning-text: #fab219;
+    --info: #3987e5;
+    /* near zero recedes toward the dark surface; busy = bright */
+    --seq-1: #104281; --seq-2: #1c5cab; --seq-3: #2a78d6; --seq-4: #5598e7; --seq-5: #9ec5f4;
+    --seq-ink-light: #fff; --seq-ink-dark: #0b0b0b;
+  }
+}

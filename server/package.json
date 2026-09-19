@@ -1,0 +1,40 @@
+{
+  "name": "@gpa/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx src/main.ts",
+    "dev:watch": "tsx watch src/main.ts",
+    "start": "tsx src/main.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc -p .",
+    "topology": "tsx tools/buildTopology.ts",
+    "smoke": "tsx tools/smokeTest.ts",
+    "single-car": "tsx tools/singleCarTest.ts",
+    "report:timeline": "tsx tools/inspectRun.ts",
+    "report:gates": "tsx tools/gateTimings.ts",
+    "report:turnaways": "tsx tools/turnAways.ts",
+    "report:plate": "tsx tools/plateHistory.ts",
+    "report:gaps": "tsx tools/gaps.ts",
+    "report:penalties": "tsx tools/penalties.ts",
+    "report:window": "tsx tools/window.ts",
+    "user:password": "tsx tools/setPassword.ts",
+    "fake-sim": "tsx tools/fakeSim.ts"
+  },
+  "dependencies": {
+    "@gpa/shared": "^0.1.0",
+    "better-sqlite3": "^13.0.3",
+    "fastify": "^5.12.5",
+    "pino-pretty": "^13.1.3",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/node": "^26.6.2",
+    "tsx": "^4.23.13",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.1"
+  }
+}

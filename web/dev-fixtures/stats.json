@@ -1,0 +1,440 @@
+{
+ "since": "2026-09-19T05:52:32.024Z",
+ "until": "2026-09-19T09:52:32.024Z",
+ "bucket_s": 600,
+ "totals": {
+  "arrivals": 1496,
+  "departures": 1086,
+  "turned_away": 390,
+  "neglected": 0,
+  "lost": 69,
+  "revenue": 4811,
+  "avg_ticket": 4.86,
+  "avg_planned_min": 4.9,
+  "penalties": 28,
+  "fines": 720,
+  "payment_mismatches": 0,
+  "escaped": 46
+ },
+ "buckets": [
+  {
+   "t": "2026-09-19T05:52:32.024Z",
+   "arrivals": 0,
+   "departures": 0,
+   "revenue": 0,
+   "turned_away": 0,
+   "penalties": 0
+  },
+  {
+   "t": "2026-09-19T06:02:32.024Z",
+   "arrivals": 0,
+   "departures": 0,
+   "revenue": 0,
+   "turned_away": 0,
+   "penalties": 0
+  },
+  {
+   "t": "2026-09-19T06:12:32.024Z",
+   "arrivals": 0,
+   "departures": 0,
+   "revenue": 0,
+   "turned_away": 0,
+   "penalties": 0
+  },
+  {
+   "t": "2026-09-19T06:22:32.024Z",
+   "arrivals": 0,
+   "departures": 0,
+   "revenue": 0,
+   "turned_away": 0,
+   "penalties": 0
+  },
+  {
+   "t": "2026-09-19T06:32:32.024Z",
+   "arrivals": 0,
+   "departures": 0,
+   "revenue": 0,
+   "turned_away": 0,
+   "penalties": 0
+  },
+  {
+   "t": "2026-09-19T06:42:32.024Z",
+   "arrivals": 0,
+   "departures": 0,
+   "revenue": 0,
+   "turned_away": 0,
+   "penalties": 0
+  },
+  {
+   "t": "2026-09-19T06:52:32.024Z",
+   "arrivals": 0,
+   "departures": 0,
+   "revenue": 0,
+   "turned_away": 0,
+   "penalties": 0
+  },
+  {
+   "t": "2026-09-19T07:02:32.024Z",
+   "arrivals": 0,
+   "departures": 0,
+   "revenue": 0,
+   "turned_away": 0,
+   "penalties": 0
+  },
+  {
+   "t": "2026-09-19T07:12:32.024Z",
+   "arrivals": 0,
+   "departures": 0,
+   "revenue": 0,
+   "turned_away": 0,
+   "penalties": 0
+  },
+  {
+   "t": "2026-09-19T07:22:32.024Z",
+   "arrivals": 0,
+   "departures": 0,
+   "revenue": 0,
+   "turned_away": 0,
+   "penalties": 0
+  },
+  {
+   "t": "2026-09-19T07:32:32.024Z",
+   "arrivals": 0,
+   "departures": 0,
+   "revenue": 0,
+   "turned_away": 0,
+   "penalties": 0
+  },
+  {
+   "t": "2026-09-19T07:42:32.024Z",
+   "arrivals": 0,
+   "departures": 0,
+   "revenue": 0,
+   "turned_away": 0,
+   "penalties": 0
+  },
+  {
+   "t": "2026-09-19T07:52:32.024Z",
+   "arrivals": 0,
+   "departures": 0,
+   "revenue": 0,
+   "turned_away": 0,
+   "penalties": 0
+  },
+  {
+   "t": "2026-09-19T08:02:32.024Z",
+   "arrivals": 0,
+   "departures": 0,
+   "revenue": 0,
+   "turned_away": 0,
+   "penalties": 0
+  },
+  {
+   "t": "2026-09-19T08:12:32.024Z",
+   "arrivals": 117,
+   "departures": 62,
+   "revenue": 287,
+   "turned_away": 25,
+   "penalties": 0
+  },
+  {
+   "t": "2026-09-19T08:22:32.024Z",
+   "arrivals": 127,
+   "departures": 92,
+   "revenue": 461,
+   "turned_away": 31,
+   "penalties": 7
+  },
+  {
+   "t": "2026-09-19T08:32:32.024Z",
+   "arrivals": 35,
+   "departures": 4,
+   "revenue": 6,
+   "turned_away": 3,
+   "penalties": 0
+  },
+  {
+   "t": "2026-09-19T08:42:32.024Z",
+   "arrivals": 113,
+   "departures": 59,
+   "revenue": 208,
+   "turned_away": 25,
+   "penalties": 0
+  },
+  {
+   "t": "2026-09-19T08:52:32.024Z",
+   "arrivals": 68,
+   "departures": 55,
+   "revenue": 269,
+   "turned_away": 12,
+   "penalties": 0
+  },
+  {
+   "t": "2026-09-19T09:02:32.024Z",
+   "arrivals": 26,
+   "departures": 6,
+   "revenue": 26,
+   "turned_away": 0,
+   "penalties": 1
+  },
+  {
+   "t": "2026-09-19T09:12:32.024Z",
+   "arrivals": 472,
+   "departures": 346,
+   "revenue": 1557,
+   "turned_away": 127,
+   "penalties": 11
+  },
+  {
+   "t": "2026-09-19T09:22:32.024Z",
+   "arrivals": 516,
+   "departures": 452,
+   "revenue": 1934,
+   "turned_away": 167,
+   "penalties": 5
+  },
+  {
+   "t": "2026-09-19T09:32:32.024Z",
+   "arrivals": 22,
+   "departures": 10,
+   "revenue": 63,
+   "turned_away": 0,
+   "penalties": 4
+  },
+  {
+   "t": "2026-09-19T09:42:32.024Z",
+   "arrivals": 0,
+   "departures": 0,
+   "revenue": 0,
+   "turned_away": 0,
+   "penalties": 0
+  }
+ ],
+ "stay_histogram": [
+  {
+   "minutes": 1,
+   "count": 136
+  },
+  {
+   "minutes": 2,
+   "count": 122
+  },
+  {
+   "minutes": 3,
+   "count": 101
+  },
+  {
+   "minutes": 4,
+   "count": 122
+  },
+  {
+   "minutes": 5,
+   "count": 110
+  },
+  {
+   "minutes": 6,
+   "count": 115
+  },
+  {
+   "minutes": 7,
+   "count": 112
+  },
+  {
+   "minutes": 8,
+   "count": 110
+  },
+  {
+   "minutes": 9,
+   "count": 106
+  }
+ ],
+ "spot_usage": [
+  {
+   "spot": "S15",
+   "visits": 58
+  },
+  {
+   "spot": "S30",
+   "visits": 57
+  },
+  {
+   "spot": "S8",
+   "visits": 44
+  },
+  {
+   "spot": "S9",
+   "visits": 43
+  },
+  {
+   "spot": "S17",
+   "visits": 43
+  },
+  {
+   "spot": "S3",
+   "visits": 41
+  },
+  {
+   "spot": "S7",
+   "visits": 41
+  },
+  {
+   "spot": "S20",
+   "visits": 40
+  },
+  {
+   "spot": "S26",
+   "visits": 40
+  },
+  {
+   "spot": "S6",
+   "visits": 38
+  },
+  {
+   "spot": "S21",
+   "visits": 37
+  },
+  {
+   "spot": "S1",
+   "visits": 36
+  },
+  {
+   "spot": "S12",
+   "visits": 36
+  },
+  {
+   "spot": "S13",
+   "visits": 36
+  },
+  {
+   "spot": "S29",
+   "visits": 36
+  },
+  {
+   "spot": "S5",
+   "visits": 35
+  },
+  {
+   "spot": "S2",
+   "visits": 34
+  },
+  {
+   "spot": "S11",
+   "visits": 34
+  },
+  {
+   "spot": "S18",
+   "visits": 34
+  },
+  {
+   "spot": "S14",
+   "visits": 33
+  },
+  {
+   "spot": "S19",
+   "visits": 33
+  },
+  {
+   "spot": "S10",
+   "visits": 32
+  },
+  {
+   "spot": "S23",
+   "visits": 32
+  },
+  {
+   "spot": "S4",
+   "visits": 31
+  },
+  {
+   "spot": "S28",
+   "visits": 31
+  },
+  {
+   "spot": "S25",
+   "visits": 30
+  },
+  {
+   "spot": "S24",
+   "visits": 29
+  },
+  {
+   "spot": "S16",
+   "visits": 28
+  },
+  {
+   "spot": "S22",
+   "visits": 28
+  },
+  {
+   "spot": "S27",
+   "visits": 27
+  }
+ ],
+ "penalties_by_reason": [
+  {
+   "reason": "Car should be charged at the exit.",
+   "count": 11,
+   "fines": 110
+  },
+  {
+   "reason": "Car:(…) attempted to park in an occupied spot:(…).",
+   "count": 6,
+   "fines": 300
+  },
+  {
+   "reason": "Car has already paid for parking.",
+   "count": 5,
+   "fines": 250
+  },
+  {
+   "reason": "Car escaped without paying after parking for some time.",
+   "count": 5,
+   "fines": 50
+  },
+  {
+   "reason": "Car is being charged wrongly with amount: (…). Car type is (…) so charge should be: (…)",
+   "count": 1,
+   "fines": 10
+  }
+ ],
+ "gate_cycles": [
+  {
+   "gate": "gateA",
+   "opens": 820
+  },
+  {
+   "gate": "gateB",
+   "opens": 705
+  }
+ ],
+ "commands": [
+  {
+   "cmd": "goto",
+   "count": 2539,
+   "failed": 0,
+   "avg_ms": 1.8,
+   "p95_ms": 3
+  },
+  {
+   "cmd": "open",
+   "count": 1626,
+   "failed": 0,
+   "avg_ms": 1.8,
+   "p95_ms": 3
+  },
+  {
+   "cmd": "close",
+   "count": 1524,
+   "failed": 0,
+   "avg_ms": 1.9,
+   "p95_ms": 2.8
+  },
+  {
+   "cmd": "charge",
+   "count": 1009,
+   "failed": 0,
+   "avg_ms": 2,
+   "p95_ms": 2.9
+  }
+ ]
+}
