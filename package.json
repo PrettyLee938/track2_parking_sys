@@ -1,0 +1,24 @@
+{
+  "name": "grand-park-control",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "shared",
+    "server",
+    "web"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w server",
+    "dev:web": "npm run dev -w web",
+    "start": "npm run start -w server",
+    "build": "npm run build -w web",
+    "test": "npm test -w server",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "topology": "npm run topology -w server --",
+    "smoke": "npm run smoke -w server --",
+    "single-car": "npm run single-car -w server --"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

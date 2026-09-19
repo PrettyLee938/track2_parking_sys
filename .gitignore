@@ -1,9 +1,16 @@
+node_modules/
+dist/
+.env
+*.log
+
+# leftovers from the Python prototype (branch miro_testing)
 .venv/
 __pycache__/
-*.pyc
-.env
-
-# runtime data
-data/
 *.jsonl
+
+# runtime data (SQLite database, logs)
+data/
 *.db
+*.db-journal
+*.db-wal
+*.db-shm
