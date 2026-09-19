@@ -38,7 +38,7 @@ import { createSubsystems, type Engine, type Subsystem } from "./subsystems";
 import { SerialQueue, type TaskQueue } from "./serialQueue";
 import type { SimApi } from "./simClient";
 import type { ActionRecord, EventRecord, Store } from "./store";
-import { matches, resolve as resolveTopology, type Topology } from "./topology";
+import { matches, resolve as resolveTopology, type RouteDef, type Topology } from "./topology";
 
 export interface Logger {
   info(msg: string): void;
@@ -160,6 +160,7 @@ export interface Car extends CarView {
   chargeScheduled: boolean;
   fakePayments: number;          // payments with a bad signature
   waitingForGate: boolean;       // released, its leavepark queued until the exit gate opens
+  routeGates: string[];          // entry gates on its way to its spot, in order (kept open until it parks)
 }
 
 function newCar(plate: string, carType: string, planned: number | null, status: CarStatus, extra: Partial<Car> = {}): Car {
@@ -169,14 +170,14 @@ function newCar(plate: string, carType: string, planned: number | null, status: 
     exit_at: null, charge_parking: null, charge_electric: null, charge_attempts: 0, charge_override: null,
     paid: null, payment_ok: null, left_at: null,
     arrivedG: null, dispatchedG: null, parkedG: null, leftSpotG: null, releasedG: null, lastSeenG: null,
-    gotoG: null, gotoResends: 0, parkedA: null, leftSpotA: null, chargeScheduled: false, fakePayments: 0, waitingForGate: false,
+    gotoG: null, gotoResends: 0, parkedA: null, leftSpotA: null, chargeScheduled: false, fakePayments: 0, waitingForGate: false, routeGates: [],
     ...extra,
   };
 }
 
 export function publicCar(c: Car): CarView {
   const { arrivedG, dispatchedG, parkedG, leftSpotG, releasedG, lastSeenG, gotoG, gotoResends, parkedA, leftSpotA,
-    chargeScheduled, fakePayments, waitingForGate, ...view } = c;
+    chargeScheduled, fakePayments, waitingForGate, routeGates, ...view } = c;
   return view;
 }
 
@@ -518,6 +519,7 @@ export class Controller implements Engine {
       car.spot = target;
       if (notYetIn) { car.status = "dispatched"; this.counters.admitted++; }
       car.dispatchedG = car.gotoG = t;
+      if (lane && spot) car.routeGates = this.routeFor(lane, spot.zone)?.gates ?? [];
     }
   }
 
@@ -653,8 +655,16 @@ export class Controller implements Engine {
   // ---------------------------------------------------------------------------
   // entry
   // ---------------------------------------------------------------------------
+  /** A car on its way from another entrance to a zone further down the road drives over this
+   * entrance's sensor (ENTRY1 -> ZONE2 passes ENTRY2): not an arrival, not a departure. */
+  private passingThrough(plate: string, lane: EntryLane): boolean {
+    const car = this.cars.get(plate);
+    return !!car && car.entry_lane !== lane.spot && (MID_ENTRY.includes(car.status) || car.status === "entering");
+  }
+
   private async onEntryIn(e: EventRecord, lane: EntryLane) {
     const plate = str(e, "CarPlateNumber")!;
+    if (this.passingThrough(plate, lane)) return;
     const stale = this.cars.get(plate);
     if (stale) {
       if ([...this.entryLanes.values()].some((l) => l.queue.includes(plate) || l.current === plate)) {
@@ -709,10 +719,29 @@ export class Controller implements Engine {
     car.status = "dispatching";
     car.dispatchedG = this.clock.now();
     car.gotoResends = 0;
+    car.routeGates = this.routeFor(lane, spot.zone)?.gates ?? (lane.gate ? [lane.gate] : []);
     lane.current = plate;
-    const send = () => this.sendToSpot(plate, lane);
-    if (gate) await this.whenGateOpen(gate, send);
-    else await send();
+    // Every gate on the way must be open before the goto: a car sent towards a closed gate
+    // just stays put (03:21 run - ENTRY1 cars for ZONE2 with gate3 shut never moved).
+    await this.whenGatesOpen(car.routeGates, () => this.sendToSpot(plate, lane));
+  }
+
+  /** Run fn once every one of these gates is open, opening them in driving order. */
+  private async whenGatesOpen(names: string[], fn: Callback): Promise<void> {
+    const [first, ...rest] = names.map((n) => this.gates.get(n)).filter((g): g is Gate => !!g);
+    if (!first) return void await fn();
+    await this.whenGateOpen(first, () => this.whenGatesOpen(rest.map((g) => g.name), fn));
+  }
+
+  /**
+   * How a car from this entrance gets to a zone: the gates it drives through and the sensors
+   * it passes (topology routes, from the level's road network). null = it cannot get there.
+   * Without route data, the lane's own gate for any zone (Level 1 behaviour).
+   */
+  routeFor(lane: EntryLane, zone: string): RouteDef | null {
+    const known = this.topology?.routes?.[lane.spot];
+    if (known) return known[zone] ?? null;
+    return { gates: lane.gate ? [lane.gate] : [], sensors: [lane.spot] };
   }
 
   private async sendToSpot(plate: string, lane: EntryLane) {
@@ -730,6 +759,7 @@ export class Controller implements Engine {
 
   private async onEntryOut(e: EventRecord, lane: EntryLane) {
     const plate = str(e, "CarPlateNumber")!;
+    if (this.passingThrough(plate, lane)) return;
     const car = this.cars.get(plate);
     if (plate === lane.current && car?.status === "turned_away") {
       // Given up on and turned away (giveUpOnEntry): it has cleared the sensor.
@@ -792,6 +822,11 @@ export class Controller implements Engine {
     car.parkedA = this.activeAt(e);
     car.planned_minutes = toInt(e.PlannedParkingDurationInMinutes) || car.planned_minutes;
     const lane = car.entry_lane ? this.entryLanes.get(car.entry_lane) : undefined;
+    // Parked: the gates further down the road it drove through (gate3 for ENTRY1 -> ZONE2) can
+    // close once nobody else is on the way - held like an entry gate, across a stream of cars.
+    const passed = car.routeGates.filter((g) => g !== lane?.gate);
+    car.routeGates = [];
+    for (const g of passed) this.later(this.cfg.entryGateCloseDelayGameS, `close ${g}`, () => this.closeGateIfIdle(g));
     if (lane && lane.current === plate) { // parked without an entry CarOut we saw
       lane.current = null;
       await this.pumpEntry(lane);
@@ -1087,8 +1122,16 @@ export class Controller implements Engine {
     car.spot = alt.name;
     car.gotoResends = 0;
     car.dispatchedG = this.clock.now();
+    const before = car.routeGates;
+    car.routeGates = lane ? this.routeFor(lane, alt.zone)?.gates ?? [] : [];
     this.note("warn", `${why} - redirecting ${car.plate} to ${alt.name}`);
-    if (await this.cmd("goto", () => this.sim.carGoto(car.plate, alt.name), [car.plate, alt.name])) car.gotoG = this.clock.now();
+    const go = async () => {
+      if (car.spot !== alt.name) return; // redirected again meanwhile
+      if (await this.cmd("goto", () => this.sim.carGoto(car.plate, alt.name), [car.plate, alt.name])) car.gotoG = this.clock.now();
+    };
+    // Gates of the new route it has not been cleared through yet (a car redirected from ZONE2
+    // to ZONE1 needs none; one sent further down the road needs the next gates open).
+    await this.whenGatesOpen(car.routeGates.filter((g) => !before.includes(g) || this.gates.get(g)?.state !== GateState.Open), go);
   }
 
   private rebill(car: Car, override: number | null) {
@@ -1209,7 +1252,19 @@ export class Controller implements Engine {
 
   gateBusy(name: string): boolean {
     return [...this.entryLanes.values()].some((l) => l.gate === name && (l.current || l.queue.length)) ||
-      [...this.exitLanes.values()].some((l) => l.gate === name && l.releasing.size > 0);
+      [...this.exitLanes.values()].some((l) => l.gate === name && l.releasing.size > 0) ||
+      this.inTransitThrough(name) !== null;
+  }
+
+  /** A car on its way to a zone further down the road, still to pass this gate (it is on its
+   * route, and not the gate of its own entrance - that one is the lane's business). */
+  private inTransitThrough(gate: string): Car | null {
+    for (const car of this.cars.values()) {
+      if (!car.routeGates.includes(gate) || !(MID_ENTRY.includes(car.status) || car.status === "entering")) continue;
+      if (car.entry_lane && this.entryLanes.get(car.entry_lane)?.gate === gate) continue;
+      return car;
+    }
+    return null;
   }
 
   async closeGateIfIdle(name: string | null): Promise<void> {
@@ -1249,6 +1304,16 @@ export class Controller implements Engine {
       zoneCost: (zone) => {
         if (entry && this.unreachable.has(`${entry}>${zone}`)) return null;
         let cost = 0;
+        const lane = entry ? this.entryLanes.get(entry) : undefined;
+        if (lane) {
+          const route = this.routeFor(lane, zone);
+          if (!route) return null; // no road from this entrance to that zone
+          // Gates further down the road (not the lane's own): out of service = no way through
+          // for now; each one working costs a cycle of wear and a longer drive.
+          const extra = route.gates.filter((g) => g !== lane.gate);
+          if (extra.some((g) => !this.gates.get(g)?.operable)) return null;
+          cost += this.cfg.zoneRouteGateCost * extra.length;
+        }
         for (const lane of this.exitLanes.values()) {
           if (lane.zone !== zone || !lane.gate) continue;
           const gate = this.gates.get(lane.gate);
@@ -1267,6 +1332,8 @@ export class Controller implements Engine {
       const car = lane.gate === name && lane.current ? this.cars.get(lane.current) : undefined;
       if (car?.status === "dispatched") return `${car.plate} is driving through`;
     }
+    const transit = this.inTransitThrough(name);
+    if (transit && transit.status !== "dispatching") return `${transit.plate} is driving through to ${transit.spot}`;
     for (const lane of this.exitLanes.values()) {
       if (lane.gate !== name) continue;
       for (const plate of lane.releasing) {
@@ -1330,7 +1397,8 @@ export class Controller implements Engine {
       const where = car.status === "released" ? car.exit_lane : car.entry_lane;
       const dest = onEntry ? car.spot : Destination.LeavePark;
       const spotZone = onEntry && car.spot ? this.spots.get(car.spot)?.zone : undefined;
-      if (onEntry && spotZone && entry!.zone && spotZone !== entry!.zone) {
+      const routeOpen = car.routeGates.every((g) => this.gates.get(g)?.state === GateState.Open);
+      if (onEntry && spotZone && entry!.zone && spotZone !== entry!.zone && routeOpen) {
         // Sent to another zone and did not move: the simulator ignores a goto to a spot the
         // car cannot reach - no penalty, the car just sits on the entry sensor and blocks
         // the lane (2026-09-20 03:21: 13 of 13 ENTRY1 cars sent to ZONE2 never moved).
@@ -1376,6 +1444,7 @@ export class Controller implements Engine {
     if (spot?.reserved_for === car.plate) spot.reserved_for = null;
     car.spot = null;
     car.gotoResends = 0;
+    car.routeGates = [];
     car.status = "turned_away";
     this.counters.turned_away++;
     await this.leavePark(car); // lane.current stays: onEntryOut moves the lane on

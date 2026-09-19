@@ -178,8 +178,24 @@ pm run report:live -w server (GET /debug/controller, loopback).
   leavepark actually sent; new subsystem server/src/environment.ts: fans on while cars move in a zone
   (+60 game-s) and 300 game-s after a CO event/penalty, never switches broken fans, on-hours -> fan wear
   (preventive by hours once a fan breakdown teaches the limit); fans table on the Operations health card
-  and in report:live. 113 tests. NEXT: live run - expect 0 CO penalties, no stuck entry. Lights (day/
-  night) still TODO in environment.ts. Then (was: live run to verify),
+  and in report:live.
+  **CORRECTION (user was right): zones ARE reachable.** lvl2.json Paths = one one-way road down the west
+  side with gate1, gate3, gate5 across it IN SERIES; each zone branches off after its gate. ENTRY1->ZONE2
+  = gate1+gate3 (passes the ENTRY2 sensor), ENTRY1->ZONE3 = gate1+gate3+gate5; entrances never reach zones
+  above them. Cars for ZONE2 did not move because gate3 was CLOSED. Connection Direction: 0 = From->To,
+  1 = To->From, 2 = both (only reading consistent with the map). Built: topology.routesFromLevel()/
+  routesFromLevelsDir() -> Topology.routes[entry][zone] = {gates, sensors} (logged at startup;
+  
+pm run report:routes -w server); controller opens ALL route gates in order before the goto (whenGatesOpen),
+  keeps far gates busy (inTransitThrough) until the car parks, then closes them after the entry hold;
+  sensors of other entrances passed by a car in transit are ignored (passingThrough); zone_balanced only offers
+  zones with a route (+GPA_ZONE_ROUTE_GATE_COST per extra gate, none if an extra gate is out of service);
+  the stuck-goto "unreachable" learning now only fires if all route gates were open.
+  **Fans reworked (user):** on at CO >= 50, off below 50 per zone; level read via list-zones every 15 game-s
+  only while traffic or a fan runs (the sim sent ZERO carbon_monoxide_event webhooks in all runs); CO penalty
+  forces fans on until a clean reading. 118 tests. NEXT: live run with zone_balanced - expect ZONE2/3 to fill,
+  gate3/gate5 cycling (preventive repairs), fans switching by CO, 0 CO penalties. Lights (day/night) TODO.
+  Then (was: live run to verify),
   then zone distribution (user wants a smarter spread across zones: full/broken-gate zones,
   balance wear so one zone's gates/spots don't take all the maintenance).
   Team split (4 people): A = core engine/repairs/maintenance (Miro + Claude), B = environment

@@ -62,6 +62,9 @@ const schema = z.object({
   // whose exit gate is worn (x uses/limit) - spreading cars spreads the exit-gate wear.
   zoneExitDownCost: num().nonnegative().default(1),
   zoneExitWearCost: num().nonnegative().default(0.3),
+  // ...and of each extra gate on the way to a zone further down the road (ENTRY1 -> ZONE2
+  // also opens gate3): a gate cycle of wear and a longer drive.
+  zoneRouteGateCost: num().nonnegative().default(0.15),
 
   // ---- billing (spec: 1 per minute, x2 if electric) -------------------------
   // "planned" matched the simulator's own expected amount in 14/14 rejected bills at
@@ -161,13 +164,14 @@ const schema = z.object({
   fanHourLimit: num().min(0).default(0),
 
   // ---- environment (Level 2, environment.ts) ----------------------------------------
-  // Exhaust fans follow traffic: a zone's fans run while cars move in it and this long
-  // (GAME seconds) after the last movement, and at least coAlertHoldGameS after a CO event
-  // at/above coFanThreshold or a CO penalty. No CO event arrived before the first penalty.
+  // A zone's exhaust fans run while its CO is at/above coFanOnLevel and stop once it is below
+  // coFanOffLevel (spec: "turn off when CO levels are below 50"). The level is read with
+  // list-zones every coPollGameS while there is traffic or a fan runs: the simulator sent no
+  // CO webhook at all in the 2026-09-20 runs, only CO penalties.
   fanControl: bool().default(true),
-  fanIdleOffGameS: num().positive().default(60),
-  coFanThreshold: num().nonnegative().default(50),
-  coAlertHoldGameS: num().positive().default(300),
+  coFanOnLevel: num().nonnegative().default(50),
+  coFanOffLevel: num().nonnegative().default(50),
+  coPollGameS: num().positive().default(15),
 
   // ---- payments --------------------------------------------------------------------
   // A payment_made with a bad signature is a fake: the car has not paid. It is never
