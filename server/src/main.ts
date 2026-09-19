@@ -4,7 +4,7 @@
 import Fastify from "fastify";
 import { registerRoutes } from "./app";
 import { AuthService } from "./auth";
-import { loadDotEnv, loadSettings, unknownSettingVars } from "./config";
+import { loadDotEnv, loadSettings, outOfRangeTunables, unknownSettingVars } from "./config";
 import { Controller } from "./controller";
 import { SimClient } from "./simClient";
 import { Store } from "./store";
@@ -21,6 +21,13 @@ const app = Fastify({
 
 const unknown = unknownSettingVars();
 if (unknown.length) app.log.warn(`ignoring unknown settings (typo or old name?): ${unknown.join(", ")} - see .env.example`);
+
+// min/max bound what an admin may TYPE, not the value itself. A bound edited to look like
+// a value (max: 5 when the default is 50) leaves the setting above its own ceiling, and
+// then every dashboard settings save is rejected over a field nobody touched.
+for (const problem of outOfRangeTunables(cfg)) {
+  app.log.warn(`${problem} - the dashboard cannot save settings until this is fixed (TUNABLES in server/src/config.ts)`);
+}
 
 if (cfg.adminPassword && cfg.adminPassword.length < 8) {
   app.log.warn("GPA_ADMIN_PASSWORD is shorter than 8 characters - fine for a local demo, not for anything shared");

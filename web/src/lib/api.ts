@@ -1,7 +1,7 @@
 /** Typed calls to our own server. The session travels in an HttpOnly cookie. */
 import type {
-  ActionsResponse, ControlResult, CreateUserRequest, EventsResponse, GateAction, MeResponse, SessionsResponse, StateSnapshot,
-  StatsResponse, TimeseriesResponse, UpdateUserRequest, UsersResponse,
+  ActionsResponse, ControlResult, CreateUserRequest, DeviceAction, EventsResponse, GateAction, MeResponse, SessionsResponse,
+  SettingsResponse, StateSnapshot, StatsResponse, TimeseriesResponse, UpdateUserRequest, UsersResponse,
 } from "@gpa/shared";
 
 export class ApiError extends Error {
@@ -52,10 +52,15 @@ export const api = {
 
   gate: (name: string, action: GateAction) => call<ControlResult>("POST", `/api/control/gates/${encodeURIComponent(name)}/${action}`),
   repairSpot: (name: string) => call<ControlResult>("POST", `/api/control/spots/${encodeURIComponent(name)}/repair`),
+  device: (kind: "light" | "fan", name: string, action: DeviceAction) =>
+    call<ControlResult>("POST", `/api/control/devices/${kind}/${encodeURIComponent(name)}/${action}`),
   entrance: (spot: string, open: boolean) =>
     call<ControlResult>("POST", `/api/control/entries/${encodeURIComponent(spot)}/${open ? "open" : "close"}`),
   resync: () => call<ControlResult>("POST", "/api/resync"),
   config: () => call<Record<string, unknown>>("GET", "/api/config"),
+  settings: () => call<SettingsResponse>("GET", "/api/settings"),
+  updateSettings: (patch: Record<string, number | boolean>) => call<ControlResult>("PATCH", "/api/settings", patch),
+  resetSetting: (key: string) => call<ControlResult>("DELETE", `/api/settings/${encodeURIComponent(key)}`),
 
   users: () => call<UsersResponse>("GET", "/api/users"),
   createUser: (body: CreateUserRequest) => call<MeResponse>("POST", "/api/users", body),

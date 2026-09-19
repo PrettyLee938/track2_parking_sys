@@ -25,13 +25,19 @@
 import {
   CORRECT_AMOUNT_PATTERN, OCCUPIED_SPOT_PATTERN, CarType, ComponentType, Destination, Direction, EventClass, GateState, PenaltyReason,
   SpotPurpose,
-  type CarStatus, type CarView, type ControlResult, type Counters, type FeedItem, type FeedLevel, type GateAction,
+  type CarStatus, type CarView, type ComponentWearView, type ControlResult, type Counters, type DeviceAction, type DeviceView,
+  type FeedItem, type FeedLevel, type GateAction,
   type GateHold, type SessionView, type SimParkingSpot, type StateSnapshot, type TimeScaleSource, type TimeseriesPoint,
-  type ZoneSummary,
+  normaliseZone,
+  type SimZone, type ZoneAirView, type ZoneSummary,
 } from "@gpa/shared";
 import { getAllocator, spotNumber, type Allocator, type AllocSpot } from "./allocation";
+import {
+  AirQuality, Device, WearBook, ageSinceService, devicesFrom, isDaytime, wearRatio, wearSinceRepair,
+  type ComponentKind, type WearThresholds,
+} from "./components";
 import { chargingCost, parkingCost } from "./billing";
-import { readSimGameSpeed, type Settings } from "./config";
+import { readSimGameSpeed, validateTunables, type Settings } from "./config";
 import { GameClock } from "./gameClock";
 import { SerialQueue, type TaskQueue } from "./serialQueue";
 import type { SimApi } from "./simClient";
@@ -45,6 +51,9 @@ export interface Logger {
 }
 
 const nowS = () => Date.now() / 1000;
+
+/** Real seconds between writes of the wear book (it changes on almost every event). */
+const WEAR_SAVE_INTERVAL_S = 15;
 
 /** Seconds between two simulator ServerDateTime stamps ("2026-09-12 15:26:50", wall-clock). */
 export function simSecondsBetween(start?: string | null, end?: string | null): number | null {
@@ -69,6 +78,20 @@ const str = (e: EventRecord, k: string) => (e[k] as string | undefined) ?? undef
 
 const ok = (message: string): ControlResult => ({ ok: true, message });
 const fail = (message: string): ControlResult => ({ ok: false, message });
+
+/** Lights and fans are keyed by kind too: a light and a fan may share a name. */
+const deviceKey = (kind: "light" | "fan", name: string) => `${kind}:${name}`;
+
+/** The simulator's ComponentType strings mapped to our four kinds. */
+function componentKind(simType: string | undefined): ComponentKind | null {
+  switch (simType) {
+    case ComponentType.BarrierGate: return "gate";
+    case ComponentType.ParkingSpot: return "spot";
+    case ComponentType.Light: return "light";
+    case ComponentType.ExhaustFan: return "fan";
+    default: return null;
+  }
+}
 
 // =============================================================================
 // state
@@ -222,6 +245,33 @@ export class Controller {
   topology: Topology | null = null;
   spots = new Map<string, Spot>();
   gates = new Map<string, Gate>();
+  /** Lights and exhaust fans, keyed "light:NAME" / "fan:NAME" (names may collide). */
+  devices = new Map<string, Device>();
+  /** Usage cycles for every component kind; loaded from the database at startup. */
+  readonly wear = new WearBook();
+  readonly air: AirQuality;
+  /** Daytime in the simulator, from the last ServerDateTime seen. Null until one arrives. */
+  daytime: boolean | null = null;
+  /** The last ServerDateTime the simulator stamped, so a retuned window can re-read it. */
+  private lastSimStamp: string | null = null;
+  private lastMaintSweep = 0;   // game clock
+  private lastWearSave = 0;     // real seconds
+  /** Device key -> game time it was switched on, for accruing runtime. */
+  private readonly deviceOnSince = new Map<string, number>();
+  /** "kind:name" of components we put under preventive maintenance, until reported fixed. */
+  private readonly servicing = new Set<string>();
+  /** "kind:name" -> game time we last sent a repair, so a dropped one is re-sent. */
+  private readonly repairSentG = new Map<string, number>();
+  /**
+   * Game time of the last zone poll. Starts at -Infinity so the very first tick polls
+   * rather than waiting out an interval: the game clock also starts near zero, so a plain
+   * 0 here means "just polled" and the first reading is delayed by a whole interval - or,
+   * on a clock that has not advanced, never taken at all.
+   */
+  private lastZonePollG = Number.NEGATIVE_INFINITY;
+  /** carbon_monoxide_event webhooks handled - distinct from how many zones have a reading. */
+  private coEvents = 0;
+  private zonePolls = 0;
   entryLanes = new Map<string, EntryLane>();
   exitLanes = new Map<string, ExitLane>();
   cars = new Map<string, Car>();                  // active cars by plate
@@ -234,6 +284,7 @@ export class Controller {
   counters: Counters = {
     arrived: 0, admitted: 0, turned_away: 0, neglected: 0, exited: 0, revenue: 0, payment_mismatches: 0,
     repeat_exits: 0, ghosts_retired: 0, escaped: 0, penalties: 0, fines: 0, command_errors: 0,
+    breakdowns: 0, preventive_repairs: 0, reactive_repairs: 0, ventilation_changes: 0, light_changes: 0,
   };
 
   constructor(deps: ControllerDeps) {
@@ -246,6 +297,53 @@ export class Controller {
     this.queue = deps.queue ?? new SerialQueue((err) => this.log.error(`controller task failed: ${(err as Error)?.stack ?? err}`));
     this.clock = deps.clock ?? new GameClock(this.cfg);
     this.clock.setSettingsSpeed(readSimGameSpeed(this.cfg.simSettingsFile));
+    this.air = new AirQuality(() => ({
+      onPpm: this.cfg.coOnPpm, offPpm: this.cfg.coOffPpm, trustDangerWord: this.cfg.coTrustDangerWord,
+    }));
+    // Settings an admin tuned from the dashboard during an earlier run override the
+    // environment, or a value someone set mid-run would silently revert on restart.
+    const stored = this.store.loadRuntimeSettings();
+    if (Object.keys(stored).length) {
+      const checked = validateTunables(stored);
+      if (checked.ok) Object.assign(this.cfg, checked.values);
+      else this.log.warn(`ignoring stored settings: ${checked.errors.join("; ")}`);
+    }
+    // Wear is cumulative across restarts: a component half-way to its service interval
+    // must still be half-way there after a crash mid-run.
+    this.wear.load(this.store.loadWear());
+  }
+
+  /**
+   * Wear mutations, skipped while replaying.
+   *
+   * On restart the wear book is loaded from the database *and* recent events are replayed
+   * through the handlers. Counting again during replay would double every cycle - a gate
+   * on 5 came back on 10. The book already holds everything up to the last save, so replay
+   * must not touch it. The cost is up to WEAR_SAVE_INTERVAL_S of wear lost in a crash,
+   * which only ever delays a service slightly; over-counting would trigger repairs that
+   * were never earned.
+   */
+  private countWear(kind: ComponentKind, name: string, zone = ""): void {
+    if (!this.replaying) this.wear.countCycle(kind, name, zone);
+  }
+
+  private noteBreakdown(kind: ComponentKind, name: string, at: string, zone = ""): void {
+    if (!this.replaying) this.wear.markBroken(kind, name, at, zone);
+  }
+
+  private noteRepair(kind: ComponentKind, name: string, at: string, zone = ""): void {
+    if (!this.replaying) this.wear.markRepaired(kind, name, at, zone);
+  }
+
+  /** Service intervals preventive maintenance measures against. */
+  private get wearThresholds(): WearThresholds {
+    return {
+      gateCycles: this.cfg.maintGateCycles,
+      spotCycles: this.cfg.maintSpotCycles,
+      deviceRuntimeGameS: this.cfg.maintDeviceRuntimeGameS,
+      deviceCycles: this.cfg.maintDeviceCycles,
+      maxAgeS: this.cfg.maintMaxAgeS,
+    };
   }
 
   /** Game seconds per real second (= the simulator's GameSpeedMultiplier), and where
@@ -362,6 +460,7 @@ export class Controller {
       gate.maintenance = g.isUnderMaintenance;
       this.gates.set(gate.name, gate);
     }
+    await this.syncDevices();
     await this.reconcile(freshLayout);
     this.synced = true;
 
@@ -375,6 +474,12 @@ export class Controller {
       const names = new Set([...this.entryLanes.values(), ...this.exitLanes.values()].map((l) => l.gate).filter(Boolean));
       for (const name of names) await this.closeGateIfIdle(name);
     }
+    // A sync takes the simulator's word for every device's state, and the lighting and
+    // ventilation loops only fire on a *transition* - so without this, a fan the simulator
+    // reports as off stays off until the next CO reading crosses a threshold, and lights
+    // are never re-asserted after a restart (replay sets daytime but suppresses the action).
+    await this.applyLighting();
+    await this.applyVentilation();
   }
 
   /** The simulator reads settings.json when it starts: a new value there means it was
@@ -382,6 +487,46 @@ export class Controller {
   private refreshSimSettingsSpeed() {
     const speed = readSimGameSpeed(this.cfg.simSettingsFile);
     if (this.clock.setSettingsSpeed(speed)) this.note("info", `simulator settings.json game speed is now ${speed}; relearning`);
+  }
+
+  /**
+   * Discovers the lights and exhaust fans (Level 2; Level 1 has neither). Like the other
+   * list-* calls this is costly, so it runs only with a sync. A level without these
+   * endpoints simply has no devices and the ventilation and lighting loops stay idle.
+   */
+  private async syncDevices() {
+    const kinds: Array<["light" | "fan", (() => Promise<unknown[]>) | undefined]> = [
+      ["light", this.sim.listLights?.bind(this.sim)],
+      ["fan", this.sim.listExhaustFans?.bind(this.sim)],
+    ];
+    for (const [kind, list] of kinds) {
+      if (!list) continue;
+      let rows: unknown;
+      try {
+        rows = await list();
+      } catch (ex) {
+        this.note("warn", `could not list ${kind}s: ${(ex as Error).message.slice(0, 120)}`);
+        continue;
+      }
+      for (const fresh of devicesFrom(kind, rows)) {
+        const key = deviceKey(kind, fresh.name);
+        const existing = this.devices.get(key);
+        if (existing) {
+          // Live state wins, but keep what we know that the list does not report.
+          existing.on = fresh.on;
+          existing.broken = fresh.broken;
+          existing.maintenance = fresh.maintenance;
+          existing.zone = fresh.zone || existing.zone;
+          existing.pending = null;
+        } else {
+          this.devices.set(key, fresh);
+        }
+        this.wear.get(kind, fresh.name, fresh.zone);
+      }
+    }
+    const lights = [...this.devices.values()].filter((d) => d.kind === "light").length;
+    const fans = this.devices.size - lights;
+    if (lights || fans) this.note("info", `components: ${lights} light(s), ${fans} exhaust fan(s)`);
   }
 
   private upsertSpot(s: SimParkingSpot) {
@@ -400,6 +545,18 @@ export class Controller {
     this.timers = [];
     this.entryLanes = new Map();
     this.exitLanes = new Map();
+    // A different level has different components. Bank any running device time first, so
+    // the wear already earned is kept even though these names are about to disappear.
+    for (const dev of this.devices.values()) this.bankRuntime(dev);
+    this.store.saveWear(this.wear.all());
+    this.devices = new Map();
+    this.deviceOnSince.clear();
+    this.servicing.clear();
+    this.repairSentG.clear();
+    this.lastZonePollG = Number.NEGATIVE_INFINITY;
+    this.coEvents = 0;
+    this.daytime = null;
+    this.lastSimStamp = null;
   }
 
   /**
@@ -547,6 +704,11 @@ export class Controller {
       this.lastEventReal = now;
     }
 
+    // The only clock that reports the simulator's own time of day.
+    const stamp = str(e, "ServerDateTime");
+    if (stamp) this.lastSimStamp = stamp;
+    await this.recomputeDaytime();
+
     switch (e.EventClass) {
       case EventClass.CarSpotAction: await this.routeCarEvent(e); break;
       case EventClass.GateAction: await this.onGate(e); break;
@@ -554,6 +716,7 @@ export class Controller {
       case EventClass.ComponentBroken: await this.onComponent(e, true); break;
       case EventClass.ComponentFixed: await this.onComponent(e, false); break;
       case EventClass.Penalty: await this.onPenalty(e); break;
+      case EventClass.CarbonMonoxide: await this.onCarbonMonoxide(e); break;
     }
     // Stale-record detection (sweepGhosts) measures silence from here.
     const car = this.cars.get(str(e, "CarPlateNumber") ?? "");
@@ -656,9 +819,6 @@ export class Controller {
       await this.turnAway(car, "no suitable spot");
       return this.pumpEntry(lane);
     }
-    // #region agent log
-    fetch('http://127.0.0.1:7502/ingest/5b601716-2241-46fc-9c1b-1aa5e55ae0bd',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'6f1c01'},body:JSON.stringify({sessionId:'6f1c01',hypothesisId:'A',location:'controller.ts:pumpEntry',message:'dispatch reserve',data:{plate,spot:spot.name,available:spot.available,occupants:[...spot.occupants],reserved_for:spot.reserved_for,detected:spot.detected,lane:lane.spot,queueLen:lane.queue.length,current:lane.current,timeScale:this.timeScale,qDepth:(this.queue as {depth?:number}).depth},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
     spot.reserved_for = plate;
     car.spot = spot.name;
     car.status = "dispatching";
@@ -735,6 +895,7 @@ export class Controller {
     }
     if (spot.reserved_for === plate) spot.reserved_for = null;
     spot.occupants.add(plate);
+    this.countWear("spot", name, spot.zone); // one use of this spot
     car.spot = name;
     car.status = "parked";
     car.parked_at = e.ServerDateTime ?? null;
@@ -788,16 +949,9 @@ export class Controller {
   private async onExitIn(e: EventRecord, lane: ExitLane) {
     const plate = str(e, "CarPlateNumber")!;
     if (this.drivingIn(plate)) {
-      const inbound = this.cars.get(plate);
-      // #region agent log
-      fetch('http://127.0.0.1:7502/ingest/5b601716-2241-46fc-9c1b-1aa5e55ae0bd',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'6f1c01'},body:JSON.stringify({sessionId:'6f1c01',hypothesisId:'D',location:'controller.ts:onExitIn',message:'ignored exit CarIn while driving in',data:{plate,status:inbound?.status??null,spot:inbound?.spot??null,lane:lane.spot},timestamp:Date.now()})}).catch(()=>{});
-      // #endregion
       return;
     }
     const car = this.cars.get(plate) ?? this.adopt(e);
-    // #region agent log
-    fetch('http://127.0.0.1:7502/ingest/5b601716-2241-46fc-9c1b-1aa5e55ae0bd',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'6f1c01'},body:JSON.stringify({sessionId:'6f1c01',hypothesisId:'D',location:'controller.ts:onExitIn',message:'exit CarIn',data:{plate,status:car.status,spot:car.spot,charge_parking:car.charge_parking,lane:lane.spot,recentPaid:this.recentPaid.has(plate),timeScale:this.timeScale},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
     car.exit_lane = lane.spot;
     car.exit_at = e.ServerDateTime ?? null;
     // A car at the exit is no longer in its spot, whether or not we saw it leave. (From a
@@ -847,9 +1001,6 @@ export class Controller {
       basis = `planned ${car.planned_minutes}m, measured ${gameS !== null ? (gameS / 60).toFixed(2) : "?"} game-min`;
     }
     const electric = chargingCost(car.car_type, this.cfg);
-    // #region agent log
-    fetch('http://127.0.0.1:7502/ingest/5b601716-2241-46fc-9c1b-1aa5e55ae0bd',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'6f1c01'},body:JSON.stringify({sessionId:'6f1c01',hypothesisId:'B',location:'controller.ts:charge',message:'issuing charge',data:{plate,status:car.status,attempts:car.charge_attempts,planned:car.planned_minutes,gameS,parking,electric,basis,timeScale:this.timeScale,timeScaleSrc:this.timeScaleInfo.source,exitAt:car.exit_at,carType:car.car_type,qDepth:(this.queue as {depth?:number}).depth},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
     if (await this.cmd("charge", () => this.sim.carCharge(plate, parking, electric), [plate, parking, electric])) {
       car.charge_parking = parking;
       car.charge_electric = electric;
@@ -915,9 +1066,6 @@ export class Controller {
     if (car.status !== "released") {
       this.counters.escaped++;
       this.note("error", `${plate} left without being released (status ${car.status})`);
-      // #region agent log
-      fetch('http://127.0.0.1:7502/ingest/5b601716-2241-46fc-9c1b-1aa5e55ae0bd',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'6f1c01'},body:JSON.stringify({sessionId:'6f1c01',hypothesisId:'D',location:'controller.ts:onExitOut',message:'escaped unpaid',data:{plate,status:car.status,spot:car.spot,charge_parking:car.charge_parking,payment_ok:car.payment_ok,lane:lane.spot},timestamp:Date.now()})}).catch(()=>{});
-      // #endregion
     }
     lane.releasing.delete(plate);
     this.counters.exited++;
@@ -933,12 +1081,6 @@ export class Controller {
     this.counters.fines += Number(e.FineAmount) || 0;
     const reason = str(e, "Reason") ?? "";
     this.note("error", `PENALTY ${e.FineAmount}: ${reason} (${e.ComponentName})`);
-    const carForLog = this.carByComponent(str(e, "ComponentName"));
-    const spotNameForLog = OCCUPIED_SPOT_PATTERN.exec(reason)?.[1]?.trim();
-    const spotForLog = spotNameForLog ? this.spots.get(spotNameForLog) : (carForLog?.spot ? this.spots.get(carForLog.spot) : undefined);
-    // #region agent log
-    fetch('http://127.0.0.1:7502/ingest/5b601716-2241-46fc-9c1b-1aa5e55ae0bd',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'6f1c01'},body:JSON.stringify({sessionId:'6f1c01',hypothesisId:'A',location:'controller.ts:onPenalty',message:'penalty received',data:{reason,component:str(e,"ComponentName"),fine:e.FineAmount,carStatus:carForLog?.status??null,carSpot:carForLog?.spot??null,charge_parking:carForLog?.charge_parking??null,charge_attempts:carForLog?.charge_attempts??null,spotName:spotForLog?.name??null,occupants:spotForLog?[...spotForLog.occupants]:null,reserved_for:spotForLog?.reserved_for??null,detected:spotForLog?.detected??null,timeScale:this.timeScale,qDepth:(this.queue as {depth?:number}).depth},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
 
     const car = this.carByComponent(str(e, "ComponentName"));
     const lowered = reason.toLowerCase();
@@ -1016,6 +1158,10 @@ export class Controller {
       if (gate.state === expected) this.learnFromGate((tsOf(e._received_at) ?? this.clock.real()) - gate.moveSentReal);
       gate.moveSentReal = null;
     }
+    // One cycle = one confirmed open. Counting the close too would double every gate's
+    // wear for the same single use.
+    if (gate.state === GateState.Open && was !== GateState.Open) this.countWear("gate", gate.name, gate.zone);
+
     if (gate.state === GateState.Open) {
       await this.gateOpened(gate);
     } else if (gate.state === GateState.Closed && gate.onOpen.length && gate.hold !== "closed") {
@@ -1094,8 +1240,22 @@ export class Controller {
     }
   }
 
+  /** Cars are waiting on this gate or crossing it: do not close it. */
   gateBusy(name: string): boolean {
     return [...this.entryLanes.values()].some((l) => l.gate === name && (l.current || l.queue.length)) ||
+      [...this.exitLanes.values()].some((l) => l.gate === name && l.releasing.size > 0);
+  }
+
+  /**
+   * A car is actually crossing this gate right now - the only thing that should block a
+   * repair. A *queue* waiting at a gate is not "in use": the spec's in-use repair penalty
+   * is Penalty_RepairAnOccupiedSpot, about a car sitting in a parking spot. Treating a
+   * queue as in-use deadlocked a broken entry gate: cars pile up behind it, the queue
+   * never empties because the gate is broken, and the repair that would fix it is refused
+   * forever while the cars are fined for being neglected.
+   */
+  gatePassing(name: string): boolean {
+    return [...this.entryLanes.values()].some((l) => l.gate === name && l.current !== null) ||
       [...this.exitLanes.values()].some((l) => l.gate === name && l.releasing.size > 0);
   }
 
@@ -1103,22 +1263,320 @@ export class Controller {
     const gate = name ? this.gates.get(name) : undefined;
     if (gate && gate.operable && gate.hold !== "open" && !this.gateBusy(gate.name) && !gate.onOpen.length &&
         (gate.state === GateState.Open || gate.state === GateState.Opening)) {
-      // #region agent log
-      fetch('http://127.0.0.1:7502/ingest/5b601716-2241-46fc-9c1b-1aa5e55ae0bd',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'6f1c01'},body:JSON.stringify({sessionId:'6f1c01',hypothesisId:'E',location:'controller.ts:closeGateIfIdle',message:'closing idle gate',data:{name:gate.name,state:gate.state,busy:this.gateBusy(gate.name),onOpen:gate.onOpen.length,timeScale:this.timeScale},timestamp:Date.now()})}).catch(()=>{});
-      // #endregion
       await this.requestClose(gate);
     }
   }
 
+  /**
+   * component_broken / component_fixed for any of the four kinds. Lights and exhaust
+   * fans used to fall through to the spot map, miss, and be logged but never tracked -
+   * so a broken fan stayed invisible and the zone it serves went unventilated.
+   */
   private async onComponent(e: EventRecord, broken: boolean) {
-    const name = str(e, "Name") ?? "", kind = str(e, "Type");
-    const target = kind === ComponentType.BarrierGate ? this.gates.get(name) : this.spots.get(name);
+    const name = str(e, "Name") ?? "", simKind = str(e, "Type");
+    const kind = componentKind(simKind);
+    const target = kind === "gate" ? this.gates.get(name)
+      : kind === "spot" ? this.spots.get(name)
+      : kind ? this.devices.get(deviceKey(kind, name))
+      : undefined;
+
     if (target) {
       target.broken = broken;
       if (!broken) target.maintenance = false;
+    } else if (kind === "light" || kind === "fan") {
+      // First sight of a device the list-* call never returned: record it anyway, so a
+      // level whose endpoints we cannot read still shows its broken components.
+      const dev = new Device(kind, name, "");
+      dev.broken = broken;
+      this.devices.set(deviceKey(kind, name), dev);
     }
-    this.note(broken ? "error" : "info", `${kind} ${name} ${broken ? "BROKEN" : "fixed"}`);
+
+    if (kind) {
+      const zone = (target as { zone?: string } | undefined)?.zone ?? "";
+      if (broken) this.noteBreakdown(kind, name, e._received_at, zone);
+      else this.noteRepair(kind, name, e._received_at, zone);
+      // Our maintenance on it is over either way: it frees a slot in the zone's budget.
+      this.servicing.delete(`${kind}:${name}`);
+      if (!broken) this.repairSentG.delete(`${kind}:${name}`);
+    }
+    if (broken) this.counters.breakdowns++;
+
+    this.note(broken ? "error" : "info", `${simKind} ${name} ${broken ? "BROKEN" : "fixed"}`);
     if (!broken) for (const lane of this.entryLanes.values()) await this.pumpEntry(lane);
+    // Either way the zone's ventilation may need to move: a fan that came back may be
+    // needed now, and one that just broke may have a sibling that can take over.
+    if (kind === "fan") await this.applyVentilation();
+  }
+
+  /**
+   * carbon_monoxide_event: record the reading and, when the zone crosses a threshold,
+   * switch that zone's exhaust fans. Hysteresis lives in AirQuality - acting on every
+   * reading would flap the fans and burn the usage cycles we are asked to conserve.
+   */
+  private async onCarbonMonoxide(e: EventRecord) {
+    const zone = str(e, "ZoneName") ?? "";
+    if (!zone) return;
+    this.coEvents++;
+    const changed = this.recordAir(zone, Number(e.CarbonMonoxideLevel) || 0, str(e, "DangerLevel") ?? "",
+      e._received_at, "webhook");
+    // The tick re-asserts ventilation anyway; acting here too means a webhook is answered
+    // at once rather than up to a tick later.
+    if (changed) await this.applyVentilation();
+  }
+
+  /**
+   * Records one zone's CO reading and logs a threshold crossing. Shared by the two
+   * sources - the webhook and the poll - which otherwise carried the same five lines
+   * twice, and would drift apart the first time the message changed.
+   */
+  private recordAir(zone: string, level: number, danger: string, at: string, source: "webhook" | "polled"): boolean {
+    const { air, changed } = this.air.update(zone, level, danger, at);
+    if (!changed) return false;
+    this.note(air.ventilating ? "warn" : "info",
+      `CO ${zone} ${level}${danger ? ` (${danger})` : ""} - ventilation ${air.ventilating ? "ON" : "OFF"}` +
+      `${source === "polled" ? " (polled)" : ""}`);
+    return true;
+  }
+
+  /**
+   * Reads CO straight from the simulator instead of waiting to be told.
+   *
+   * carbon_monoxide_event is only sent at Mid and above (~50), so a webhook-only system
+   * cannot see a zone at 5, 20 or 40 - and therefore cannot act on any threshold below
+   * Mid, however it is configured. This poll makes lower thresholds mean something, and
+   * doubles as a safety net if a CO webhook is lost. Off unless zonePollGameS is set,
+   * because every list-* call carries a simulated operational cost.
+   */
+  private async pollZoneAir(now: number) {
+    if (this.replaying || !this.synced || !this.cfg.zonePollGameS) return;
+    if (!this.sim.listZones) return;
+    if (now - this.lastZonePollG < this.cfg.zonePollGameS) return;
+    this.lastZonePollG = now;
+
+    let rows: unknown;
+    try {
+      rows = await this.sim.listZones();
+    } catch (ex) {
+      this.note("warn", `could not list zones: ${(ex as Error).message.slice(0, 120)}`);
+      return;
+    }
+    if (!Array.isArray(rows)) return;
+
+    const at = new Date().toISOString();
+    for (const raw of rows as SimZone[]) {
+      const z = normaliseZone(raw ?? {});
+      if (z) this.recordAir(z.name, z.level, z.danger, at, "polled");
+    }
+    this.zonePolls++;
+    // No applyVentilation here: tick() calls it on the line after this one.
+  }
+
+  /** Brings every fan in line with what its zone's air currently needs. */
+  private async applyVentilation() {
+    if (this.replaying) return;
+    for (const dev of this.devices.values()) {
+      if (dev.kind !== "fan") continue;
+      const want = this.wantsVentilation(dev);
+
+      // Safety override. An operator may keep a fan *running* for as long as they like -
+      // that only costs usage cycles. Keeping one *off* while its zone is actually
+      // polluted is Penalty_ZonePollutedWithHighCO, and an operator who switches a fan off
+      // and forgets would otherwise cause it for the rest of the run: nothing reconsiders
+      // a hold. Ventilation is a safety function, so the hold loses.
+      if (dev.hold === "off" && want) {
+        dev.hold = null;
+        this.note("error",
+          `${dev.name}: releasing the operator hold - ${dev.zone || "the park"} needs ventilation`);
+      }
+
+      if (!dev.automatic) continue;
+      if (await this.setDevice(dev, want)) {
+        this.counters.ventilation_changes++;
+        // Name the fan and the reading that moved it. The transition note above only says
+        // a *zone* changed; without this there is no record that a specific fan was
+        // actually commanded, which is the thing you want to see when checking it works.
+        const air = dev.zone ? this.air.get(dev.zone) : this.air.all().find((z) => z.ventilating);
+        const reading = air ? `${air.zone} CO ${air.level}` : "no reading";
+        const limit = want ? this.cfg.coOnPpm : this.cfg.coOffPpm;
+        this.note(want ? "warn" : "info",
+          `fan ${dev.name} ${want ? "ON" : "OFF"} - ${reading} vs threshold ${limit}`);
+      }
+    }
+  }
+
+  /**
+   * Whether this fan should be running.
+   *
+   * A fan with no zone serves the whole park, so it follows *any* zone that needs
+   * ventilation. The simulator really does report zoneless components - its own
+   * list-exhaust-fans example is `"name": "fan0", "zoneParent": ""` - and skipping those
+   * meant a fan that could never be switched on however high CO went.
+   */
+  private wantsVentilation(dev: Device): boolean {
+    return dev.zone ? (this.air.get(dev.zone)?.ventilating ?? false) : this.air.anyVentilating;
+  }
+
+  /**
+   * Why a fan is in the state it is, in one line. Ventilation has several independent
+   * reasons not to act (broken, held, no reading for its zone, no such endpoint), and
+   * without this the dashboard can only show "off" and leave you guessing which.
+   */
+  private ventilationReason(dev: Device): string {
+    const blocked = this.deviceBlocker(dev);
+    if (blocked) return blocked;
+    const want = this.wantsVentilation(dev);
+    if (want) {
+      const where = dev.zone ? `${dev.zone} is` : "the park has a zone"; // a zoneless fan serves everywhere
+      return dev.on ? `extracting: ${where} above the CO threshold` : "should be on - command pending";
+    }
+    if (!dev.zone) {
+      return this.air.all().length ? "idle: no zone is above the CO threshold" : "idle: no CO readings yet";
+    }
+    const air = this.air.get(dev.zone);
+    if (!air) return `idle: no CO reading for ${dev.zone} yet`;
+    return `idle: ${dev.zone} is at ${air.level}, below the ${this.cfg.coOnPpm} threshold`;
+  }
+
+  /**
+   * Switches a light or fan, counting the cycle and its on-time. Returns true when a
+   * command was actually sent. Never touches a broken or under-maintenance device:
+   * operating one is a penalty.
+   */
+  private async setDevice(dev: Device, on: boolean, actor: string | null = null): Promise<boolean> {
+    if (this.replaying || dev.on === on || dev.pending === (on ? "on" : "off") || !dev.operable) return false;
+    const call = dev.kind === "light"
+      ? (on ? this.sim.lightOn : this.sim.lightOff)
+      : (on ? this.sim.fanOn : this.sim.fanOff);
+    if (!call) return false; // this level has no such endpoint
+
+    dev.pending = on ? "on" : "off";
+    const what = `${dev.kind}-${on ? "on" : "off"}`;
+    const sent = await this.cmd(what, () => call.call(this.sim, dev.name), [dev.name], actor);
+    dev.pending = null;
+    if (!sent) return false;
+
+    // On-time accrues in game seconds; bank it when the device goes off.
+    if (on) {
+      this.deviceOnSince.set(deviceKey(dev.kind, dev.name), this.clock.now());
+    } else {
+      this.bankRuntime(dev);
+    }
+    dev.on = on;
+    this.countWear(dev.kind, dev.name, dev.zone);
+    return true;
+  }
+
+  /** Adds the time a device has been running to its wear, and restarts the meter. */
+  private bankRuntime(dev: Device) {
+    const key = deviceKey(dev.kind, dev.name);
+    const since = this.deviceOnSince.get(key);
+    if (since === undefined) return;
+    this.wear.addRuntime(dev.kind, dev.name, Math.max(0, this.clock.now() - since), dev.zone);
+    this.deviceOnSince.delete(key);
+  }
+
+  /**
+   * Works out whether it is day in the simulator and switches the lights if that changed.
+   * Called both when an event brings a new stamp and when the daylight window itself is
+   * retuned - moving the window has to re-evaluate the *last* stamp, or the lights would
+   * stay wrong until the next event happened to arrive.
+   */
+  private async recomputeDaytime(): Promise<void> {
+    const day = isDaytime(this.lastSimStamp, this.cfg.daylightFromHour, this.cfg.daylightToHour);
+    if (day === null || day === this.daytime) return;
+    const first = this.daytime === null;
+    this.daytime = day;
+    if (!first) this.note("info", `simulator is now ${day ? "day" : "night"}`);
+    await this.applyLighting();
+  }
+
+  /**
+   * Walks the whole ventilation chain and reports where it stops, for GET
+   * /debug/ventilation. A fan that will not switch on can be blocked at any of half a
+   * dozen independent points - no fans discovered, none accepted by the intake, the
+   * controller in passive mode, a zone name that does not match, the fan broken or held -
+   * and each of those looks identical from outside: a fan that is simply off.
+   */
+  ventilationDiagnosis() {
+    const fans = [...this.devices.values()].filter((d) => d.kind === "fan");
+    return {
+      synced: this.synced,
+      controller_enabled: this.cfg.controllerEnabled,
+      replaying: this.replaying,
+      thresholds: { on_ppm: this.cfg.coOnPpm, off_ppm: this.cfg.coOffPpm, trust_danger_word: this.cfg.coTrustDangerWord },
+      endpoint_available: !!this.sim.fanOn,
+      fans_discovered: fans.length,
+      co_events_seen: this.coEvents,
+      zones_reporting: this.air.all().length,
+      zone_poll: this.cfg.zonePollGameS
+        ? { every_game_s: this.cfg.zonePollGameS, polls: this.zonePolls, available: !!this.sim.listZones }
+        : { every_game_s: 0, note: "off - the simulator only sends carbon_monoxide_event at Mid (~50) and above, so a threshold below Mid cannot fire without this" },
+      zones_with_readings: this.air.all().map((z) => ({ zone: z.zone, level: z.level, danger: z.danger, ventilating: z.ventilating, at: z.at })),
+      zones_wanting_ventilation: this.air.ventilating(),
+      fans: fans.map((d) => ({
+        name: d.name,
+        zone: d.zone,
+        zone_note: d.zone ? "matched against the zone of each CO reading" : "no zone: follows any zone that needs ventilation",
+        on: d.on,
+        broken: d.broken,
+        maintenance: d.maintenance,
+        hold: d.hold,
+        should_be_on: this.wantsVentilation(d),
+        blocked_by: this.deviceBlocker(d),
+        reason: this.ventilationReason(d),
+      })),
+      hint: fans.length === 0
+        ? "No exhaust fans were discovered. Check GET /api/v1/list-exhaust-fans on the simulator: the response must be an array whose items carry a name."
+        : this.air.all().length === 0
+        ? "No CO reading from either source. Webhooks only arrive at Mid (~50) and above; if zone_poll is off, turn it on to read the level directly. Also check /debug/stats for dropped events and that GPA_CONTROLLER_ENABLED is true."
+        : null,
+    };
+  }
+
+  /**
+   * The single condition stopping this device being switched, or null if nothing is.
+   * Shared by fans and lights: the four reasons a device cannot be operated at all -
+   * broken, under maintenance, no endpoint, held by an operator - are the same whichever
+   * rule drives it, and were written out twice before.
+   */
+  private deviceBlocker(dev: Device): string | null {
+    if (!this.cfg.controllerEnabled) return "the controller is in passive mode (GPA_CONTROLLER_ENABLED=false)";
+    if (!this.synced) return "not synced with the simulator yet";
+    const light = dev.kind === "light";
+    if (!(light ? this.sim.lightOn : this.sim.fanOn)) return `this level has no ${light ? "light" : "exhaust fan"} endpoint`;
+    if (dev.broken) return "broken - operating it would be a penalty";
+    if (dev.maintenance) return "under maintenance";
+    if (dev.hold) return `held ${dev.hold} by an operator - Automatic returns it to ${light ? "daylight" : "CO"} control`;
+    return null;
+  }
+
+  /** The same one-line explanation as ventilationReason, for a light. */
+  private lightingReason(dev: Device): string {
+    const blocked = this.deviceBlocker(dev);
+    if (blocked) return blocked;
+    if (!this.cfg.lightsFollowDaylight) return "daylight control is off - manual only";
+    if (this.daytime === null) return "waiting for the first event that carries a simulator timestamp";
+    const window = `${this.cfg.daylightFromHour}:00-${this.cfg.daylightToHour}:00`;
+    return this.daytime
+      ? `off: daytime in the simulator (daylight ${window})`
+      : `on: night in the simulator (daylight ${window})`;
+  }
+
+  /**
+   * "Lights should not work at day time of simulator." The in-world hour is read off the
+   * ServerDateTime the simulator stamps on events (no endpoint is known to report it),
+   * so this only acts once an event has been seen.
+   */
+  private async applyLighting() {
+    if (this.replaying || !this.cfg.lightsFollowDaylight || this.daytime === null) return;
+    const wantOn = !this.daytime;
+    for (const dev of this.devices.values()) {
+      if (dev.kind !== "light" || !dev.automatic) continue;
+      if (await this.setDevice(dev, wantOn)) {
+        this.counters.light_changes++;
+        this.note("info", `light ${dev.name} ${wantOn ? "ON" : "OFF"} - simulator is ${wantOn ? "at night" : "in daylight"}`);
+      }
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -1130,9 +1588,160 @@ export class Controller {
     await this.checkGateTimeouts(now);
     await this.checkStuckGotos(now);
     await this.sweepGhosts(now);
+    await this.repairBroken(now);
+    await this.sweepMaintenance(now);
+    await this.pollZoneAir(now);
+    // Ventilation and lighting are re-asserted every tick, not only when a reading
+    // crosses a threshold. A transition gives a fan exactly one chance to be switched,
+    // and anything that blocked that one attempt - the fan momentarily under maintenance,
+    // a dropped command, a sync still in flight - left it wrong until the *next* crossing,
+    // which may never come: with a low stop threshold a busy zone simply stays above it
+    // and never transitions again. These are cheap: setDevice returns immediately unless
+    // a device is actually in the wrong state.
+    await this.applyVentilation();
+    await this.applyLighting();
     this.sample(nowS());
+    this.persistWear();
     const horizon = now - this.cfg.repeatExitWindowGameS;
     for (const [plate, t] of this.recentPaid) if (t < horizon) this.recentPaid.delete(plate);
+  }
+
+  /**
+   * Reactive repair: fix what the simulator says is broken, as soon as it can be fixed.
+   *
+   * "Things can break, but the car park shouldn't" - and nothing a broken component serves
+   * works until it is repaired. A broken entry gate closes that entrance completely: cars
+   * queue behind it and are eventually fined for being neglected. So this ignores the
+   * per-zone maintenance budget (that capacity is already lost) and only respects the one
+   * rule the spec actually states - Penalty_RepairAnOccupiedSpot.
+   *
+   * Repair commands can be dropped like any other, which would leave a component broken
+   * for the rest of the run, so each is re-sent every repairRetryGameS while it is still
+   * reported broken.
+   */
+  private async repairBroken(now: number) {
+    if (this.replaying || !this.synced || !this.cfg.autoRepairBroken) return;
+
+    const tryRepair = async (kind: ComponentKind, name: string, send: () => Promise<void>) => {
+      const key = `${kind}:${name}`;
+      const last = this.repairSentG.get(key);
+      if (last !== undefined && now - last < this.cfg.repairRetryGameS) return;
+      this.repairSentG.set(key, now);
+      if (!(await this.cmd("repair", send, [name]))) return;
+      this.counters.reactive_repairs++;
+      this.servicing.add(key);
+      this.note("warn", `repairing broken ${kind} ${name}${last === undefined ? "" : " (re-sent)"}`);
+    };
+
+    for (const gate of this.gates.values()) {
+      if (!gate.broken || gate.maintenance) continue;
+      await tryRepair("gate", gate.name, () => this.sim.repairGate(gate.name));
+    }
+    for (const spot of this.spots.values()) {
+      if (!spot.broken || spot.maintenance) continue;
+      // The one in-use rule the spec states: Penalty_RepairAnOccupiedSpot.
+      if (spot.occupants.size || spot.reserved_for) continue;
+      await tryRepair("spot", spot.name, () => this.sim.repairSpot(spot.name));
+    }
+    for (const dev of this.devices.values()) {
+      if (dev.kind !== "fan" || !dev.broken || dev.maintenance) continue;
+      const repair = this.sim.repairFan?.bind(this.sim);
+      if (!repair) continue; // only fans are repairable; a broken light can only be reported
+      await tryRepair("fan", dev.name, () => repair(dev.name));
+    }
+  }
+
+  /**
+   * Preventive maintenance: repair what is worn *before* it breaks, and only while it is
+   * idle. Repairing a gate a car is passing, or an occupied spot, is itself a penalty -
+   * the same guards the manual controls use apply here.
+   *
+   * At most maintMaxConcurrentPerZone components are out of service in a zone at once, so
+   * a maintenance sweep never costs a zone its capacity.
+   */
+  private async sweepMaintenance(now: number) {
+    if (this.replaying || !this.cfg.preventiveMaintenance || !this.synced) return;
+    if (now - this.lastMaintSweep < this.cfg.maintIntervalGameS) return;
+    this.lastMaintSweep = now;
+
+    // The cap counts only the repairs *we* started, not everything out of service.
+    // Counting broken components too meant one stuck failure vetoed preventive work in
+    // its whole zone indefinitely - which is precisely how the rest of it breaks next.
+    // Their capacity is already lost and refusing to service the survivors cannot get it
+    // back; what we control is how many components we take out on top of that.
+    const busyZones = new Map<string, number>();
+    const bump = (zone: string) => busyZones.set(zone, (busyZones.get(zone) ?? 0) + 1);
+    for (const key of this.servicing) bump(this.zoneOfComponent(key));
+
+    for (const due of this.wear.due(this.wearThresholds)) {
+      const zone = due.zone || "-";
+      if ((busyZones.get(zone) ?? 0) >= this.cfg.maintMaxConcurrentPerZone) continue;
+      if (await this.serviceComponent(due.kind, due.name, due.ratio)) bump(zone);
+    }
+  }
+
+  /** The zone of a "kind:name" key, for the maintenance budget. */
+  private zoneOfComponent(key: string): string {
+    const [kind, ...rest] = key.split(":");
+    const name = rest.join(":");
+    const live = kind === "gate" ? this.gates.get(name)
+      : kind === "spot" ? this.spots.get(name)
+      : this.devices.get(key);
+    return live?.zone || "-";
+  }
+
+  /** Sends a preventive repair if that component is idle and repairable right now. */
+  private async serviceComponent(kind: ComponentKind, name: string, ratio: number): Promise<boolean> {
+    const why = `worn (${Math.round(ratio * 100)}% of service interval)`;
+    if (kind === "gate") {
+      const gate = this.gates.get(name);
+      // A broken gate is the simulator's to fix; maintenance on a busy one is a penalty.
+      if (!gate || gate.broken || gate.maintenance || this.gateBusy(name)) return false; // broken: repairBroken handles it
+      if (gate.state !== GateState.Closed) return false; // mid-cycle: catch it next sweep
+      if (!await this.cmd("repair", () => this.sim.repairGate(name), [name])) return false;
+      gate.maintenance = true;
+    } else if (kind === "spot") {
+      const spot = this.spots.get(name);
+      if (!spot || spot.broken || spot.maintenance) return false;
+      if (spot.occupants.size || spot.reserved_for) return false; // repairing an occupied spot is a penalty
+      if (!await this.cmd("repair", () => this.sim.repairSpot(name), [name])) return false;
+      spot.maintenance = true;
+    } else {
+      const dev = this.devices.get(deviceKey(kind, name));
+      if (!dev || dev.broken || dev.maintenance) return false;
+      // Only fans are repairable; a worn light is reported but cannot be serviced.
+      if (kind !== "fan" || !this.sim.repairFan) return false;
+      // Never pull the fan a zone is actively relying on.
+      if (this.wantsVentilation(dev)) return false;
+      const repair = this.sim.repairFan.bind(this.sim);
+      if (!await this.cmd("repair", () => repair(name), [name])) return false;
+      dev.maintenance = true;
+      if (dev.on) this.bankRuntime(dev);
+    }
+    this.counters.preventive_repairs++;
+    this.servicing.add(`${kind}:${name}`);
+    this.wear.markRepaired(kind, name, new Date().toISOString());
+    this.note("warn", `preventive maintenance on ${kind} ${name}: ${why}`);
+    return true;
+  }
+
+  /** Wear is written periodically, not per cycle: one transaction instead of thousands. */
+  private persistWear() {
+    if (this.replaying) return;
+    const now = nowS();
+    if (now - this.lastWearSave < WEAR_SAVE_INTERVAL_S) return;
+    this.lastWearSave = now;
+    // Running devices have on-time that is not banked yet; include it so a crash loses
+    // at most one save interval rather than a whole run of accumulated runtime.
+    const gameNow = this.clock.now();
+    for (const dev of this.devices.values()) {
+      const key = deviceKey(dev.kind, dev.name);
+      const since = this.deviceOnSince.get(key);
+      if (since === undefined) continue;
+      this.wear.addRuntime(dev.kind, dev.name, Math.max(0, gameNow - since), dev.zone);
+      this.deviceOnSince.set(key, gameNow);
+    }
+    this.store.saveWear(this.wear.all());
   }
 
   /**
@@ -1298,9 +1907,6 @@ export class Controller {
       error = (ex as Error).message ?? String(ex);
       this.counters.command_errors++;
       this.note("error", `command ${what}(${args.join(", ")}) failed: ${error}`);
-      // #region agent log
-      fetch('http://127.0.0.1:7502/ingest/5b601716-2241-46fc-9c1b-1aa5e55ae0bd',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'6f1c01'},body:JSON.stringify({sessionId:'6f1c01',hypothesisId:'F',location:'controller.ts:cmd',message:'command failed',data:{what,args,error,ms:Math.round(performance.now()-t0),qDepth:(this.queue as {depth?:number}).depth},timestamp:Date.now()})}).catch(()=>{});
-      // #endregion
     }
     this.store.recordAction({
       at: new Date().toISOString(), cmd: what, args: args.map(String), ok, error,
@@ -1359,11 +1965,17 @@ export class Controller {
       }
       case "repair": {
         if (gate.maintenance) return fail(`${name} is already under maintenance`);
-        if (inUse) return fail(`${name} is in use - repairing it now is a penalty`);
+        // A broken gate is always repairable: nothing can cross it, so the queue behind it
+        // is stuck *because* it is broken, and repairing is the only way out. Only a car
+        // crossing a working gate is a reason to wait.
+        if (!gate.broken && this.gatePassing(name)) {
+          return fail(`${name} has a car crossing right now - try again in a moment`);
+        }
         if (!(await this.cmd("repair", () => this.sim.repairGate(name), [name], actor))) return fail(`the simulator rejected repair ${name}`);
         gate.maintenance = true;
-        this.note("warn", `${actor} started maintenance on ${name}`);
-        return ok(`maintenance started on ${name}`);
+        this.servicing.add(`gate:${name}`);
+        this.note("warn", `${actor} started ${gate.broken ? "repair of broken" : "maintenance on"} ${name}`);
+        return ok(`${gate.broken ? "repair" : "maintenance"} started on ${name}`);
       }
     }
   }
@@ -1378,6 +1990,90 @@ export class Controller {
     spot.maintenance = true; // not offered to cars until the simulator reports it fixed
     this.note("warn", `${actor} started maintenance on ${name}`);
     return ok(`maintenance started on ${name}`);
+  }
+
+  /**
+   * Manual control of a light or exhaust fan. "auto" hands it back to the CO and daylight
+   * loops, which run on the next reading or tick. Refuses anything the spec penalises:
+   * operating or repairing a broken or under-maintenance device.
+   */
+  async manualDevice(kind: "light" | "fan", name: string, action: DeviceAction, actor: string): Promise<ControlResult> {
+    const dev = this.devices.get(deviceKey(kind, name));
+    if (!dev) return fail(`unknown ${kind} ${name}`);
+    const unusable = dev.broken ? "broken" : dev.maintenance ? "under maintenance" : null;
+
+    if (action === "repair") {
+      if (kind !== "fan") return fail("only exhaust fans can be repaired");
+      if (!this.sim.repairFan) return fail("this level has no exhaust fan repair endpoint");
+      if (dev.maintenance) return fail(`${name} is already under maintenance`);
+      if (this.wantsVentilation(dev)) {
+        return fail(`${dev.zone || "the park"} needs ventilation right now - repairing ${name} would leave it unventilated`);
+      }
+      const repair = this.sim.repairFan.bind(this.sim);
+      if (!(await this.cmd("repair", () => repair(name), [name], actor))) return fail(`the simulator rejected repair ${name}`);
+      dev.maintenance = true;
+      if (dev.on) this.bankRuntime(dev);
+      this.wear.markRepaired(kind, name, new Date().toISOString(), dev.zone);
+      this.note("warn", `${actor} started maintenance on ${kind} ${name}`);
+      return ok(`maintenance started on ${name}`);
+    }
+
+    if (action === "auto") {
+      dev.hold = null;
+      this.note("info", `${actor} returned ${kind} ${name} to automatic`);
+      if (kind === "fan") await this.applyVentilation();
+      else await this.applyLighting();
+      return ok(`${name} back to automatic`);
+    }
+
+    if (unusable) return fail(`${name} is ${unusable} - operating it now is a penalty`);
+    const on = action === "on";
+    // Refuse up front rather than accept and silently override a moment later: switching
+    // a fan off while its zone is polluted is Penalty_ZonePollutedWithHighCO.
+    if (kind === "fan" && !on && this.wantsVentilation(dev)) {
+      const where = dev.zone || "the park";
+      return fail(`${where} is above the CO threshold - ${name} must keep extracting`);
+    }
+    dev.hold = action;
+    // setDevice skips a device already in the wanted state, which is the right answer here.
+    if (dev.on === on) return ok(`${name} is already ${action}`);
+    if (!(await this.setDevice(dev, on, actor))) return fail(`the simulator rejected ${action} ${name}`);
+    this.note("warn", `${actor} switched ${kind} ${name} ${action}`);
+    return ok(`${name} switched ${action}`);
+  }
+
+  /**
+   * Apply tuned settings while the run continues, and store them so a restart keeps them.
+   * The ventilation and lighting loops run straight away, so a new threshold takes effect
+   * now rather than at the next CO reading - which may be minutes away, or never if the
+   * zone has gone quiet.
+   */
+  async updateSettings(patch: Record<string, unknown>, actor: string): Promise<ControlResult> {
+    const checked = validateTunables(patch);
+    if (!checked.ok) return fail(checked.errors.join("; "));
+
+    const changed: string[] = [];
+    for (const [key, value] of Object.entries(checked.values)) {
+      const before = (this.cfg as Record<string, unknown>)[key];
+      if (before === value) continue;
+      (this.cfg as Record<string, unknown>)[key] = value;
+      changed.push(`${key} ${before} -> ${value}`);
+    }
+    if (!changed.length) return ok("no change");
+
+    this.store.saveRuntimeSettings(checked.values as Record<string, unknown>, actor);
+    this.store.recordAction({
+      at: new Date().toISOString(), cmd: "settings", args: changed, ok: true, error: null, ms: 0, actor,
+    });
+    this.note("warn", `${actor} changed settings: ${changed.join(", ")}`);
+
+    // Re-evaluate every zone against the new thresholds, so a lowered "ventilate at"
+    // starts the fans now instead of waiting for the next reading to cross it.
+    for (const air of this.air.all()) this.air.update(air.zone, air.level, air.danger, air.at);
+    await this.applyVentilation();
+    await this.recomputeDaytime();
+    await this.applyLighting();
+    return ok(`updated ${changed.length} setting${changed.length === 1 ? "" : "s"}`);
   }
 
   /** Close an entrance (arriving cars are turned away; queued cars are still served) or reopen it. */
@@ -1449,6 +2145,41 @@ export class Controller {
       recent_sessions: this.completed.slice(-50),
       counters: { ...this.counters },
       feed: this.feed.slice(-100),
+      devices: [...this.devices.values()]
+        .sort((a, b) => a.kind.localeCompare(b.kind) || a.zone.localeCompare(b.zone) || a.name.localeCompare(b.name))
+        .map((d): DeviceView => ({
+          kind: d.kind, name: d.name, zone: d.zone, on: d.on,
+          broken: d.broken, maintenance: d.maintenance, pending: d.pending, hold: d.hold,
+          reason: d.kind === "fan" ? this.ventilationReason(d) : this.lightingReason(d),
+        })),
+      components: this.componentWear(),
+      air: this.air.all() as ZoneAirView[],
+      daytime: this.daytime,
     };
+  }
+
+  /** Usage cycles joined with each component's live broken/maintenance status. */
+  private componentWear(): ComponentWearView[] {
+    const t = this.wearThresholds;
+    return this.wear.all()
+      .map((w): ComponentWearView => {
+        const since = wearSinceRepair(w);
+        const live = w.kind === "gate" ? this.gates.get(w.name)
+          : w.kind === "spot" ? this.spots.get(w.name)
+          : this.devices.get(deviceKey(w.kind, w.name));
+        return {
+          kind: w.kind, name: w.name, zone: w.zone,
+          cycles: w.cycles, runtime_game_s: Math.round(w.runtime_game_s),
+          breakdowns: w.breakdowns, repairs: w.repairs,
+          cycles_since_repair: since.cycles,
+          runtime_since_repair_game_s: Math.round(since.runtime_game_s),
+          ratio: Math.round(wearRatio(w, t) * 1000) / 1000,
+          age_s: Math.round(ageSinceService(w)),
+          broken: live?.broken ?? false,
+          maintenance: live?.maintenance ?? false,
+          last_repair_at: w.last_repair_at, last_broken_at: w.last_broken_at,
+        };
+      })
+      .sort((a, b) => b.ratio - a.ratio || a.kind.localeCompare(b.kind) || a.name.localeCompare(b.name));
   }
 }

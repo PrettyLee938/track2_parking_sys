@@ -14,6 +14,7 @@ import { mkdirSync } from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
 import type { ActionView, EventView, Role, SessionView, SimEventBase, StatsResponse, UserView } from "@gpa/shared";
+import type { Wear } from "./components";
 
 /** A received webhook as the controller sees it: the payload plus intake metadata. */
 export type EventRecord = SimEventBase & {
@@ -110,6 +111,35 @@ CREATE TABLE IF NOT EXISTS auth_sessions (
   created_at  TEXT NOT NULL,
   expires_ms  INTEGER NOT NULL
 );
+
+-- Settings an admin changed from the dashboard. These override the environment, so a
+-- value tuned during a run survives a restart (otherwise it would silently revert).
+CREATE TABLE IF NOT EXISTS runtime_settings (
+  key        TEXT PRIMARY KEY,
+  value      TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  updated_by TEXT
+);
+
+-- Usage cycles per component. Persisted because preventive maintenance decides on
+-- cumulative wear: a server restart mid-run must not reset the wear clock.
+CREATE TABLE IF NOT EXISTS component_wear (
+  kind              TEXT NOT NULL,
+  name              TEXT NOT NULL,
+  zone              TEXT NOT NULL DEFAULT '',
+  cycles            INTEGER NOT NULL DEFAULT 0,
+  runtime_game_s    REAL NOT NULL DEFAULT 0,
+  breakdowns        INTEGER NOT NULL DEFAULT 0,
+  repairs           INTEGER NOT NULL DEFAULT 0,
+  cycles_at_repair  INTEGER NOT NULL DEFAULT 0,
+  runtime_at_repair REAL NOT NULL DEFAULT 0,
+  last_repair_at    TEXT,
+  last_broken_at    TEXT,
+  -- When the component was first seen, so an age-based service interval has a start
+  -- point before the first repair ever happens.
+  first_seen_at     TEXT,
+  PRIMARY KEY (kind, name)
+);
 `;
 
 const toUser = (r: Record<string, unknown>): UserView => ({
@@ -164,6 +194,9 @@ export class Store {
     }
     this.db.exec("CREATE INDEX IF NOT EXISTS events_flow ON events (spot_type, direction, received_ms)");
     if (!columns("actions").has("actor")) this.db.exec("ALTER TABLE actions ADD COLUMN actor TEXT");
+    if (!columns("component_wear").has("first_seen_at")) {
+      this.db.exec("ALTER TABLE component_wear ADD COLUMN first_seen_at TEXT");
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -201,6 +234,56 @@ export class Store {
 
   recordAction(a: ActionRecord): void {
     this.insAction.run({ ...a, args: JSON.stringify(a.args), ok: a.ok ? 1 : 0, actor: a.actor ?? null });
+  }
+
+  /** Settings changed from the dashboard, as raw strings the config schema re-parses. */
+  loadRuntimeSettings(): Record<string, string> {
+    const rows = this.db.prepare("SELECT key, value FROM runtime_settings").all() as { key: string; value: string }[];
+    return Object.fromEntries(rows.map((r) => [r.key, r.value]));
+  }
+
+  saveRuntimeSettings(values: Record<string, unknown>, actor: string | null): void {
+    const up = this.db.prepare(`
+      INSERT INTO runtime_settings (key, value, updated_at, updated_by)
+      VALUES (@key, @value, @updated_at, @updated_by)
+      ON CONFLICT (key) DO UPDATE SET
+        value = excluded.value, updated_at = excluded.updated_at, updated_by = excluded.updated_by`);
+    const at = new Date().toISOString();
+    this.db.transaction(() => {
+      for (const [key, value] of Object.entries(values)) {
+        up.run({ key, value: String(value), updated_at: at, updated_by: actor });
+      }
+    })();
+  }
+
+  /** Drops an override so the environment value applies again. */
+  clearRuntimeSetting(key: string): void {
+    this.db.prepare("DELETE FROM runtime_settings WHERE key = ?").run(key);
+  }
+
+  /** Every component's accumulated wear, for the maintenance scheduler to resume from. */
+  loadWear(): Wear[] {
+    return this.db.prepare(
+      `SELECT kind, name, zone, cycles, runtime_game_s, breakdowns, repairs, cycles_at_repair,
+              runtime_at_repair, last_repair_at, last_broken_at, first_seen_at FROM component_wear`,
+    ).all() as Wear[];
+  }
+
+  /** Writes the whole book in one transaction - called periodically, not per cycle. */
+  saveWear(rows: Wear[]): void {
+    if (!rows.length) return;
+    const up = this.db.prepare(`
+      INSERT INTO component_wear (kind, name, zone, cycles, runtime_game_s, breakdowns, repairs,
+                                  cycles_at_repair, runtime_at_repair, last_repair_at, last_broken_at)
+      VALUES (@kind, @name, @zone, @cycles, @runtime_game_s, @breakdowns, @repairs,
+              @cycles_at_repair, @runtime_at_repair, @last_repair_at, @last_broken_at)
+      ON CONFLICT (kind, name) DO UPDATE SET
+        zone = excluded.zone, cycles = excluded.cycles, runtime_game_s = excluded.runtime_game_s,
+        breakdowns = excluded.breakdowns, repairs = excluded.repairs,
+        cycles_at_repair = excluded.cycles_at_repair, runtime_at_repair = excluded.runtime_at_repair,
+        last_repair_at = excluded.last_repair_at, last_broken_at = excluded.last_broken_at,
+        first_seen_at = COALESCE(component_wear.first_seen_at, excluded.first_seen_at)`);
+    this.db.transaction((all: Wear[]) => { for (const r of all) up.run(r); })(rows);
   }
 
   // ---------------------------------------------------------------------------

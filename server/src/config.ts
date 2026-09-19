@@ -42,6 +42,17 @@ const schema = z.object({
   // Level 1 sends Signature=null. Turn on once a level signs its webhooks, so
   // unsigned events are dropped as untrusted.
   requireSignature: bool().default(false),
+  // Safety net for the switch above: while no signature has ever verified, this many
+  // failing events are still processed (and flagged) instead of dropped, so a wrong
+  // guess about the signing scheme cannot silently kill a run. Spent budget is never
+  // refilled, and the first valid signature ends grace immediately. 0 = strict.
+  signatureGraceN: num().int().min(0).default(50),
+  // When the active scheme fails, try the other known ones and adopt any that matches.
+  // Only until a signature verifies; after that a bad signature is a bad signature.
+  signatureAutodetect: bool().default(true),
+  // Shared secret folded into the webhook hash, if the simulator signs with one.
+  // Without it the digest proves integrity, not origin.
+  webhookSecret: z.string().optional(),
 
   // ---- site layout ----------------------------------------------------------
   topologyDir: repoPath().default(path.resolve(REPO_ROOT, "topology")),
@@ -130,6 +141,66 @@ const schema = z.object({
   // Any other car (driving to or waiting at an exit) with no event for this long.
   staleCarGameS: num().positive().default(600),
 
+  // ---- components: wear, maintenance, air and light (Level 2) -----------------------
+  // Usage cycles since a component's last repair before preventive maintenance is due.
+  // Set any of these to 0 to stop scheduling that kind. The defaults are deliberately
+  // conservative guesses: no Level 2 run has shown yet how fast components actually wear,
+  // so watch component_broken events and tighten them once real numbers exist.
+  maintGateCycles: num().int().min(0).default(400),
+  maintSpotCycles: num().int().min(0).default(120),
+  maintDeviceCycles: num().int().min(0).default(200),
+  // On-time (GAME seconds) for a light or fan before its service is due.
+  maintDeviceRuntimeGameS: num().min(0).default(7200),
+  // Elapsed time since a component's last repair before it is due, whatever its usage.
+  // The simulator breaks components on usage, not age, so this is off by default - but
+  // set it small (e.g. 60) to watch the whole maintenance loop run during a test, without
+  // having to drive hundreds of gate cycles first. Real seconds, so a test is predictable
+  // regardless of game speed. 0 disables.
+  maintMaxAgeS: num().min(0).default(0),
+  // Send preventive repairs at all. Off = track wear and show it, but never act.
+  preventiveMaintenance: bool().default(true),
+  // Repair a component as soon as the simulator reports it broken. Nothing it serves works
+  // until it is fixed, and a broken entry gate stops that entrance entirely, so this is not
+  // subject to the per-zone budget below: its capacity is already lost.
+  autoRepairBroken: bool().default(true),
+  // A repair command the simulator drops leaves the component broken forever. Re-send it
+  // this often (GAME seconds) while it is still reported broken.
+  repairRetryGameS: num().positive().default(30),
+  // Never take more than this many components out of service at once in one zone: a
+  // maintenance sweep must not cost a zone its capacity.
+  maintMaxConcurrentPerZone: num().int().min(1).default(1),
+  // Game seconds between maintenance sweeps.
+  maintIntervalGameS: num().positive().default(60),
+
+  // Carbon monoxide: ventilate at or above onPpm, stop below offPpm. The gap is
+  // deliberate - one threshold makes the fans chatter, and each flip is a usage cycle.
+  coOnPpm: num().nonnegative().default(5),
+  coOffPpm: num().nonnegative().default(3),
+  // Act on a "High"/"Danger" DangerLevel even when the number is below coOnPpm.
+  coTrustDangerWord: bool().default(true),
+  // The simulator sends carbon_monoxide_event only at Mid and above (~50), so below that
+  // a webhook-only system is blind: a threshold under Mid can never fire, because nothing
+  // reports the level. Polling GET /list-zones this often (GAME seconds) fills that gap,
+  // and also recovers if a CO webhook is lost. 0 = off. The docs warn every list-* call
+  // carries a simulated operational cost, so keep the interval generous - but an
+  // unventilated zone is Penalty_ZonePollutedWithHighCO, so this is a poll worth paying for.
+  //
+  // On by default. The docs say to call list-* endpoints only at load or after a crash,
+  // and that guidance is right for spots, barriers, lights and fans - those change only
+  // when something breaks, and a webhook tells us when it does. Carbon monoxide is the
+  // exception: it changes continuously, the only push notification arrives at Mid and
+  // above, and an unventilated zone is Penalty_ZonePollutedWithHighCO. A threshold below
+  // Mid cannot be honoured at all without reading the level, so the choice is to poll or
+  // to have the setting quietly do nothing. Set 0 to turn it off and rely on webhooks.
+  zonePollGameS: num().min(0).default(10),
+
+  // Lights off during simulator daytime. No endpoint is known to report the in-world
+  // hour, so the window is read off the ServerDateTime the simulator stamps on events.
+  // Set lightsFollowDaylight=false to leave lights entirely alone.
+  lightsFollowDaylight: bool().default(true),
+  daylightFromHour: num().min(0).max(24).default(7),
+  daylightToHour: num().min(0).max(24).default(19),
+
   // ---- our own timing (REAL seconds) ------------------------------------------------
   tickIntervalS: num().positive().default(0.5),
   maxChargeAttempts: num().int().min(1).default(3),
@@ -170,6 +241,130 @@ const schema = z.object({
 export type Settings = z.infer<typeof schema>;
 
 export const envName = (key: string) => "GPA_" + key.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toUpperCase();
+
+// ---------------------------------------------------------------------------
+// runtime-tunable settings
+// ---------------------------------------------------------------------------
+/**
+ * The settings an admin may change from the dashboard while a run is going.
+ *
+ * Deliberately a short list. Anything that decides *how the park is operated* - when to
+ * ventilate, when to light, when to service - is worth tuning live, because the right
+ * value only becomes apparent from watching a run. Everything else (ports, credentials,
+ * paths, timing the simulator itself imposes) stays in .env: changing it mid-run would
+ * either do nothing or break the connection to the simulator.
+ */
+export interface Tunable {
+  key: keyof Settings & string;
+  label: string;
+  group: "Ventilation" | "Lighting" | "Maintenance";
+  type: "number" | "boolean";
+  /** Unit shown next to the field. */
+  unit?: string;
+  /** Lowest value the dashboard field accepts. NOT the value itself. */
+
+  inputMin?: number;
+  /** Highest value the dashboard field accepts. NOT the value itself. */
+
+  inputMax?: number;
+  step?: number;
+  help: string;
+}
+
+export const TUNABLES: Tunable[] = [
+  { key: "coOnPpm", label: "Ventilate at", group: "Ventilation", type: "number", unit: "ppm", inputMin: 0, inputMax: 1000,
+    help: "Start a zone's exhaust fans at or above this CO level. The simulator treats 50 as the medium threshold." },
+  { key: "coOffPpm", label: "Stop below", group: "Ventilation", type: "number", unit: "ppm", inputMin: 0, inputMax: 1000,
+    help: "Stop the fans only once CO falls below this. Keep it under the start level: with both equal the fans chatter on and off around the boundary, and every flip is a usage cycle." },
+  { key: "zonePollGameS", label: "Poll zones every", group: "Ventilation", type: "number", unit: "game s", inputMin: 0, inputMax: 3600,
+    help: "Read CO straight from the simulator this often. The simulator only SENDS a CO event at Mid (~50) and above, so without this a threshold below Mid can never fire - nothing reports the lower levels. 0 = off. Each poll has a simulated cost, so keep it generous." },
+  { key: "coTrustDangerWord", label: "Trust the danger level", group: "Ventilation", type: "boolean",
+    help: "Ventilate on a Mid/High/Critical DangerLevel even when the number is below the start level." },
+
+  { key: "lightsFollowDaylight", label: "Lights follow daylight", group: "Lighting", type: "boolean",
+    help: "Switch lights by the simulator's time of day. Off leaves them entirely to manual control." },
+  { key: "daylightFromHour", label: "Day starts", group: "Lighting", type: "number", unit: "h", inputMin: 0, inputMax: 24, step: 0.5,
+    help: "Simulator hour at which daylight begins and the lights go off." },
+  { key: "daylightToHour", label: "Day ends", group: "Lighting", type: "number", unit: "h", inputMin: 0, inputMax: 24, step: 0.5,
+    help: "Simulator hour at which night begins and the lights come on." },
+
+  { key: "preventiveMaintenance", label: "Preventive maintenance", group: "Maintenance", type: "boolean",
+    help: "Repair worn components before they break. Off still tracks and shows wear, but sends nothing." },
+  { key: "autoRepairBroken", label: "Auto-repair broken", group: "Maintenance", type: "boolean",
+    help: "Repair a component as soon as the simulator reports it broken, without waiting for an operator." },
+  { key: "maintGateCycles", label: "Gate service interval", group: "Maintenance", type: "number", unit: "cycles", inputMin: 0,
+    help: "Confirmed opens since a gate's last repair before it is due. 0 never schedules gates." },
+  { key: "maintSpotCycles", label: "Spot service interval", group: "Maintenance", type: "number", unit: "cycles", inputMin: 0,
+    help: "Cars parked since a spot's last repair before it is due. 0 never schedules spots." },
+  { key: "maintDeviceCycles", label: "Light/fan switch interval", group: "Maintenance", type: "number", unit: "cycles", inputMin: 0,
+    help: "On/off switches since a light or fan's last repair before it is due. 0 disables." },
+  { key: "maintDeviceRuntimeGameS", label: "Light/fan running interval", group: "Maintenance", type: "number", unit: "game s", inputMin: 0,
+    help: "On-time in game seconds since a light or fan's last repair before it is due. 0 disables." },
+  { key: "maintMaxConcurrentPerZone", label: "Concurrent repairs per zone", group: "Maintenance", type: "number", inputMin: 1, inputMax: 20,
+    help: "How many components we take out of service at once in one zone. Components already broken do not count." },
+  { key: "maintIntervalGameS", label: "Check wear every", group: "Maintenance", type: "number", unit: "game s", inputMin: 1,
+    help: "Game seconds between maintenance sweeps." },
+  { key: "maintMaxAgeS", label: "Service by age", group: "Maintenance", type: "number", unit: "s", inputMin: 0,
+    help: "Service every component this long after its last repair, whatever its usage. Real seconds. 0 = off (the simulator breaks things by usage, not age). Set it to 60 to watch the whole maintenance loop run during a test." },
+];
+
+/**
+ * Tunables whose current value falls outside their own declared min/max.
+ *
+ * `min`/`max` bound what an admin may *type*, not the value itself, so a bound edited to
+ * look like a value (max: 5 when the default is 50) leaves the setting above its own
+ * ceiling - and then every settings save is rejected with a confusing message about a
+ * field nobody touched. Checked at startup so that shows up immediately.
+ */
+export function outOfRangeTunables(cfg: Settings): string[] {
+  const problems: string[] = [];
+  for (const t of TUNABLES) {
+    if (t.type !== "number") continue;
+    const value = cfg[t.key] as number;
+    if (t.inputMin !== undefined && value < t.inputMin) problems.push(`${envName(t.key)}=${value} is below its allowed minimum ${t.inputMin}`);
+    if (t.inputMax !== undefined && value > t.inputMax) problems.push(`${envName(t.key)}=${value} is above its allowed maximum ${t.inputMax}`);
+  }
+  return problems;
+}
+
+export const TUNABLE_KEYS = new Set<string>(TUNABLES.map((t) => t.key));
+
+/**
+ * Validates a patch of tunable settings against the same schema the environment uses,
+ * so a value typed into the dashboard cannot be looser than one set in .env.
+ * Returns the coerced values, or the problems found.
+ */
+export function validateTunables(patch: Record<string, unknown>): { ok: true; values: Partial<Settings> } | { ok: false; errors: string[] } {
+  const errors: string[] = [];
+  const values: Record<string, unknown> = {};
+  for (const [key, raw] of Object.entries(patch)) {
+    const spec = TUNABLES.find((t) => t.key === key);
+    if (!spec) {
+      errors.push(`${key} is not a runtime setting`);
+      continue;
+    }
+    // The schema parses strings (it reads env vars), so feed it the same shape.
+    const field = schema.shape[key as keyof typeof schema.shape];
+    const parsed = field.safeParse(typeof raw === "boolean" ? String(raw) : String(raw));
+    if (!parsed.success) {
+      errors.push(`${spec.label}: ${parsed.error.issues[0]?.message ?? "invalid"}`);
+      continue;
+    }
+    const value = parsed.data as number | boolean;
+    if (spec.type === "number" && typeof value === "number") {
+      if (spec.inputMin !== undefined && value < spec.inputMin) errors.push(`${spec.label}: must be at least ${spec.inputMin}`);
+      if (spec.inputMax !== undefined && value > spec.inputMax) errors.push(`${spec.label}: must be at most ${spec.inputMax}`);
+    }
+    values[key] = value;
+  }
+  // Hysteresis only works one way round; equal values make the fans chatter.
+  const on = (values.coOnPpm ?? undefined) as number | undefined;
+  const off = (values.coOffPpm ?? undefined) as number | undefined;
+  if (on !== undefined && off !== undefined && off > on) {
+    errors.push("Stop below must not be higher than Ventilate at, or the fans would never stop");
+  }
+  return errors.length ? { ok: false, errors } : { ok: true, values: values as Partial<Settings> };
+}
 
 /** Settings from the environment (and repo-root .env), with typed overrides on top. */
 export function loadSettings(env: NodeJS.ProcessEnv = process.env, overrides: Partial<Settings> = {}): Settings {

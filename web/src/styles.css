@@ -235,3 +235,47 @@ button.spot:not(:disabled):hover { box-shadow: 0 0 0 2px var(--axis); }
 .toast { display: flex; gap: 8px; align-items: flex-start; background: var(--surface); border: 1px solid var(--border); border-left: 4px solid var(--good);
   border-radius: 8px; padding: 10px 12px; box-shadow: 0 6px 24px rgba(0, 0, 0, 0.15); font-size: 13px; }
 .toast.fail { border-left-color: var(--critical); }
+
+/* ---------- components page: wear bars & filter row ---------- */
+.wear-bar { position: relative; display: flex; align-items: center; gap: 8px; min-width: 120px; }
+.wear-bar::before {
+  content: ""; flex: 1; height: 6px; border-radius: 3px; background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+.wear-fill {
+  position: absolute; left: 0; height: 6px; border-radius: 3px; max-width: calc(100% - 40px);
+  background: var(--good);
+}
+.wear-fill.warning { background: var(--warning); }
+.wear-fill.serious { background: var(--serious); }
+.wear-fill.critical { background: var(--critical); }
+.wear-fill.info { background: var(--info); }
+.wear-pct { min-width: 34px; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+.row-gap { display: inline-flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.check { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); cursor: pointer; }
+.check input { cursor: pointer; }
+
+/* ---------- components page: live settings editor ---------- */
+/* align-items: start keeps a short group its own height instead of stretching to match
+   the tallest, which left a band of dead space under Ventilation and Lighting. */
+.settings-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 20px 24px; align-items: start;
+}
+.settings-group h3 { margin: 0 0 10px; font-size: 0.95rem; }
+.setting {
+  display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 4px 10px;
+  padding: 8px 10px; border: 1px solid transparent; border-radius: 8px;
+}
+.setting:hover { background: var(--surface-2); }
+.setting.changed { border-color: var(--info); background: var(--surface-2); }
+.setting-label { font-weight: 500; }
+.setting-input { display: inline-flex; align-items: center; gap: 6px; }
+.setting-input input { width: 84px; }
+.setting input[type="number"] {
+  font: inherit; padding: 4px 6px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--surface); color: var(--ink); text-align: right;
+}
+.setting-help { grid-column: 1 / -1; line-height: 1.35; }
+.device-reason { margin: 2px 0 6px; line-height: 1.35; }

@@ -12,7 +12,13 @@ import type { Settings } from "./config";
 
 export class SimError extends Error {}
 
-/** What the controller needs from the simulator (a fake implements it in tests). */
+/**
+ * What the controller needs from the simulator (a fake implements it in tests).
+ *
+ * The light and fan calls are optional: Level 1 has neither, and a fake that predates
+ * them stays valid. The controller checks before calling, so a level without them
+ * simply never ventilates or switches lights.
+ */
 export interface SimApi {
   listParkingSpots(): Promise<SimParkingSpot[]>;
   listBarriers(): Promise<SimBarrier[]>;
@@ -22,6 +28,14 @@ export interface SimApi {
   carCharge(plate: string, parkingCost: number, chargingCost: number): Promise<void>;
   repairGate(name: string): Promise<void>;
   repairSpot(name: string): Promise<void>;
+  listZones?(): Promise<unknown[]>;
+  listLights?(): Promise<unknown[]>;
+  listExhaustFans?(): Promise<unknown[]>;
+  lightOn?(name: string): Promise<void>;
+  lightOff?(name: string): Promise<void>;
+  fanOn?(name: string): Promise<void>;
+  fanOff?(name: string): Promise<void>;
+  repairFan?(name: string): Promise<void>;
 }
 
 export class SimClient implements SimApi {

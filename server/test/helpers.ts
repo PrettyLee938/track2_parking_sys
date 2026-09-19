@@ -1,6 +1,6 @@
 /** Test doubles and event builders shared by the controller tests. */
 import Fastify from "fastify";
-import type { SimBarrier, SimParkingSpot } from "@gpa/shared";
+import type { SimBarrier, SimDevice, SimParkingSpot } from "@gpa/shared";
 import { registerRoutes } from "../src/app";
 import { AuthService, hashPassword } from "../src/auth";
 import { loadSettings, type Settings } from "../src/config";
@@ -15,6 +15,10 @@ export type Call = [string, ...(string | number)[]];
 
 export class FakeSim implements SimApi {
   calls: Call[] = [];
+  /** Level 2 only: leave empty and the light/fan endpoints behave as if absent. */
+  lights: SimDevice[] = [];
+  fans: SimDevice[] = [];
+
   constructor(public spots: SimParkingSpot[], public barriers: SimBarrier[]) {}
 
   static lvl1(nSpots = 3) {
@@ -33,10 +37,36 @@ export class FakeSim implements SimApi {
   async repairGate(n: string) { this.calls.push(["repair", n]); }
   async repairSpot(n: string) { this.calls.push(["repair", n]); }
 
+  /** list-zones rows; the only source of CO below the simulator Mid threshold. */
+  zones: Array<{ name: string; gasCarbonMonoxideLevel: number; risk: string }> = [];
+  async listZones() { return this.zones; }
+  async listLights() { return this.lights; }
+  async listExhaustFans() { return this.fans; }
+  async lightOn(n: string) { this.calls.push(["light-on", n]); }
+  async lightOff(n: string) { this.calls.push(["light-off", n]); }
+  async fanOn(n: string) { this.calls.push(["fan-on", n]); }
+  async fanOff(n: string) { this.calls.push(["fan-off", n]); }
+  async repairFan(n: string) { this.calls.push(["repair", n]); }
+
   charges() { return this.calls.filter((c) => c[0] === "charge"); }
   gotos() { return this.calls.filter((c) => c[0] === "goto"); }
+  of(cmd: string) { return this.calls.filter((c) => c[0] === cmd); }
   last() { return this.calls.at(-1); }
 }
+
+export const light = (name: string, zone = "ZONE1", on = false): SimDevice =>
+  ({ name, zoneParent: zone, isOn: on, broken: false, isUnderMaintenance: false });
+
+export const fan = (name: string, zone = "ZONE1", on = false): SimDevice =>
+  ({ name, zoneParent: zone, isOn: on, broken: false, isUnderMaintenance: false });
+
+export const coEv = (zone: string, level: number, danger = "Normal"): EventRecord =>
+  ({ EventClass: "carbon_monoxide_event", ZoneName: zone, CarbonMonoxideLevel: String(level),
+     DangerLevel: danger, EventId: nextId(), _received_at: "" });
+
+export const componentEv = (type: string, name: string, broken: boolean): EventRecord =>
+  ({ EventClass: broken ? "component_broken" : "component_fixed", Type: type, Name: name,
+     EventId: nextId(), _received_at: new Date().toISOString() });
 
 /** Collects scheduled tasks instead of running them, so tests stay deterministic. */
 export class RecordingQueue implements TaskQueue {
@@ -105,9 +135,10 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
   return loadSettings({}, overrides);
 }
 
-export async function make(opts: { sim?: FakeSim; topo?: Topology; topologies?: Topology[]; cfg?: Partial<Settings> } = {}) {
+export async function make(opts: { sim?: FakeSim; topo?: Topology; topologies?: Topology[]; cfg?: Partial<Settings>; store?: Store } = {}) {
   const sim = opts.sim ?? FakeSim.lvl1();
-  const store = new Store(":memory:");
+  // Pass a store to simulate a restart: a second controller resuming the same database.
+  const store = opts.store ?? new Store(":memory:");
   const queue = new RecordingQueue();
   // closeIdleGatesOnSync off keeps call logs simple; it has its own test.
   const cfg = testSettings({ closeIdleGatesOnSync: false, ...opts.cfg });

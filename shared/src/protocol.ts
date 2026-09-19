@@ -122,3 +122,84 @@ export interface SimBarrier {
   isUnderMaintenance: boolean;
   state: string;
 }
+
+/**
+ * Lights and exhaust fans (Level 2). Their exact field spellings are not documented and
+ * Level 1 has neither, so every field is optional here and `normaliseDevice` accepts the
+ * spellings the simulator might plausibly use. Run `npm run probe:lvl2 -w server` against
+ * a Level 2 map to see the real shape, then tighten this.
+ */
+export interface SimDevice {
+  name?: string;
+  Name?: string;
+  zoneParent?: string;
+  zone?: string;
+  ZoneName?: string;
+  broken?: boolean;
+  isUnderMaintenance?: boolean;
+  /** Seen as isOn / state / status depending on the endpoint. */
+  isOn?: boolean;
+  state?: string | boolean;
+  status?: string | boolean;
+  [field: string]: unknown;
+}
+
+/** True/false from a field that may be a boolean, "On"/"Off", or "true"/"false". */
+export function isDeviceOn(raw: unknown): boolean {
+  if (typeof raw === "boolean") return raw;
+  const s = String(raw ?? "").trim().toLowerCase();
+  return s === "on" || s === "true" || s === "running" || s === "active" || s === "1";
+}
+
+/** Pulls the fields we need out of whichever spelling the simulator used. */
+export function normaliseDevice(raw: SimDevice): { name: string; zone: string; on: boolean; broken: boolean; maintenance: boolean } {
+  const state = raw.isOn ?? raw.state ?? raw.status;
+  return {
+    name: String(raw.name ?? raw.Name ?? ""),
+    zone: String(raw.zoneParent ?? raw.zone ?? raw.ZoneName ?? ""),
+    on: isDeviceOn(state),
+    broken: !!raw.broken,
+    maintenance: !!raw.isUnderMaintenance,
+  };
+}
+
+/**
+ * A row from GET /list-zones: the only way to see a zone's CO *below* the Mid threshold.
+ * The simulator sends carbon_monoxide_event only at Mid and above (~50), so a system that
+ * listens for events alone is blind to anything quieter, and cannot act on a threshold
+ * lower than Mid however it is configured.
+ */
+export interface SimZone {
+  name?: string;
+  Name?: string;
+  gasCarbonMonoxideLevel?: number | string;
+  CarbonMonoxideLevel?: number | string;
+  risk?: string;
+  DangerLevel?: string;
+  [field: string]: unknown;
+}
+
+/** Pulls the fields we need out of a list-zones row, whichever spelling it used. */
+export function normaliseZone(raw: SimZone): { name: string; level: number; danger: string } | null {
+  const name = String(raw.name ?? raw.Name ?? "").trim();
+  if (!name) return null;
+  return {
+    name,
+    level: Number(raw.gasCarbonMonoxideLevel ?? raw.CarbonMonoxideLevel ?? 0) || 0,
+    danger: String(raw.risk ?? raw.DangerLevel ?? ""),
+  };
+}
+
+/** carbon_monoxide_event payload. DangerLevel is the simulator's own wording. */
+export interface CarbonMonoxideEvent extends SimEventBase {
+  ZoneName?: string;
+  CarbonMonoxideLevel?: string | number;
+  DangerLevel?: string;
+}
+
+/**
+ * DangerLevel values that mean "ventilate now", whatever the numeric threshold says.
+ * The simulator's levels are {Safe, Mid, High, Critical} and it only sends the event at
+ * Mid and above - so "mid" already means elevated, not normal.
+ */
+export const CO_DANGER_WORDS = ["mid", "high", "danger", "dangerous", "critical", "severe", "warning"] as const;

@@ -109,10 +109,78 @@ export interface Counters {
   penalties: number;
   fines: number;
   command_errors: number;
+  /** component_broken events received. */
+  breakdowns: number;
+  /** Repairs we sent before a component broke, because its wear crossed the threshold. */
+  preventive_repairs: number;
+  /** Repairs we sent because the simulator reported the component broken. */
+  reactive_repairs: number;
+  /** Fan on/off switches driven by CO readings. */
+  ventilation_changes: number;
+  /** Light on/off switches driven by the daylight window. */
+  light_changes: number;
 }
 
 /** Where the game speed figure came from (see the server's config.ts, "game clock"). */
 export type TimeScaleSource = "configured" | "gate timing" | "learned" | "simulator settings" | "default";
+
+/** The four kinds of component we track wear, breakdowns and repairs for. */
+export type ComponentKind = "gate" | "spot" | "light" | "fan";
+
+/** A light or exhaust fan. Gates and spots have their own richer views. */
+export interface DeviceView {
+  kind: "light" | "fan";
+  name: string;
+  zone: string;
+  on: boolean;
+  broken: boolean;
+  maintenance: boolean;
+  /** A command we sent that the simulator has not confirmed yet. */
+  pending: "on" | "off" | null;
+  /** Operator override; while set the automatic loops leave this device alone. */
+  hold: "on" | "off" | null;
+  /**
+   * Why it is in this state, in one line. A fan can be off for several unrelated reasons
+   * (broken, held, no reading for its zone, below the threshold) and "off" alone does not
+   * say which.
+   */
+  reason: string;
+}
+
+/** Accumulated usage for one component, and how close it is to needing service. */
+export interface ComponentWearView {
+  kind: ComponentKind;
+  name: string;
+  zone: string;
+  cycles: number;
+  runtime_game_s: number;
+  breakdowns: number;
+  repairs: number;
+  /** Cycles and on-time since the last repair - what maintenance acts on. */
+  cycles_since_repair: number;
+  runtime_since_repair_game_s: number;
+  /** Fraction of the service threshold used: >= 1 means due. */
+  ratio: number;
+  /** Seconds since the last repair, or since first sight. Drives the age interval. */
+  age_s: number;
+  /** Live status, joined from the gate/spot/device it belongs to. */
+  broken: boolean;
+  maintenance: boolean;
+  last_repair_at: string | null;
+  last_broken_at: string | null;
+}
+
+/** Carbon monoxide in one zone, and whether its fans should be running. */
+export interface ZoneAirView {
+  zone: string;
+  level: number;
+  danger: string;
+  ventilating: boolean;
+  at: string;
+  /** Readings at or above the action threshold since startup. */
+  excursions: number;
+  peak: number;
+}
 
 /** GET /api/state */
 export interface StateSnapshot {
@@ -130,6 +198,14 @@ export interface StateSnapshot {
   recent_sessions: SessionView[];
   counters: Counters;
   feed: FeedItem[];
+  /** Lights and exhaust fans. Empty on levels that have none. */
+  devices: DeviceView[];
+  /** Usage cycles per component, worst-worn first. */
+  components: ComponentWearView[];
+  /** Per-zone CO readings, newest per zone. */
+  air: ZoneAirView[];
+  /** Whether it is daytime in the simulator, or null when no stamp has been seen. */
+  daytime: boolean | null;
 }
 
 /** GET /api/sessions */
@@ -163,6 +239,28 @@ export interface CreateUserRequest { username: string; password: string; role: R
 /** PATCH /api/users/:id - any subset */
 export interface UpdateUserRequest { role?: Role; disabled?: boolean; password?: string }
 
+/** One setting an admin can retune while a run is going (GET /api/settings). */
+export interface TunableView {
+  key: string;
+  label: string;
+  group: "Ventilation" | "Lighting" | "Maintenance";
+  type: "number" | "boolean";
+  unit?: string;
+  /** Bounds on what the dashboard field accepts - NOT the value itself. */
+  inputMin?: number;
+  inputMax?: number;
+  step?: number;
+  help: string;
+  value: number | boolean;
+}
+
+/** GET /api/settings */
+export interface SettingsResponse {
+  items: TunableView[];
+  /** Keys currently overridden from the dashboard rather than the environment. */
+  overridden: string[];
+}
+
 /** Error body for every 4xx. */
 export interface ApiError { error: string }
 
@@ -171,6 +269,9 @@ export interface ApiError { error: string }
 // ---------------------------------------------------------------------------
 /** POST /api/control/gates/:name/:action */
 export type GateAction = "open" | "close" | "auto" | "repair";
+
+/** POST /api/control/devices/:kind/:name/:action - lights and exhaust fans. */
+export type DeviceAction = "on" | "off" | "auto" | "repair";
 
 /** Result of any control command. */
 export interface ControlResult { ok: boolean; message: string }

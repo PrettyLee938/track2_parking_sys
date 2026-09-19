@@ -22,7 +22,8 @@
     "report:window": "tsx tools/window.ts",
     "report:speed": "tsx tools/speedReplay.ts",
     "user:password": "tsx tools/setPassword.ts",
-    "fake-sim": "tsx tools/fakeSim.ts"
+    "fake-sim": "tsx tools/fakeSim.ts",
+    "probe:lvl2": "tsx tools/probeLevel2.ts"
   },
   "dependencies": {
     "@gpa/shared": "^0.1.0",

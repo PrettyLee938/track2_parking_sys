@@ -7,16 +7,18 @@ import { Badge, ToastProvider } from "./components/ui";
 import { AuthProvider, useAuth } from "./lib/auth";
 import { useLiveState } from "./lib/live";
 import { Admin } from "./pages/Admin";
+import { Components } from "./pages/Components";
 import { Login } from "./pages/Login";
 import { Logs } from "./pages/Logs";
 import { Operations } from "./pages/Operations";
 import { Overview } from "./pages/Overview";
 import { Stats } from "./pages/Stats";
 
-type Route = "overview" | "operations" | "logs" | "stats" | "admin";
+type Route = "overview" | "operations" | "components" | "logs" | "stats" | "admin";
 const ROUTES: { id: Route; label: string; adminOnly?: boolean }[] = [
   { id: "overview", label: "Overview" },
   { id: "operations", label: "Operations" },
+  { id: "components", label: "Components" },
   { id: "logs", label: "Logs" },
   { id: "stats", label: "Statistics" },
   { id: "admin", label: "Admin", adminOnly: true },
@@ -81,6 +83,7 @@ function Shell() {
             {!state.synced && <p className="banner">Waiting for the simulator - start it and load a level.</p>}
             {current === "overview" && <Overview s={state} />}
             {current === "operations" && <Operations s={state} />}
+            {current === "components" && <Components s={state} />}
             {current === "logs" && <Logs />}
             {current === "stats" && <Stats spots={state.spots} />}
             {current === "admin" && <Admin />}

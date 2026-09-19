@@ -13,11 +13,11 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type {
-  ActionsResponse, ApiError, ControlResult, CreateUserRequest, EventsResponse, GateAction, LoginRequest, MeResponse, Role,
-  SessionsResponse, StateSnapshot, StatsResponse, TimeseriesResponse, UpdateUserRequest, UserView, UsersResponse,
+  ActionsResponse, ApiError, ControlResult, CreateUserRequest, DeviceAction, EventsResponse, GateAction, LoginRequest, MeResponse, Role,
+  SessionsResponse, SettingsResponse, StateSnapshot, StatsResponse, TimeseriesResponse, UpdateUserRequest, UserView, UsersResponse,
 } from "@gpa/shared";
 import { AuthService, hashPassword, hasRole, validateCredentials } from "./auth";
-import { REPO_ROOT, type Settings } from "./config";
+import { REPO_ROOT, TUNABLES, TUNABLE_KEYS, type Settings } from "./config";
 import type { Controller } from "./controller";
 import type { EventRecord, Store } from "./store";
 import { Intake, parseRaw } from "./webhook";
@@ -69,7 +69,12 @@ const isLoopback = (ip: string) => ip === "127.0.0.1" || ip === "::1" || ip === 
 
 export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
   const { cfg, controller, store, auth } = deps;
-  const intake = deps.intake ?? new Intake(cfg.requireSignature);
+  const intake = deps.intake ?? new Intake({
+    requireSignature: cfg.requireSignature,
+    graceN: cfg.requireSignature ? cfg.signatureGraceN : 0,
+    autodetect: cfg.signatureAutodetect,
+    secret: cfg.webhookSecret,
+  });
   const recent: EventRecord[] = [];
 
   // Fastify logs every request at info level; one line per webhook is noise.
@@ -122,6 +127,7 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
     if (recent.length > cfg.recentEventsSize) recent.shift();
 
     if (meta.seqNote) req.log.warn(`sequence gap: ${meta.seqNote}`);
+    if (meta.note) req.log.warn(meta.note);
     if (!meta.accept) {
       req.log.warn(`dropped ${event.EventClass} (${meta.duplicate ? "duplicate" : `signature ${meta.sig}`})`);
     } else if (cfg.controllerEnabled) {
@@ -226,6 +232,15 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
     return control(reply, () => controller.exclusive(() => controller.manualGate(req.params.name, action, req.user!.username)));
   });
 
+  app.post<{ Params: { kind: string; name: string; action: string } }>(
+    "/api/control/devices/:kind/:name/:action", operator, async (req, reply) => {
+      const { kind, name, action } = req.params;
+      if (kind !== "light" && kind !== "fan") return err(reply, 400, "kind must be light or fan");
+      if (!["on", "off", "auto", "repair"].includes(action)) return err(reply, 400, `unknown action '${action}'`);
+      return controller.exclusive(() =>
+        controller.manualDevice(kind, name, action as DeviceAction, req.user!.username));
+    });
+
   app.post<{ Params: { name: string } }>("/api/control/spots/:name/repair", operator, async (req, reply) =>
     control(reply, () => controller.exclusive(() => controller.manualSpotRepair(req.params.name, req.user!.username))));
 
@@ -245,6 +260,27 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
   });
 
   app.get("/api/config", admin, async () => ({ ...cfg, simPassword: "***", adminPassword: cfg.adminPassword ? "***" : undefined }));
+
+  /** The settings an admin may retune while a run is going, with their current values. */
+  app.get("/api/settings", admin, async (): Promise<SettingsResponse> => ({
+    items: TUNABLES.map((t) => ({ ...t, value: cfg[t.key] as number | boolean })),
+    overridden: Object.keys(store.loadRuntimeSettings()),
+  }));
+
+  app.patch("/api/settings", admin, async (req, reply) => {
+    const body = jsonBody<Record<string, unknown>>(req);
+    if (!body || !Object.keys(body).length) return err(reply, 400, "no settings to change");
+    const result = await controller.exclusive(() => controller.updateSettings(body, req.user!.username));
+    if (!result.ok) return err(reply, 400, result.message);
+    return result;
+  });
+
+  /** Drop a dashboard override so the .env / environment value applies again. */
+  app.delete<{ Params: { key: string } }>("/api/settings/:key", admin, async (req, reply) => {
+    if (!TUNABLE_KEYS.has(req.params.key)) return err(reply, 400, `${req.params.key} is not a runtime setting`);
+    store.clearRuntimeSetting(req.params.key);
+    return { ok: true, message: `${req.params.key} reset - restart the server to pick up the environment value` } satisfies ControlResult;
+  });
 
   app.get("/api/users", admin, async (): Promise<UsersResponse> => ({ items: store.listUsers() }));
 
@@ -294,6 +330,10 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
     ...intake.stats, last_sequence_id: intake.lastSeq, controller_enabled: cfg.controllerEnabled,
   }));
   app.get<{ Querystring: { n?: string } }>("/debug/recent", debugAccess, async (req) => recent.slice(-(Number(req.query.n) || 20)));
+  /** Which signing scheme is in use, and - when one fails - exactly what was hashed. */
+  app.get("/debug/signature", debugAccess, async () => intake.diagnosis());
+  /** Why a fan is (or is not) running: every link in the chain, and where it stops. */
+  app.get("/debug/ventilation", debugAccess, async () => controller.ventilationDiagnosis());
   app.get("/debug/config", debugAccess, async () => ({ ...cfg, simPassword: "***", adminPassword: cfg.adminPassword ? "***" : undefined }));
 
   // ---------------------------------------------------------------------------
