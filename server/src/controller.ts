@@ -407,11 +407,17 @@ export class Controller implements Engine {
   }
 
   private upsertSpot(s: SimParkingSpot) {
-    const spot = this.spots.get(s.name) ?? new Spot(s.name, s.zoneParent || "", s.purpose, s.parkingForCarType || CarType.Any);
+    const previous = this.spots.get(s.name);
+    const oldBroken = previous?.broken;
+    const oldMaintenance = previous?.maintenance;
+    const spot = previous ?? new Spot(s.name, s.zoneParent || "", s.purpose, s.parkingForCarType || CarType.Any);
     spot.broken = s.broken;
     spot.maintenance = s.isUnderMaintenance;
     spot.detected = Number(s.detectedCars) || 0; // a count on Level 1, not a list of plates
     this.spots.set(spot.name, spot);
+    if (previous && (oldBroken !== s.broken || oldMaintenance !== s.isUnderMaintenance)) {
+      this.note("info", `spot ${s.name} sync state: ${s.broken ? "BROKEN" : s.isUnderMaintenance ? "MAINTENANCE" : "available"}`);
+    }
   }
 
   private reset() {
@@ -679,9 +685,6 @@ export class Controller implements Engine {
       await this.turnAway(car, "no suitable spot");
       return this.pumpEntry(lane);
     }
-    // #region agent log
-    fetch('http://127.0.0.1:7502/ingest/5b601716-2241-46fc-9c1b-1aa5e55ae0bd',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'6f1c01'},body:JSON.stringify({sessionId:'6f1c01',hypothesisId:'A',location:'controller.ts:pumpEntry',message:'dispatch reserve',data:{plate,spot:spot.name,available:spot.available,occupants:[...spot.occupants],reserved_for:spot.reserved_for,detected:spot.detected,lane:lane.spot,queueLen:lane.queue.length,current:lane.current,timeScale:this.timeScale,qDepth:(this.queue as {depth?:number}).depth},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
     spot.reserved_for = plate;
     car.spot = spot.name;
     car.status = "dispatching";
@@ -710,8 +713,9 @@ export class Controller implements Engine {
     const plate = str(e, "CarPlateNumber")!;
     const car = this.cars.get(plate);
     if (plate === lane.current) {
-      if (car) car.status = "entering";
       lane.current = null;
+      if (car?.status === "turned_away") this.finish(car, e);
+      else if (car) car.status = "entering";
       if (lane.queue.length) await this.pumpEntry(lane);
       else this.later(this.cfg.gateCloseDelayGameS, `close ${lane.gate}`, () => this.closeGateIfIdle(lane.gate));
     } else if (lane.queue.includes(plate)) {
@@ -769,7 +773,9 @@ export class Controller implements Engine {
       lane.current = null;
       await this.pumpEntry(lane);
     }
-    this.note("info", `${plate} parked in ${name}`);
+    const unavailable = spot.broken || spot.maintenance;
+    this.note(unavailable ? "error" : "info", `${plate} parked in ${name} ` +
+      `(zone=${spot.zone || "-"}, type=${spot.car_type}, occupants=${spot.occupants.size}${unavailable ? ", component unavailable" : ""})`);
   }
 
   private async onSpotOut(e: EventRecord) {
@@ -790,7 +796,7 @@ export class Controller implements Engine {
     // exit CarIn arrives ~0.2s BEFORE this CarOut; overwriting "at_exit" here would
     // cancel the pending charge and the car escapes unpaid.
     if (car.status === "parked" || car.status === "unknown") car.status = "to_exit";
-    this.note("info", `${plate} left ${name}`);
+    this.note("info", `${plate} left ${name} (remaining occupants=${spot?.occupants.size ?? 0}, available=${spot?.available ?? false})`);
     for (const lane of this.entryLanes.values()) await this.pumpEntry(lane); // a spot just freed up
   }
 
@@ -811,16 +817,9 @@ export class Controller implements Engine {
   private async onExitIn(e: EventRecord, lane: ExitLane) {
     const plate = str(e, "CarPlateNumber")!;
     if (this.drivingIn(plate)) {
-      const inbound = this.cars.get(plate);
-      // #region agent log
-      fetch('http://127.0.0.1:7502/ingest/5b601716-2241-46fc-9c1b-1aa5e55ae0bd',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'6f1c01'},body:JSON.stringify({sessionId:'6f1c01',hypothesisId:'D',location:'controller.ts:onExitIn',message:'ignored exit CarIn while driving in',data:{plate,status:inbound?.status??null,spot:inbound?.spot??null,lane:lane.spot},timestamp:Date.now()})}).catch(()=>{});
-      // #endregion
       return;
     }
     const car = this.cars.get(plate) ?? this.adopt(e);
-    // #region agent log
-    fetch('http://127.0.0.1:7502/ingest/5b601716-2241-46fc-9c1b-1aa5e55ae0bd',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'6f1c01'},body:JSON.stringify({sessionId:'6f1c01',hypothesisId:'D',location:'controller.ts:onExitIn',message:'exit CarIn',data:{plate,status:car.status,spot:car.spot,charge_parking:car.charge_parking,lane:lane.spot,recentPaid:this.recentPaid.has(plate),timeScale:this.timeScale},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
     car.exit_lane = lane.spot;
     car.exit_at = e.ServerDateTime ?? null;
     // A car at the exit is no longer in its spot, whether or not we saw it leave. (From a
@@ -870,9 +869,6 @@ export class Controller implements Engine {
       basis = `planned ${car.planned_minutes}m, measured ${gameS !== null ? (gameS / 60).toFixed(2) : "?"} game-min`;
     }
     const electric = chargingCost(car.car_type, this.cfg);
-    // #region agent log
-    fetch('http://127.0.0.1:7502/ingest/5b601716-2241-46fc-9c1b-1aa5e55ae0bd',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'6f1c01'},body:JSON.stringify({sessionId:'6f1c01',hypothesisId:'B',location:'controller.ts:charge',message:'issuing charge',data:{plate,status:car.status,attempts:car.charge_attempts,planned:car.planned_minutes,gameS,parking,electric,basis,timeScale:this.timeScale,timeScaleSrc:this.timeScaleInfo.source,exitAt:car.exit_at,carType:car.car_type,qDepth:(this.queue as {depth?:number}).depth},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
     if (await this.cmd("charge", () => this.sim.carCharge(plate, parking, electric), [plate, parking, electric])) {
       car.charge_parking = parking;
       car.charge_electric = electric;
@@ -941,9 +937,6 @@ export class Controller implements Engine {
     if (car.status !== "released") {
       this.counters.escaped++;
       this.note("error", `${plate} left without being released (status ${car.status})`);
-      // #region agent log
-      fetch('http://127.0.0.1:7502/ingest/5b601716-2241-46fc-9c1b-1aa5e55ae0bd',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'6f1c01'},body:JSON.stringify({sessionId:'6f1c01',hypothesisId:'D',location:'controller.ts:onExitOut',message:'escaped unpaid',data:{plate,status:car.status,spot:car.spot,charge_parking:car.charge_parking,payment_ok:car.payment_ok,lane:lane.spot},timestamp:Date.now()})}).catch(()=>{});
-      // #endregion
     }
     lane.releasing.delete(plate);
     this.counters.exited++;
@@ -959,13 +952,6 @@ export class Controller implements Engine {
     this.counters.fines += Number(e.FineAmount) || 0;
     const reason = str(e, "Reason") ?? "";
     this.note("error", `PENALTY ${e.FineAmount}: ${reason} (${e.ComponentName})`);
-    const carForLog = this.carByComponent(str(e, "ComponentName"));
-    const spotNameForLog = OCCUPIED_SPOT_PATTERN.exec(reason)?.[1]?.trim();
-    const spotForLog = spotNameForLog ? this.spots.get(spotNameForLog) : (carForLog?.spot ? this.spots.get(carForLog.spot) : undefined);
-    // #region agent log
-    fetch('http://127.0.0.1:7502/ingest/5b601716-2241-46fc-9c1b-1aa5e55ae0bd',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'6f1c01'},body:JSON.stringify({sessionId:'6f1c01',hypothesisId:'A',location:'controller.ts:onPenalty',message:'penalty received',data:{reason,component:str(e,"ComponentName"),fine:e.FineAmount,carStatus:carForLog?.status??null,carSpot:carForLog?.spot??null,charge_parking:carForLog?.charge_parking??null,charge_attempts:carForLog?.charge_attempts??null,spotName:spotForLog?.name??null,occupants:spotForLog?[...spotForLog.occupants]:null,reserved_for:spotForLog?.reserved_for??null,detected:spotForLog?.detected??null,timeScale:this.timeScale,qDepth:(this.queue as {depth?:number}).depth},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
-
     const car = this.carByComponent(str(e, "ComponentName"));
     const lowered = reason.toLowerCase();
     if (lowered.includes(PenaltyReason.OccupiedSpot)) return this.onOccupiedSpotPenalty(reason, car);
@@ -1133,9 +1119,7 @@ export class Controller implements Engine {
     const gate = name ? this.gates.get(name) : undefined;
     if (gate && gate.operable && gate.hold !== "open" && !this.gateBusy(gate.name) && !gate.onOpen.length &&
         (gate.state === GateState.Open || gate.state === GateState.Opening)) {
-      // #region agent log
-      fetch('http://127.0.0.1:7502/ingest/5b601716-2241-46fc-9c1b-1aa5e55ae0bd',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'6f1c01'},body:JSON.stringify({sessionId:'6f1c01',hypothesisId:'E',location:'controller.ts:closeGateIfIdle',message:'closing idle gate',data:{name:gate.name,state:gate.state,busy:this.gateBusy(gate.name),onOpen:gate.onOpen.length,timeScale:this.timeScale},timestamp:Date.now()})}).catch(()=>{});
-      // #endregion
+      this.note("info", `closing idle gate ${gate.name}`);
       await this.requestClose(gate);
     }
   }
@@ -1146,6 +1130,20 @@ export class Controller implements Engine {
     const name = str(e, "Name") ?? "", kind = str(e, "Type");
     const target = kind === ComponentType.BarrierGate ? this.gates.get(name)
       : kind === ComponentType.ParkingSpot ? this.spots.get(name) : undefined;
+    if (kind === ComponentType.ParkingSpot) {
+      const spot = target as Spot | undefined;
+      if (!spot) {
+        this.note("warn", `ParkingSpot ${name} ${broken ? "broke" : "was fixed"}, but it is not in the loaded layout`);
+        return;
+      }
+      spot.broken = broken;
+      if (!broken) spot.maintenance = false;
+      this.note(broken ? "error" : "info", `ParkingSpot ${name} ${broken ? "BROKEN" : "fixed"} ` +
+        `(zone=${spot.zone || "-"}, occupant=${spot.occupant ?? "-"}, reserved=${spot.reserved_for ?? "-"})`);
+      if (broken) await this.rerouteFromBrokenSpot(spot);
+      else await this.resume();
+      return;
+    }
     if (target) {
       target.broken = broken;
       if (!broken) target.maintenance = false;
@@ -1192,6 +1190,34 @@ export class Controller implements Engine {
       }
     }
     for (const lane of this.entryLanes.values()) await this.pumpEntry(lane);
+  }
+
+  /** A spot can fail while a car is reserved for it but has not reached it yet. */
+  private async rerouteFromBrokenSpot(spot: Spot): Promise<void> {
+    const plate = spot.reserved_for;
+    if (!plate) return;
+    const car = this.cars.get(plate);
+    const lane = car?.entry_lane ? this.entryLanes.get(car.entry_lane) : undefined;
+    if (!car || !lane || lane.current !== plate || !MID_ENTRY.includes(car.status)) {
+      spot.reserved_for = null;
+      this.note("warn", `${spot.name} broke with reservation for ${plate}, but no active dispatch was found`);
+      return;
+    }
+    const alternative = this.allocator.choose(car.car_type, lane.zone, this.spots.values());
+    if (alternative) {
+      spot.reserved_for = null;
+      alternative.reserved_for = plate;
+      car.spot = alternative.name;
+      car.gotoResends = 0;
+      car.dispatchedG = this.clock.now();
+      this.note("warn", `${spot.name} broke while ${plate} was entering; rerouting to ${alternative.name}`);
+      await this.sendToSpot(plate, lane);
+      return;
+    }
+    this.note("error", `${spot.name} broke while ${plate} was entering; no compatible spare spot`);
+    spot.reserved_for = null;
+    car.spot = null;
+    await this.turnAway(car, `no compatible replacement for broken spot ${spot.name}`);
   }
 
   // ---------------------------------------------------------------------------
@@ -1372,9 +1398,6 @@ export class Controller implements Engine {
       error = (ex as Error).message ?? String(ex);
       this.counters.command_errors++;
       this.note("error", `command ${what}(${args.join(", ")}) failed: ${error}`);
-      // #region agent log
-      fetch('http://127.0.0.1:7502/ingest/5b601716-2241-46fc-9c1b-1aa5e55ae0bd',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'6f1c01'},body:JSON.stringify({sessionId:'6f1c01',hypothesisId:'F',location:'controller.ts:cmd',message:'command failed',data:{what,args,error,ms:Math.round(performance.now()-t0),qDepth:(this.queue as {depth?:number}).depth},timestamp:Date.now()})}).catch(()=>{});
-      // #endregion
     }
     this.store.recordAction({
       at: new Date().toISOString(), cmd: what, args: args.map(String), ok, error,
