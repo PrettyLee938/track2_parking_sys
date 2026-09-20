@@ -17,6 +17,7 @@ import type {
   ActionsResponse, ApiError, ControlResult, CreateUserRequest, DeliveriesResponse, DeliveryRejection, DeviceAction, EventsResponse,
   GateAction, LoginRequest, MeResponse, Role,
   ComponentsResponse, SessionsResponse, StateSnapshot, StatsResponse, TimeseriesResponse, UpdateUserRequest, UserView, UsersResponse,
+  VehicleDetailResponse, VehicleSearchResponse,
 } from "@gpa/shared";
 import { DELIVERY_REJECTIONS } from "@gpa/shared";
 import { AuthService, hashPassword, hasRole, validateCredentials } from "./auth";
@@ -301,6 +302,23 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
   });
 
   app.get("/api/penalties", operator, async (): Promise<{ items: ReturnType<Store["listPenalties"]> }> => ({ items: store.listPenalties() }));
+
+  /**
+   * Find a vehicle (Level 3 §7.10). A partial plate is enough; cars still inside come
+   * from live state, anything else from its last stored visit.
+   */
+  app.get<{ Querystring: { q?: string; limit?: string } }>("/api/vehicles", operator, async (req): Promise<VehicleSearchResponse> => {
+    const items = controller.search(req.query.q ?? "", Math.min(Number(req.query.limit) || 25, 200));
+    return { items, total: items.length };
+  });
+
+  app.get<{ Params: { plate: string }; Querystring: { limit?: string } }>("/api/vehicles/:plate", operator,
+    async (req, reply): Promise<VehicleDetailResponse | ApiError> => {
+      const plate = decodeURIComponent(req.params.plate);
+      const vehicle = controller.locate(plate);
+      if (!vehicle) return err(reply, 404, `no record of ${plate}`);
+      return { vehicle, timeline: store.vehicleTimeline(plate, Number(req.query.limit) || 300) };
+    });
 
   app.get<{ Querystring: { minutes?: string } }>("/api/stats", operator, async (req): Promise<StatsResponse> => {
     const minutes = Math.min(Math.max(Number(req.query.minutes) || 60, 5), 7 * 24 * 60);

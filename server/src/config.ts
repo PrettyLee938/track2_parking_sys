@@ -255,6 +255,12 @@ const schema = z.object({
   // one penalty, a zone nobody is sent to costs every arrival.
   spotSensorMaxLockedRatio: num().min(0).max(1).default(0.2),
 
+  // ---- double parking (Level 3, doubleParking.ts) ----------------------------------
+  // Warn when one spot holds two cars, when one car is recorded in two spots, or when we
+  // are about to send a car to a spot whose sensor already sees one. Observation only:
+  // incidents, feed lines and a dashboard badge - no command is ever sent.
+  doubleParkingWatch: bool().default(true),
+
   // ---- payments --------------------------------------------------------------------
   // A payment_made with a bad signature is a fake: the car has not paid. It is never
   // released for it; ask it to pay once more (the only way it can still pay).

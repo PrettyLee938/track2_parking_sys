@@ -9,6 +9,7 @@ import { useLiveState } from "./lib/live";
 import { Admin } from "./pages/Admin";
 import { Equipment } from "./pages/Equipment";
 import { Incidents } from "./pages/Incidents";
+import { Locate } from "./pages/Locate";
 import { Login } from "./pages/Login";
 import { Logs } from "./pages/Logs";
 import { Maintenance } from "./pages/Maintenance";
@@ -21,10 +22,11 @@ import { Stats } from "./pages/Stats";
 import type { LoginAttemptView } from "@gpa/shared";
 import { fmtDateTime } from "./lib/format";
 
-type Route = "overview" | "operations" | "equipment" | "maintenance" | "incidents" | "penalties" | "reports" | "logs" | "stats" | "security" | "admin";
+type Route = "overview" | "operations" | "locate" | "equipment" | "maintenance" | "incidents" | "penalties" | "reports" | "logs" | "stats" | "security" | "admin";
 const ROUTES: { id: Route; label: string; adminOnly?: boolean }[] = [
   { id: "overview", label: "Overview" },
   { id: "operations", label: "Operations" },
+  { id: "locate", label: "Find a vehicle" },
   { id: "equipment", label: "Equipment" },
   { id: "maintenance", label: "Maintenance" },
   { id: "incidents", label: "Incidents" },
@@ -96,6 +98,7 @@ function Shell() {
             {!state.synced && <p className="banner">Waiting for the simulator - start it and load a level.</p>}
             {current === "overview" && <Overview s={state} />}
             {current === "operations" && <Operations s={state} />}
+            {current === "locate" && <Locate />}
             {current === "equipment" && <Equipment s={state} />}
             {current === "maintenance" && <Maintenance />}
             {current === "incidents" && <Incidents />}

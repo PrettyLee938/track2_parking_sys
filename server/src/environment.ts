@@ -46,7 +46,7 @@ import { EventClass, SpotPurpose, type CarStatus, type ComponentKind, type Contr
 import type { Car } from "./controller";
 import type { EventRecord } from "./store";
 import type { Engine, Subsystem } from "./subsystems";
-import { nearestLight, placementFromLevelsDir, type SitePlacement } from "./topology";
+import { nearestLight, type SitePlacement } from "./topology";
 
 interface ZoneAir {
   level: number | null;   // latest CO reading
@@ -77,8 +77,11 @@ export class Environment implements Subsystem {
   polls = 0;
 
   // ---- lights ----------------------------------------------------------------
-  /** Light positions from the level file; empty when it is unavailable (then: group mode). */
-  private placement: SitePlacement | undefined;
+  /** Light positions from the level file; null when unavailable (then: group mode).
+   * Read once per layout by the controller and shared (engine.placement). */
+  private get placement(): SitePlacement | null {
+    return this.engine.placement;
+  }
   /** Light name -> game time it may stay on until. The hold that stops flicker. */
   private readonly litUntilG = new Map<string, number>();
   private lastSimHour: number | null = null;
@@ -96,13 +99,7 @@ export class Environment implements Subsystem {
   onSync(): void {
     // The level file names every light's coordinates; list-lights does not. Without it
     // "light only this car's row" is not answerable, so route mode falls back to group.
-    const { cfg, topology } = this.engine;
-    if (!cfg.simLevelsDir || !topology) return;
-    this.placement = placementFromLevelsDir(cfg.simLevelsDir, topology, {
-      info: (m) => this.engine.note("info", m),
-      error: (m) => this.engine.note("warn", m),
-    });
-    if (!this.placement && cfg.lightsDetail === "route") {
+    if (!this.placement && this.engine.cfg.lightsDetail === "route") {
       this.engine.note("warn", "no light positions in the level files - lighting whole zones instead of routes");
     }
   }

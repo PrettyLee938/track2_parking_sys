@@ -17,11 +17,12 @@
 import type { ComponentKind, ControlResult, FeedLevel } from "@gpa/shared";
 import type { ComponentRegistry } from "./components";
 import type { Settings } from "./config";
+import { DoubleParking } from "./doubleParking";
 import { Environment } from "./environment";
 import { SpotSensors } from "./sensorHealth";
 import type { Car, EntryLane, ExitLane, Gate, Spot } from "./controller";
 import type { EventRecord, Store } from "./store";
-import type { Topology } from "./topology";
+import type { SitePlacement, Topology } from "./topology";
 import type { GameClock } from "./gameClock";
 import type { SimApi } from "./simClient";
 
@@ -59,6 +60,8 @@ export interface Engine {
   /** The site layout in use. Null until the first sync. Carries the level file it came
    * from, which is the only source of component coordinates (list-* has none). */
   readonly topology: Topology | null;
+  /** Where lights and spots physically are, from that level file; null without one. */
+  readonly placement: SitePlacement | null;
   /** Every gate, spot, fan and light with health and usage (core, always present). */
   readonly components: ComponentRegistry;
   /** Dashboard feed + server log. */
@@ -75,5 +78,5 @@ export interface Engine {
 
 /** Every subsystem, in the order they see events. */
 export function createSubsystems(engine: Engine): Subsystem[] {
-  return [new SpotSensors(engine), new Environment(engine)];
+  return [new SpotSensors(engine), new DoubleParking(engine), new Environment(engine)];
 }

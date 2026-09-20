@@ -94,7 +94,11 @@ export interface CarView {
   entry_lane: string | null;
   exit_lane: string | null;
   arrived_at: string | null;
+  /** Where the car actually is (or was): the spot that reported it. */
   spot: string | null;
+  /** Where we sent it. Differs from `spot` when the car parked somewhere else - the
+   * interesting case for the vehicle locator (Level 3 §7.10). */
+  assigned_spot?: string | null;
   parked_at: string | null;
   left_spot_at: string | null;
   exit_at: string | null;
@@ -358,6 +362,77 @@ export interface SpotSensorSnapshot {
   out_of_service: number;
   spots: SpotSensorFaultView[];
 }
+
+// ---------------------------------------------------------------------------
+// double parking (Level 3 §7.9)
+// ---------------------------------------------------------------------------
+/**
+ * risk      about to send a car to a spot whose sensor already sees one (the early warning)
+ * occupied  a spot really does hold two cars
+ * two_spots one plate is recorded in two spots at once
+ */
+export type DoubleParkingKind = "risk" | "occupied" | "two_spots";
+
+export interface DoubleParkingAlertView {
+  kind: DoubleParkingKind;
+  spot: string;
+  zone: string;
+  plates: string[];
+  reason: string;
+  /** The spot physically next to it, when the level file says where things are. */
+  neighbour: string | null;
+  incident: number | null;
+}
+
+/** StateSnapshot.subsystems.double_parking */
+export interface DoubleParkingSnapshot {
+  watching: boolean;
+  warnings_total: number;
+  open: DoubleParkingAlertView[];
+}
+
+// ---------------------------------------------------------------------------
+// vehicle locator (Level 3 §7.10)
+// ---------------------------------------------------------------------------
+/** Where one car is, what it owes, and whether it parked where we told it to. */
+export interface VehicleLocationView {
+  plate: string;
+  /** True while the car is still being tracked; false for a finished visit. */
+  active: boolean;
+  status: CarStatus;
+  /** Plain English for a non-developer: "parked in S12 (ZONE1)". */
+  where: string;
+  zone: string | null;
+  entry_lane: string | null;
+  exit_lane: string | null;
+  assigned_spot: string | null;
+  actual_spot: string | null;
+  /** The interesting case: it parked somewhere other than where we sent it. */
+  parked_elsewhere: boolean;
+  car_type: string;
+  planned_minutes: number | null;
+  invoice_id: string | null;
+  invoice_amount: number | null;
+  invoice_status: string | null;
+  paid: number | null;
+  payment_ok: boolean | null;
+  arrived_at: string | null;
+  last_seen_at: string | null;
+}
+
+export interface VehicleTimelineEntry {
+  at: string;
+  /** event = a webhook about this car; command = something we sent about it. */
+  kind: "event" | "command" | "visit";
+  what: string;
+  detail: string | null;
+  ok: boolean;
+}
+
+/** GET /api/vehicles?q= */
+export interface VehicleSearchResponse { items: VehicleLocationView[]; total: number }
+/** GET /api/vehicles/:plate */
+export interface VehicleDetailResponse { vehicle: VehicleLocationView; timeline: VehicleTimelineEntry[] }
 
 export type IncidentStatus = "open" | "provisional" | "resolved" | "dismissed";
 export interface IncidentView {

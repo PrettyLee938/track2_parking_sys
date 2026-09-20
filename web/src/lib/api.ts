@@ -3,7 +3,7 @@ import type {
   ActionsResponse, AuditResponse, ComponentsResponse, ControlResult, CreateUserRequest, DailyReport, DeliveriesResponse, DeviceAction,
   EventsResponse, GateAction,
   IncidentView, LoginAttemptView, MaintenanceJobView, MeResponse, PenaltiesResponse, SessionsResponse, StateSnapshot,
-  StatsResponse, TimeseriesResponse, UpdateUserRequest, UsersResponse,
+  StatsResponse, TimeseriesResponse, UpdateUserRequest, UsersResponse, VehicleDetailResponse, VehicleSearchResponse,
 } from "@gpa/shared";
 
 export class ApiError extends Error {
@@ -56,6 +56,9 @@ export const api = {
   reconcileManualCar: (plate: string, minutes: number) =>
     call<ControlResult>("POST", `/api/control/cars/${encodeURIComponent(plate)}/reconcile`, { minutes }),
   penalties: (limit = 200) => call<PenaltiesResponse>("GET", `/api/penalties${qs({ limit })}`),
+  /** Locate a vehicle: partial plates are fine, past visits included. */
+  vehicles: (q = "", limit = 25) => call<VehicleSearchResponse>("GET", `/api/vehicles${qs({ q, limit })}`),
+  vehicle: (plate: string) => call<VehicleDetailResponse>("GET", `/api/vehicles/${encodeURIComponent(plate)}`),
   dailyReport: (day: string, kind: "operations" | "financial" = "operations") =>
     call<DailyReport>("GET", `/api/reports/daily${qs({ day, kind })}`),
   dailyReportExportUrl: (day: string, kind: "operations" | "financial" = "operations") =>

@@ -28,7 +28,7 @@ import {
   type CarStatus, type CarView, type ControlResult, type Counters, type FeedItem, type FeedLevel, type GateAction,
   type GateHold, type SessionView, type SimParkingSpot, type StateSnapshot, type TimeScaleSource, type TimeseriesPoint,
   type ZoneSummary,
-  type ComponentKind,
+  type ComponentKind, type VehicleLocationView,
 } from "@gpa/shared";
 import { getAllocator, spotNumber, type AllocContext, type Allocator, type AllocSpot } from "./allocation";
 import { chargingCost, parkingCost } from "./billing";
@@ -40,7 +40,7 @@ import { createSubsystems, type Engine, type Subsystem } from "./subsystems";
 import { SerialQueue, type TaskQueue } from "./serialQueue";
 import type { SimApi } from "./simClient";
 import type { ActionRecord, EventRecord, Store } from "./store";
-import { matches, resolve as resolveTopology, type RouteDef, type Topology } from "./topology";
+import { matches, placementFromLevelsDir, resolve as resolveTopology, type RouteDef, type SitePlacement, type Topology } from "./topology";
 
 export interface Logger {
   info(msg: string): void;
@@ -177,7 +177,7 @@ export interface Car extends CarView {
 function newCar(plate: string, carType: string, planned: number | null, status: CarStatus, extra: Partial<Car> = {}): Car {
   return {
     plate, car_type: carType, planned_minutes: planned, status,
-    entry_lane: null, exit_lane: null, arrived_at: null, spot: null, parked_at: null, left_spot_at: null,
+    entry_lane: null, exit_lane: null, arrived_at: null, spot: null, assigned_spot: null, parked_at: null, left_spot_at: null,
     exit_at: null, charge_parking: null, charge_electric: null, charge_attempts: 0, charge_override: null,
     paid: null, payment_ok: null, left_at: null,
     arrivedG: null, dispatchedG: null, parkedG: null, leftSpotG: null, releasedG: null, lastSeenG: null,
@@ -245,6 +245,12 @@ export class Controller implements Engine {
   private stopped = false;
 
   topology: Topology | null = null;
+  /**
+   * Where everything physically is, from the simulator's level file - the list-* endpoints
+   * carry no coordinates. Read once per layout and shared, because more than one subsystem
+   * needs geometry (which light is over which row; which spot is next to which).
+   */
+  placement: SitePlacement | null = null;
   spots = new Map<string, Spot>();
   gates = new Map<string, Gate>();
   entryLanes = new Map<string, EntryLane>();
@@ -398,6 +404,7 @@ export class Controller implements Engine {
       this.entryLanes = new Map(this.topology.entry_lanes.map((l) => [l.spot, { ...l, queue: [], current: null, closed: false }]));
       this.exitLanes = new Map(this.topology.exit_lanes.map((l) => [l.spot, { ...l, releasing: new Set<string>() }]));
     }
+    if (freshLayout || !this.placement) this.placement = this.loadPlacement();
 
     for (const s of liveSpots) this.upsertSpot(s);
     if (this.replayPending) {
@@ -433,6 +440,13 @@ export class Controller implements Engine {
       const names = new Set([...this.entryLanes.values(), ...this.exitLanes.values()].map((l) => l.gate).filter(Boolean));
       for (const name of names) await this.closeGateIfIdle(name);
     }
+  }
+
+  private loadPlacement(): SitePlacement | null {
+    if (!this.cfg.simLevelsDir || !this.topology) return null;
+    return placementFromLevelsDir(this.cfg.simLevelsDir, this.topology, {
+      info: (m) => this.note("info", m), error: (m) => this.note("warn", m),
+    }) ?? null;
   }
 
   /** The simulator reads settings.json when it starts: a new value there means it was
@@ -533,7 +547,7 @@ export class Controller implements Engine {
       if (previous?.reserved_for === plate) previous.reserved_for = null;
       const spot = this.spots.get(target);
       if (spot && !spot.occupants.has(plate)) spot.reserved_for = plate;
-      car.spot = target;
+      car.spot = car.assigned_spot = target;
       if (notYetIn) { car.status = "dispatched"; this.counters.admitted++; }
       car.dispatchedG = car.gotoG = t;
       if (lane && spot) car.routeGates = this.routeFor(lane, spot.zone)?.gates ?? [];
@@ -731,7 +745,7 @@ export class Controller implements Engine {
     }
     spot.reserved_for = plate;
     await this.each("reserved", (s) => s.reserved?.(spot.name, plate));
-    car.spot = spot.name;
+    car.spot = car.assigned_spot = spot.name;
     car.status = "dispatching";
     car.dispatchedG = this.clock.now();
     car.gotoResends = 0;
@@ -1182,7 +1196,7 @@ export class Controller implements Engine {
     }
     alt.reserved_for = car.plate;
     await this.each("reserved", (s) => s.reserved?.(alt.name, car.plate));
-    car.spot = alt.name;
+    car.spot = car.assigned_spot = alt.name;
     car.gotoResends = 0;
     car.dispatchedG = this.clock.now();
     const before = car.routeGates;
@@ -1875,6 +1889,71 @@ export class Controller implements Engine {
     this.note("warn", `${actor} ${open ? "reopened" : "closed"} entrance ${spot}`);
     if (open) await this.pumpEntry(lane);
     return ok(`entrance ${spot} ${open ? "open" : "closed - arriving cars are turned away"}`);
+  }
+
+  // ---------------------------------------------------------------------------
+  // vehicle locator (Level 3 §7.10)
+  // ---------------------------------------------------------------------------
+  /**
+   * Where a car is now, where it was sent versus where it actually parked, and what it
+   * owes. Cars still inside come from live state; anything else from its last stored
+   * visit, so a plate can still be answered for after it has gone.
+   */
+  locate(plate: string): VehicleLocationView | null {
+    const live = this.cars.get(plate);
+    const car: CarView | undefined = live ? publicCar(live) : this.store.lastSession(plate);
+    if (!car) return null;
+    const actual = car.spot ?? null;
+    const assigned = car.assigned_spot ?? null;
+    const zone = (actual && this.spots.get(actual)?.zone) ||
+      (car.entry_lane && this.entryLanes.get(car.entry_lane)?.zone) ||
+      (car.exit_lane && this.exitLanes.get(car.exit_lane)?.zone) || null;
+    const invoice = this.store.invoiceFor(car.visit_id, plate);
+    return {
+      plate,
+      active: !!live,
+      status: car.status,
+      where: this.whereIs(car, !!live),
+      zone,
+      entry_lane: car.entry_lane, exit_lane: car.exit_lane,
+      assigned_spot: assigned, actual_spot: actual,
+      // The case §7.10 cares about: it parked, just not where we told it to.
+      parked_elsewhere: !!assigned && !!actual && assigned !== actual,
+      car_type: car.car_type, planned_minutes: car.planned_minutes,
+      invoice_id: car.invoice_id ?? invoice?.invoice_id ?? null,
+      invoice_amount: car.charge_parking === null || car.charge_parking === undefined
+        ? (invoice ? invoice.parking_amount + invoice.electric_amount : null)
+        : car.charge_parking + (car.charge_electric ?? 0),
+      invoice_status: invoice?.status ?? null,
+      paid: car.paid, payment_ok: car.payment_ok,
+      arrived_at: car.arrived_at,
+      last_seen_at: car.left_at ?? car.exit_at ?? car.left_spot_at ?? car.parked_at ?? car.arrived_at,
+    };
+  }
+
+  /** One line a non-developer can read. */
+  private whereIs(car: CarView, live: boolean): string {
+    if (!live) return car.status === "gone" ? "left the car park" : `no longer tracked (last status: ${car.status})`;
+    switch (car.status) {
+      case "queued": return `waiting at entrance ${car.entry_lane}`;
+      case "dispatching": case "dispatched": return `driving in to ${car.spot ?? "a spot"}`;
+      case "entering": return `driving in${car.spot ? ` to ${car.spot}` : ""}`;
+      case "parked": return `parked in ${car.spot}`;
+      case "to_exit": return "driving to an exit";
+      case "at_exit": case "invoiced": case "payment_mismatch": return `at exit ${car.exit_lane}`;
+      case "released": return `leaving through ${car.exit_lane}`;
+      case "unknown": return `held at exit ${car.exit_lane} for reconciliation`;
+      default: return car.status;
+    }
+  }
+
+  /** Plates matching a (partial) search: cars inside first, then the stored visits. */
+  search(query: string, limit = 25): VehicleLocationView[] {
+    const q = query.trim().toUpperCase();
+    const live = [...this.cars.keys()].filter((p) => !q || p.toUpperCase().includes(q));
+    const past = q ? this.store.findPlates(query, limit) : [];
+    const plates = [...new Set([...live.sort(), ...past])].slice(0, limit);
+    return plates.map((p) => this.locate(p)).filter((v): v is VehicleLocationView => v !== null);
   }
 
   // ---------------------------------------------------------------------------

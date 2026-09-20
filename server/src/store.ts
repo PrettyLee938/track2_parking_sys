@@ -18,7 +18,7 @@ import Database from "better-sqlite3";
 import type {
   ActionView, AuditEntryView, ComponentEventView, ComponentKind, DeliveryRejection, DeliveryView, EventView, IncidentView,
   IncidentStatus, LoginAttemptView, MaintenanceJobView, MaintenanceStatus, PenaltyView, Role, SessionView, SimEventBase,
-  StatsResponse, UserView,
+  StatsResponse, UserView, VehicleTimelineEntry,
 } from "@gpa/shared";
 import { createHash } from "node:crypto";
 
@@ -440,6 +440,71 @@ export class Store {
     const rows = this.db.prepare(`SELECT COALESCE(rejection, 'accepted') AS outcome, count(*) n FROM events
       ${where.length ? `WHERE ${where.join(" AND ")}` : ""} GROUP BY outcome`).all(params) as { outcome: string; n: number }[];
     return Object.fromEntries(rows.map((r) => [r.outcome, r.n]));
+  }
+
+  // ---------------------------------------------------------------------------
+  // vehicle locator (Level 3 §7.10) - lifted from tools/plateHistory.ts
+  // ---------------------------------------------------------------------------
+  /** Plates matching a (partial) search, newest activity first. */
+  findPlates(search: string, limit = 25): string[] {
+    const like = `%${search}%`;
+    const rows = this.db.prepare(`SELECT plate, max(t) AS t FROM (
+        SELECT plate, received_ms AS t FROM events WHERE plate IS NOT NULL AND plate LIKE @like
+        UNION ALL
+        SELECT plate, CAST(strftime('%s', recorded_at) AS INTEGER) * 1000 AS t FROM sessions WHERE plate LIKE @like
+      ) GROUP BY plate ORDER BY t DESC LIMIT @limit`)
+      .all({ like, limit: Math.min(Math.max(limit, 1), 200) }) as { plate: string }[];
+    return rows.map((r) => r.plate);
+  }
+
+  /** The most recent finished visit for a plate, as it was stored. */
+  lastSession(plate: string): (SessionView & { recorded_at: string }) | undefined {
+    const row = this.db.prepare("SELECT recorded_at, data FROM sessions WHERE plate = ? ORDER BY id DESC LIMIT 1")
+      .get(plate) as { recorded_at: string; data: string } | undefined;
+    return row ? { ...JSON.parse(row.data), recorded_at: row.recorded_at } : undefined;
+  }
+
+  /**
+   * Everything that happened to one plate, oldest first: the webhooks about it and the
+   * commands we sent about it, merged. Penalties name cars without the space ("QNL430"),
+   * so those are matched too.
+   */
+  vehicleTimeline(plate: string, limit = 300): VehicleTimelineEntry[] {
+    const cap = Math.min(Math.max(limit, 1), 1000);
+    const compact = plate.replace(/ /g, "");
+    const events = this.db.prepare(`SELECT received_at, received_ms, payload, accepted, rejection FROM events
+      WHERE plate = @plate OR payload LIKE @component ORDER BY received_ms DESC LIMIT @cap`)
+      .all({ plate, component: `%"ComponentName":"${compact}"%`, cap }) as
+      { received_at: string; received_ms: number; payload: string; accepted: number; rejection: string | null }[];
+    const actions = this.db.prepare("SELECT at, cmd, args, ok, error FROM actions WHERE args LIKE ? ORDER BY id DESC LIMIT ?")
+      .all(`["${plate}"%`, cap) as { at: string; cmd: string; args: string; ok: number; error: string | null }[];
+
+    const out: (VehicleTimelineEntry & { t: number })[] = [];
+    for (const e of events) {
+      const p = JSON.parse(e.payload) as Record<string, unknown>;
+      const bits = [p.Direction, p.SpotName, p.Amount !== undefined ? `amount ${p.Amount}` : null, p.Reason]
+        .filter(Boolean).join(" ");
+      out.push({ t: e.received_ms, at: e.received_at, kind: "event", what: String(p.EventClass ?? "?"),
+        detail: [bits, e.rejection ? `REJECTED: ${e.rejection}` : null].filter(Boolean).join(" · ") || null,
+        ok: !!e.accepted });
+    }
+    for (const a of actions) {
+      out.push({ t: Date.parse(a.at), at: a.at, kind: "command", what: a.cmd,
+        detail: [(JSON.parse(a.args) as string[]).slice(1).join(" "), a.error].filter(Boolean).join(" · ") || null,
+        ok: !!a.ok });
+    }
+    for (const s of this.db.prepare("SELECT recorded_at, status, spot, charge_parking, paid FROM sessions WHERE plate = ? ORDER BY id DESC LIMIT 20")
+      .all(plate) as { recorded_at: string; status: string; spot: string | null; charge_parking: number | null; paid: number | null }[]) {
+      out.push({ t: Date.parse(s.recorded_at), at: s.recorded_at, kind: "visit", what: `visit ended (${s.status})`,
+        detail: [s.spot && `spot ${s.spot}`, s.charge_parking !== null && `invoiced ${s.charge_parking.toFixed(2)}`,
+          s.paid !== null && `paid ${s.paid.toFixed(2)}`].filter(Boolean).join(" · ") || null, ok: s.status === "gone" });
+    }
+    return out.sort((a, b) => a.t - b.t).map(({ t: _t, ...rest }) => rest);
+  }
+
+  /** The latest invoice for a plate/visit, for the locator's money column. */
+  invoiceFor(visitId: string | null | undefined, plate: string) {
+    return this.findInvoice(visitId, plate);
   }
 
   recordLoginAttempt(input: { username: string; userId?: number | null; ok: boolean; ip?: string | null; reason?: string | null }): number {
