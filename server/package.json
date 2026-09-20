@@ -13,6 +13,8 @@
     "topology": "tsx tools/buildTopology.ts",
     "smoke": "tsx tools/smokeTest.ts",
     "level2-live": "tsx tools/level2LiveCheck.ts",
+    "level3-live": "tsx tools/level3LiveCheck.ts",
+    "level3-stress": "tsx tools/level3Stress.ts",
     "single-car": "tsx tools/singleCarTest.ts",
     "report:timeline": "tsx tools/inspectRun.ts",
     "report:gates": "tsx tools/gateTimings.ts",

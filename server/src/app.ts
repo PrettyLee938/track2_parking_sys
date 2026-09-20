@@ -15,6 +15,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type {
   ActionsResponse, ApiError, ControlResult, CreateUserRequest, EventsResponse, GateAction, LoginRequest, MeResponse, Role,
   ComponentsResponse, SessionsResponse, StateSnapshot, StatsResponse, TimeseriesResponse, UpdateUserRequest, UserView, UsersResponse,
+  SecurityDecision,
 } from "@gpa/shared";
 import { AuthService, hashPassword, hasRole, validateCredentials } from "./auth";
 import { REPO_ROOT, type Settings } from "./config";
@@ -71,6 +72,9 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
   const { cfg, controller, store, auth } = deps;
   const intake = deps.intake ?? new Intake(cfg.signatureMode);
   const recent: EventRecord[] = [];
+  const security = (input: { ip?: string | null; eventId?: string | null; eventClass?: string | null; decision: SecurityDecision; reason: string; payload?: Record<string, unknown> | null }) => {
+    store.recordSecurityEvent(input);
+  };
 
   // Fastify logs every request at info level; one line per webhook is noise.
   app.addHook("onRoute", (route) => {
@@ -104,12 +108,14 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
   // simulator -> us
   // ---------------------------------------------------------------------------
   app.post("/webhook", async (req, reply) => {
-    const level2 = cfg.levelProfile === "level2" || cfg.levelProfile === "level3" ||
+    const level3 = cfg.levelProfile === "level3";
+    const level2 = cfg.levelProfile === "level2" || level3 ||
       (cfg.levelProfile === "auto" && (/lvl[23]/i.test(deps.controller.topology?.name ?? "") ||
         deps.controller.components.all("fan").length > 0 || deps.controller.components.all("light").length > 0));
     if ((level2 && cfg.webhookLoopbackOnly) && !isLoopback(req.ip)) {
+      security({ ip: req.ip, decision: "rejected", reason: "non-loopback Level 3 webhook ingress" });
       store.recordAudit({ action: "webhook.rejected", target: req.ip, ok: false, reason: "non-loopback Level 2 ingress" });
-      return err(reply, 403, "Level 2 webhooks are restricted to loopback");
+      return err(reply, 403, "Level 3 webhooks are restricted to loopback");
     }
     const receivedAt = new Date().toISOString();
     let event;
@@ -117,22 +123,31 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
       event = parseRaw(String(req.body ?? ""));
     } catch {
       req.log.error({ body: String(req.body).slice(0, 300) }, "non-JSON webhook");
+      security({ ip: req.ip, decision: "malformed", reason: "malformed JSON" });
       store.recordAudit({ action: "webhook.rejected", target: req.ip, ok: false, reason: "malformed JSON" });
       return reply.code(400).send({ ok: false });
     }
     if (typeof event.EventClass !== "string" || !event.EventClass) {
+      security({ ip: req.ip, decision: "malformed", reason: "missing EventClass", payload: event });
       store.recordAudit({ action: "webhook.rejected", target: req.ip, ok: false, reason: "missing EventClass" });
       return err(reply, 400, "webhook EventClass is required");
     }
+    if (level3 && (typeof event.EventId !== "string" || !event.EventId.trim())) {
+      security({ ip: req.ip, eventClass: event.EventClass, decision: "malformed", reason: "Level 3 webhook EventId is required", payload: event });
+      store.recordAudit({ action: "webhook.rejected", target: event.EventClass, ok: false, reason: "missing EventId" });
+      return err(reply, 400, "Level 3 webhooks require EventId");
+    }
     const identity = store.eventIdentity(event.EventId, event);
     if (identity === "conflict") {
-      const incident = store.createIncident({ status: "open", kind: "event_id_conflict", reason: `EventId ${event.EventId} was reused with a different payload`,
+      security({ ip: req.ip, eventId: event.EventId, eventClass: event.EventClass, decision: "conflict", reason: "event ID payload conflict", payload: event });
+      const incident = store.findOpenIncidentByEvidence("event_id_conflict", "event_id", String(event.EventId)) ?? store.createIncident({ status: "open", kind: "event_id_conflict", reason: `EventId ${event.EventId} was reused with a different payload`,
         confidence: "high", evidence: { event_id: event.EventId, payload: event } });
       store.recordAudit({ action: "webhook.rejected", target: String(event.EventId), ok: false, reason: "event ID payload conflict", detail: { incident: incident.id } });
       return err(reply, 409, "event ID was already used for a different payload");
     }
     const mode = cfg.signatureMode === "strict" || level2 ? "strict" : cfg.signatureMode;
     const meta = intake.check(event, identity === "duplicate", mode);
+    if (meta.duplicate) controller.counters.duplicate_requests++;
     const record: EventRecord = {
       ...event, _received_at: receivedAt, _sig: meta.sig, _duplicate: meta.duplicate,
       _seq_note: meta.seqNote, _accepted: meta.accept,
@@ -142,6 +157,9 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
     if (recent.length > cfg.recentEventsSize) recent.shift();
 
     if (meta.seqNote) req.log.warn(`sequence gap: ${meta.seqNote}`);
+    security({ ip: req.ip, eventId: event.EventId, eventClass: event.EventClass,
+      decision: meta.accept ? "accepted" : meta.duplicate ? "duplicate" : "invalid_signature",
+      reason: meta.accept ? "signature accepted" : meta.duplicate ? "duplicate event delivery" : `signature ${meta.sig}`, payload: event });
     if (!meta.accept) {
       req.log.warn(`dropped ${event.EventClass} (${meta.duplicate ? "duplicate" : `signature ${meta.sig}`})`);
       store.recordAudit({ action: "webhook.rejected", target: String(event.EventId ?? event.EventClass), ok: false,
@@ -262,6 +280,10 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
 
   app.get("/api/penalties", operator, async (): Promise<{ items: ReturnType<Store["listPenalties"]> }> => ({ items: store.listPenalties() }));
 
+  app.get<{ Querystring: { plate?: string; limit?: string } }>("/api/vehicles/locations", operator, async (req) => ({
+    items: store.listVehicleLocations({ plate: req.query.plate, limit: Number(req.query.limit) || 200 }),
+  }));
+
   app.get<{ Querystring: { minutes?: string } }>("/api/stats", operator, async (req): Promise<StatsResponse> => {
     const minutes = Math.min(Math.max(Number(req.query.minutes) || 60, 5), 7 * 24 * 60);
     const bucket = BUCKETS_S.find((b) => (minutes * 60) / b <= 40) ?? BUCKETS_S.at(-1)!;
@@ -271,6 +293,7 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
 
   const dailyReport = (day: string, kind: "operations" | "financial") => {
     const start = Date.parse(`${day}T00:00:00Z`), end = start + 86_400_000;
+    const startAt = new Date(start).toISOString(), endAt = new Date(end).toISOString();
     const stats = store.stats(start, end, 3600);
     const invoiceCount = store.db.prepare("SELECT count(*) n FROM invoices WHERE created_at >= ? AND created_at < ?")
       .get(new Date(start).toISOString(), new Date(end).toISOString()) as { n: number };
@@ -280,12 +303,19 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
       ? { ...stats.totals, invoices: Number(invoiceCount.n ?? 0), uncertain_payments: Number(uncertainCount.n ?? 0) }
       : { arrivals: stats.totals.arrivals, departures: stats.totals.departures, turned_away: stats.totals.turned_away,
         neglected: stats.totals.neglected, lost: stats.totals.lost, penalties: stats.totals.penalties, fines: stats.totals.fines,
-        payment_mismatches: stats.totals.payment_mismatches, escaped: stats.totals.escaped };
+        payment_mismatches: stats.totals.payment_mismatches, escaped: stats.totals.escaped,
+        duplicate_requests: stats.totals.duplicate_requests ?? 0, tampered_requests: stats.totals.tampered_requests ?? 0,
+        suspicious_payments: stats.totals.suspicious_payments ?? 0, double_parking: stats.totals.double_parking ?? 0,
+        gate_failovers: stats.totals.gate_failovers ?? 0 };
     return { run_id: null, day, kind, time_basis: "UTC received time; simulator calendar is provisional until anchored",
       provisional: true, generated_at: new Date().toISOString(), totals,
       equipment: controller.components.views() as unknown as Record<string, unknown>[],
-      incidents: store.listIncidents({ limit: 1000, since: new Date(start).toISOString(), until: new Date(end).toISOString() }),
-      penalties: store.listPenalties(1000, { sinceMs: start, untilMs: end }) };
+      incidents: store.listIncidents({ limit: 1000, since: startAt, until: endAt }),
+      penalties: store.listPenalties(1000, { sinceMs: start, untilMs: end }),
+      security_events: store.listSecurityEvents({ limit: 2000, since: startAt, until: endAt }),
+      vehicle_locations: store.listVehicleLocations({ limit: 2000, since: startAt, until: endAt }),
+      maintenance: store.listMaintenanceJobs(1000, { since: startAt, until: endAt }),
+      audit: store.listAudit(1000, { since: startAt, until: endAt }) };
   };
   const csv = (report: ReturnType<typeof dailyReport>) => {
     const rows = [["field", "value"], ...Object.entries(report.totals).map(([k, v]) => [k, String(v)])];
@@ -384,6 +414,9 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
   app.get("/api/users", admin, async (): Promise<UsersResponse> => ({ items: store.listUsers() }));
   app.get<{ Querystring: { limit?: string } }>("/api/audit", admin, async (req) => ({ items: store.listAudit(Number(req.query.limit) || 100) }));
   app.get<{ Querystring: { limit?: string } }>("/api/security/login-attempts", admin, async (req) => ({ items: store.listLoginAttemptsForAdmin(Number(req.query.limit) || 100) }));
+  app.get<{ Querystring: { decision?: string; limit?: string } }>("/api/security/events", admin, async (req) => ({
+    items: store.listSecurityEvents({ decision: req.query.decision as SecurityDecision | undefined, limit: Number(req.query.limit) || 200 }),
+  }));
 
   app.post("/api/users", admin, async (req, reply) => {
     const body = jsonBody<CreateUserRequest>(req);
@@ -435,6 +468,7 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
     ...intake.stats, last_sequence_id: intake.lastSeq, controller_enabled: cfg.controllerEnabled,
   }));
   app.get<{ Querystring: { n?: string } }>("/debug/recent", debugAccess, async (req) => recent.slice(-(Number(req.query.n) || 20)));
+  app.get("/debug/security", debugAccess, async () => ({ items: store.listSecurityEvents({ limit: 200 }) }));
   app.get("/debug/config", debugAccess, async () => ({ ...cfg, simPassword: "***", adminPassword: cfg.adminPassword ? "***" : undefined }));
   // Read-only controller view used by the live diagnostics. Keep this on the
   // loopback/debug surface; the authenticated dashboard uses /api/state.
@@ -450,7 +484,7 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
       }),
       gate_limit: controller.components.limit("gate"),
       out_of_service: s.components.filter((c) => c.health !== "ok").map((c) => `${c.kind} ${c.name} ${c.health}${c.waiting ? ` (${c.waiting})` : ""}`),
-      zones: s.zones, spots: s.spots, components: s.components, active_cars: s.active_cars,
+      zones: s.zones, spots: s.spots, components: s.components, component_summary: s.component_summary, active_cars: s.active_cars,
       environment: s.subsystems.environment ?? null, unreachable: [...controller.unreachable],
       cars: s.active_cars.length, counters: s.counters, feed: s.feed.slice(-40),
     };

@@ -2,7 +2,7 @@
 import type {
   ActionsResponse, AuditResponse, ComponentsResponse, ControlResult, CreateUserRequest, DailyReport, EventsResponse, GateAction,
   IncidentView, LoginAttemptView, MaintenanceJobView, MeResponse, PenaltiesResponse, SessionsResponse, StateSnapshot,
-  StatsResponse, TimeseriesResponse, UpdateUserRequest, UsersResponse,
+  SecurityEventView, StatsResponse, TimeseriesResponse, UpdateUserRequest, UsersResponse, VehicleLocationView,
 } from "@gpa/shared";
 
 export class ApiError extends Error {
@@ -55,6 +55,7 @@ export const api = {
   reconcileManualCar: (plate: string, minutes: number) =>
     call<ControlResult>("POST", `/api/control/cars/${encodeURIComponent(plate)}/reconcile`, { minutes }),
   penalties: (limit = 200) => call<PenaltiesResponse>("GET", `/api/penalties${qs({ limit })}`),
+  vehicleLocations: (q: { plate?: string; limit?: number } = {}) => call<{ items: VehicleLocationView[] }>("GET", `/api/vehicles/locations${qs(q)}`),
   dailyReport: (day: string, kind: "operations" | "financial" = "operations") =>
     call<DailyReport>("GET", `/api/reports/daily${qs({ day, kind })}`),
   dailyReportExportUrl: (day: string, kind: "operations" | "financial" = "operations") =>
@@ -78,6 +79,7 @@ export const api = {
   users: () => call<UsersResponse>("GET", "/api/users"),
   audit: (limit = 100) => call<AuditResponse>("GET", `/api/audit${qs({ limit })}`),
   securityLoginAttempts: (limit = 100) => call<{ items: LoginAttemptView[] }>("GET", `/api/security/login-attempts${qs({ limit })}`),
+  securityEvents: (q: { decision?: string; limit?: number } = {}) => call<{ items: SecurityEventView[] }>("GET", `/api/security/events${qs(q)}`),
   createUser: (body: CreateUserRequest) => call<MeResponse>("POST", "/api/users", body),
   updateUser: (id: number, body: UpdateUserRequest) => call<MeResponse>("PATCH", `/api/users/${id}`, body),
 };

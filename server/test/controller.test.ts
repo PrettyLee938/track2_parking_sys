@@ -123,8 +123,10 @@ describe("exit and payment", () => {
     await fireTimers(c);
     await c.handle(payEv("A", 0.5));
     expect(sim.calls).not.toContainEqual(["goto", "A", "leavepark"]);
-    expect(c.cars.get("A")!.status).toBe("payment_mismatch");
+    expect(c.cars.get("A")!.status).toBe("at_exit");
     expect(c.counters.payment_mismatches).toBe(1);
+    await fireTimers(c);
+    expect(sim.charges()).toHaveLength(2); // the correct invoice is requested again
   });
 
   it("waits for a closed exit gate to open before releasing", async () => {

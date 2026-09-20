@@ -33,6 +33,16 @@ describe("intake", () => {
     expect(intake.check({ EventClass: "x", EventId: "2", SequenceId: "12" }).seqNote).toBe("expected 11, got 12");
   });
 
+  it("does not let an invalid request poison the sequence cursor", () => {
+    const intake = new Intake("strict");
+    const valid = { EventClass: "x", EventId: "valid", SequenceId: "10", Signature: computeSignature({ EventClass: "x", EventId: "valid", SequenceId: "10" }) };
+    intake.check(valid);
+    const invalid = intake.check({ EventClass: "x", EventId: "bad", SequenceId: "9000", Signature: "0".repeat(32) });
+    expect(invalid).toMatchObject({ accept: false, sig: "invalid", seqNote: "" });
+    expect(intake.lastSeq).toBe(10);
+    expect(intake.check({ EventClass: "x", EventId: "next", SequenceId: "11", Signature: computeSignature({ EventClass: "x", EventId: "next", SequenceId: "11" }) }).seqNote).toBe("");
+  });
+
   it("acts on signed, unsigned and badly signed events according to the signature mode", () => {
     const event = (id: string) => ({ ...parseRaw(SPEC_EXAMPLE), EventId: id });
     const signed = (id: string) => ({ ...event(id), Signature: computeSignature(event(id)) });

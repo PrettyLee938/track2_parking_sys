@@ -79,6 +79,7 @@ Sign in with a dashboard account (the admin creates the others under **Admin**).
 | `POST /api/auth/login`, `/logout`, `GET /api/auth/me` | - |
 | `GET /api/state`, `/api/stream` (server-sent events), `/api/timeseries`, `/api/stats?minutes=` | operator |
 | `GET /api/sessions`, `/api/events`, `/api/actions` (`?plate= &status= &class= &since= &before=`) | operator |
+| `GET /api/vehicles/locations`, `/api/penalties`, `/api/equipment`, `/api/maintenance` | operator |
 | `POST /api/control/gates/:name/(open\|close\|auto\|repair)`, `/api/control/spots/:name/repair` | operator |
 | `POST /api/control/entries/:spot/(open\|close)`, `/api/resync`, `GET /api/config`, `/api/users` (+ `POST`, `PATCH /:id`) | admin |
 | `POST /webhook` | public (the simulator) |
@@ -96,6 +97,8 @@ Sign in with a dashboard account (the admin creates the others under **Admin**).
 | `npm run typecheck` | typecheck every package |
 | `npm run smoke` | live check: API both ways + webhook delivery (`-- --gates` to cycle a gate) |
 | `npm run level2-live` | live Level 2 acceptance check: three-zone topology, fan/light inventory, daytime lights, CO ventilation, car flow and signed webhooks |
+| `npm run level3-live` | read-only Level 3 inventory, health, security and bounded-state acceptance check |
+| `npm run level3-stress` | concurrent signed, duplicate, malformed and tampered webhook stress check against a test simulator |
 | `npm run single-car` | drive one car by hand (server must run with `GPA_CONTROLLER_ENABLED=false`) |
 | `npm run topology -- --levels-dir "<sim>/settings"` | regenerate `topology/*.json` from the simulator's layouts |
 | `npm run fake-sim -w server` | a stand-in simulator API on :9899 for dashboard work (`GPA_SIM_BASE_URL=http://127.0.0.1:9899/api/v1`) |
@@ -121,11 +124,11 @@ one file per level.
 |---|---|
 | `shared/src/protocol.ts` | every literal the simulator sends or expects, and its payload shapes |
 | `shared/src/api.ts` | our HTTP API types - server and dashboard both compile against them |
-| `server/src/controller.ts` | car park logic: per-lane entry queues, gates, billing, payments, recovery |
+| `server/src/controller.ts` | car park logic: per-lane entry queues, gates, billing, payments, recovery and Level 3 incident/location handling |
 | `server/src/topology.ts` | discovers entry/exit lanes and pairs them with gates |
 | `server/src/allocation.ts` | spot allocation strategies (`GPA_ALLOCATION_STRATEGY`) |
 | `server/src/billing.ts` | parking charge rules |
-| `server/src/store.ts` | SQLite: `events`, `sessions`, `actions` tables |
+| `server/src/store.ts` | SQLite: events, sessions, actions, security, incidents, maintenance and vehicle-location audit tables |
 | `server/src/webhook.ts` | webhook parsing, signature check, dedupe, sequence tracking |
 | `server/src/simClient.ts` | simulator REST API client |
 | `server/src/app.ts` | Fastify routes |

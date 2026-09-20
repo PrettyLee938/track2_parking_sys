@@ -186,7 +186,10 @@ const schema = z.object({
   // CO webhook at all in the 2026-09-20 runs, only CO penalties.
   fanControl: bool().default(true),
   coFanOnLevel: num().nonnegative().default(50),
-  coFanOffLevel: num().nonnegative().default(40),
+  // The simulator spec says fans may stop once CO is below 50.  Keep the
+  // default symmetric with the activation threshold; deployments that want
+  // hysteresis can still set a lower value explicitly.
+  coFanOffLevel: num().nonnegative().default(50),
   coPollGameS: num().positive().default(15),
 
   // Lights (spec: they guide drivers in dark zones, cost electricity, "make sure they run
@@ -244,6 +247,8 @@ const schema = z.object({
   statsSampleKeep: num().int().positive().default(720), // 2 hours at 10 s
   // How often the live stream pushes a fresh snapshot to connected dashboards.
   streamIntervalS: num().positive().default(1),
+  // Short-lived cache for large multi-zone dashboard snapshots during request bursts.
+  snapshotCacheMs: num().nonnegative().default(250),
 
   // ---- storage & recovery ------------------------------------------------------
   dataDir: repoPath().default(path.resolve(REPO_ROOT, "data")),

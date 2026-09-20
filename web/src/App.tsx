@@ -17,10 +17,11 @@ import { Overview } from "./pages/Overview";
 import { Penalties } from "./pages/Penalties";
 import { Reports } from "./pages/Reports";
 import { Stats } from "./pages/Stats";
+import { VehicleLocations } from "./pages/VehicleLocations";
 import type { LoginAttemptView } from "@gpa/shared";
 import { fmtDateTime } from "./lib/format";
 
-type Route = "overview" | "operations" | "equipment" | "maintenance" | "incidents" | "penalties" | "reports" | "logs" | "stats" | "admin";
+type Route = "overview" | "operations" | "equipment" | "maintenance" | "incidents" | "penalties" | "reports" | "locations" | "logs" | "stats" | "admin";
 const ROUTES: { id: Route; label: string; adminOnly?: boolean }[] = [
   { id: "overview", label: "Overview" },
   { id: "operations", label: "Operations" },
@@ -29,6 +30,7 @@ const ROUTES: { id: Route; label: string; adminOnly?: boolean }[] = [
   { id: "incidents", label: "Incidents" },
   { id: "penalties", label: "Penalties" },
   { id: "reports", label: "Reports" },
+  { id: "locations", label: "Vehicles" },
   { id: "logs", label: "Logs" },
   { id: "stats", label: "Statistics" },
   { id: "admin", label: "Admin", adminOnly: true },
@@ -99,6 +101,7 @@ function Shell() {
             {current === "incidents" && <Incidents />}
             {current === "penalties" && <Penalties />}
             {current === "reports" && <Reports />}
+            {current === "locations" && <VehicleLocations />}
             {current === "logs" && <Logs />}
             {current === "stats" && <Stats spots={state.spots} />}
             {current === "admin" && <Admin />}

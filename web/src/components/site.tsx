@@ -7,7 +7,7 @@ import { Badge, Empty, StatusIcon, type Tone } from "./ui";
 export type SpotState = "free" | "occupied" | "reserved" | "out";
 
 export const spotState = (s: SpotView): SpotState =>
-  s.broken || s.maintenance ? "out" : s.occupant ? "occupied" : s.reserved_for ? "reserved" : "free";
+  s.broken || s.maintenance || s.sensor_abnormal ? "out" : s.occupant ? "occupied" : s.reserved_for ? "reserved" : "free";
 
 export const SPOT_LEGEND = [
   { label: "Free", color: "var(--free-fill)" },

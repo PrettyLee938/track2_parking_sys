@@ -17,7 +17,8 @@ import path from "node:path";
 import Database from "better-sqlite3";
 import type {
   ActionView, AuditEntryView, ComponentEventView, ComponentKind, EventView, IncidentView, IncidentStatus, LoginAttemptView,
-  MaintenanceJobView, MaintenanceStatus, PenaltyView, Role, SessionView, SimEventBase, StatsResponse, UserView,
+  MaintenanceJobView, MaintenanceStatus, PenaltyView, Role, SecurityDecision, SecurityEventView, SessionView, SimEventBase,
+  StatsResponse, UserView, VehicleLocationView,
 } from "@gpa/shared";
 import { createHash } from "node:crypto";
 
@@ -154,6 +155,39 @@ CREATE TABLE IF NOT EXISTS event_identities (
   first_event_row INTEGER NOT NULL,
   accepted       INTEGER NOT NULL
 );
+
+-- Level 3: every webhook decision, including requests that cannot be represented
+-- safely in the normal event log (malformed or tampered payloads).
+CREATE TABLE IF NOT EXISTS security_events (
+  id            INTEGER PRIMARY KEY,
+  at            TEXT NOT NULL,
+  ip            TEXT,
+  event_id      TEXT,
+  event_class   TEXT,
+  decision      TEXT NOT NULL,
+  reason        TEXT NOT NULL,
+  payload_hash  TEXT
+);
+CREATE INDEX IF NOT EXISTS security_events_at ON security_events (id DESC);
+CREATE INDEX IF NOT EXISTS security_events_decision ON security_events (decision, id DESC);
+
+-- Level 3: durable vehicle location trail.  The active-car read model is rebuilt
+-- from events, while this trail lets operators locate a car that used the wrong spot.
+CREATE TABLE IF NOT EXISTS vehicle_locations (
+  id             INTEGER PRIMARY KEY,
+  at             TEXT NOT NULL,
+  visit_id       TEXT,
+  plate          TEXT NOT NULL,
+  location       TEXT NOT NULL,
+  zone           TEXT,
+  assigned_spot  TEXT,
+  actual_spot    TEXT,
+  confidence     TEXT NOT NULL,
+  source         TEXT NOT NULL,
+  detail         TEXT
+);
+CREATE INDEX IF NOT EXISTS vehicle_locations_plate ON vehicle_locations (plate, id DESC);
+CREATE INDEX IF NOT EXISTS vehicle_locations_at ON vehicle_locations (id DESC);
 
 CREATE TABLE IF NOT EXISTS login_attempts (
   id          INTEGER PRIMARY KEY,
@@ -412,9 +446,13 @@ export class Store {
     return Number(info.lastInsertRowid);
   }
 
-  listAudit(limit = 100): AuditEntryView[] {
-    const rows = this.db.prepare("SELECT id, at, actor, action, target, ok, detail FROM audit_log ORDER BY id DESC LIMIT ?")
-      .all(Math.min(Math.max(limit, 1), 1000)) as { id: number; at: string; actor: string | null; action: string; target: string | null; ok: number; detail: string | null }[];
+  listAudit(limit = 100, range: { since?: string; until?: string } = {}): AuditEntryView[] {
+    const where: string[] = [], params: unknown[] = [];
+    if (range.since) { where.push("at >= ?"); params.push(range.since); }
+    if (range.until) { where.push("at < ?"); params.push(range.until); }
+    params.push(Math.min(Math.max(limit, 1), 1000));
+    const rows = this.db.prepare(`SELECT id, at, actor, action, target, ok, detail FROM audit_log ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY id DESC LIMIT ?`)
+      .all(...params) as { id: number; at: string; actor: string | null; action: string; target: string | null; ok: number; detail: string | null }[];
     return rows.map((r) => ({ id: r.id, at: r.at, actor: r.actor, action: r.action, target: r.target, ok: !!r.ok, detail: r.detail }));
   }
 
@@ -425,6 +463,62 @@ export class Store {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(at, input.status, input.kind, input.zone ?? null, input.visit_id ?? null, input.component ?? null,
       input.reason, input.confidence, JSON.stringify(input.evidence ?? {}));
     return this.getIncident(Number(info.lastInsertRowid))!;
+  }
+
+  /** Avoid flooding the incident list when a duplicated/tampered request is retried. */
+  findOpenIncidentByEvidence(kind: string, field: string, value: string): IncidentView | undefined {
+    const row = this.db.prepare(`SELECT * FROM incidents WHERE kind = ? AND status IN ('open', 'provisional')
+      AND json_extract(evidence, ?) = ? ORDER BY id DESC LIMIT 1`).get(kind, `$.${field}`, value) as Record<string, unknown> | undefined;
+    return row ? toIncident(row) : undefined;
+  }
+
+  recordSecurityEvent(input: { ip?: string | null; eventId?: string | null; eventClass?: string | null;
+    decision: SecurityDecision; reason: string; payload?: Record<string, unknown> | null }): number {
+    const info = this.db.prepare(`INSERT INTO security_events
+      (at, ip, event_id, event_class, decision, reason, payload_hash) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+      .run(new Date().toISOString(), input.ip ?? null, input.eventId ?? null, input.eventClass ?? null,
+        input.decision, input.reason, input.payload ? payloadHash(input.payload) : null);
+    return Number(info.lastInsertRowid);
+  }
+
+  listSecurityEvents(opts: { limit?: number; decision?: SecurityDecision; since?: string; until?: string } = {}): SecurityEventView[] {
+    const limit = Math.min(Math.max(opts.limit ?? 100, 1), 2000);
+    const where: string[] = [], params: unknown[] = [];
+    if (opts.decision) { where.push("decision = ?"); params.push(opts.decision); }
+    if (opts.since) { where.push("at >= ?"); params.push(opts.since); }
+    if (opts.until) { where.push("at < ?"); params.push(opts.until); }
+    params.push(limit);
+    const rows = this.db.prepare(`SELECT * FROM security_events ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY id DESC LIMIT ?`)
+      .all(...params) as Record<string, unknown>[];
+    return rows.map((r) => ({ id: r.id as number, at: r.at as string, ip: r.ip as string | null,
+      event_id: r.event_id as string | null, event_class: r.event_class as string | null,
+      decision: r.decision as SecurityDecision, reason: r.reason as string,
+      payload_hash: r.payload_hash as string | null }));
+  }
+
+  recordVehicleLocation(input: Omit<VehicleLocationView, "id" | "at"> & { at?: string }): number {
+    const info = this.db.prepare(`INSERT INTO vehicle_locations
+      (at, visit_id, plate, location, zone, assigned_spot, actual_spot, confidence, source, detail)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(input.at ?? new Date().toISOString(), input.visit_id ?? null, input.plate, input.location,
+        input.zone ?? null, input.assigned_spot ?? null, input.actual_spot ?? null, input.confidence,
+        input.source, input.detail ?? null);
+    return Number(info.lastInsertRowid);
+  }
+
+  listVehicleLocations(opts: { plate?: string; limit?: number; since?: string; until?: string } = {}): VehicleLocationView[] {
+    const limit = Math.min(Math.max(opts.limit ?? 200, 1), 2000);
+    const where: string[] = [], params: unknown[] = [];
+    if (opts.plate) { where.push("plate LIKE ?"); params.push(`%${opts.plate}%`); }
+    if (opts.since) { where.push("at >= ?"); params.push(opts.since); }
+    if (opts.until) { where.push("at < ?"); params.push(opts.until); }
+    params.push(limit);
+    const rows = this.db.prepare(`SELECT * FROM vehicle_locations ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY id DESC LIMIT ?`)
+      .all(...params) as Record<string, unknown>[];
+    return rows.map((r) => ({ id: r.id as number, at: r.at as string, visit_id: r.visit_id as string | null,
+      plate: r.plate as string, location: r.location as string, zone: r.zone as string | null,
+      assigned_spot: r.assigned_spot as string | null, actual_spot: r.actual_spot as string | null,
+      confidence: r.confidence as "high" | "medium" | "low", source: r.source as string, detail: r.detail as string | null }));
   }
 
   getIncident(id: number): IncidentView | undefined {
@@ -477,8 +571,13 @@ export class Store {
       .run(status, evidence === undefined ? null : JSON.stringify(evidence), new Date().toISOString(), kind, name);
   }
 
-  listMaintenanceJobs(limit = 100): MaintenanceJobView[] {
-    const rows = this.db.prepare("SELECT * FROM maintenance_jobs ORDER BY id DESC LIMIT ?").all(Math.min(Math.max(limit, 1), 1000)) as Record<string, unknown>[];
+  listMaintenanceJobs(limit = 100, range: { since?: string; until?: string } = {}): MaintenanceJobView[] {
+    const where: string[] = [], params: unknown[] = [];
+    if (range.since) { where.push("created_at >= ?"); params.push(range.since); }
+    if (range.until) { where.push("created_at < ?"); params.push(range.until); }
+    params.push(Math.min(Math.max(limit, 1), 1000));
+    const rows = this.db.prepare(`SELECT * FROM maintenance_jobs ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY id DESC LIMIT ?`)
+      .all(...params) as Record<string, unknown>[];
     return rows.map((r) => ({ id: r.id as number, component_kind: r.component_kind as ComponentKind, component_name: r.component_name as string,
       zone: r.zone as string | null, status: r.status as MaintenanceStatus, reason: r.reason as string, actor: r.actor as string | null,
       created_at: r.created_at as string, updated_at: r.updated_at as string, evidence: JSON.parse(String(r.evidence ?? "{}")) }));
@@ -714,6 +813,12 @@ export class Store {
       agg.ms.push(a.ms ?? 0); if (!a.ok) agg.failed++; byCmd.set(a.cmd, agg);
     }
     const round = (x: number, d = 2) => Math.round(x * 10 ** d) / 10 ** d;
+    const securityCounts = this.db.prepare(`SELECT decision, count(*) AS n FROM security_events WHERE at >= ? AND at < ? GROUP BY decision`)
+      .all(since, until) as { decision: string; n: number }[];
+    const security = new Map(securityCounts.map((r) => [r.decision, Number(r.n)]));
+    const incidentCounts = this.db.prepare(`SELECT kind, count(*) AS n FROM incidents WHERE at >= ? AND at < ? GROUP BY kind`)
+      .all(since, until) as { kind: string; n: number }[];
+    const incidents = new Map(incidentCounts.map((r) => [r.kind, Number(r.n)]));
 
     return {
       since, until, bucket_s: bucketS,
@@ -722,6 +827,9 @@ export class Store {
         revenue: round(revenue), avg_ticket: paidCount ? round(revenue / paidCount) : 0,
         avg_planned_min: plannedN ? round(plannedSum / plannedN, 1) : 0,
         penalties: penaltyCount, fines: round(fines), payment_mismatches: mismatches, escaped,
+        duplicate_requests: security.get("duplicate") ?? 0, tampered_requests: (security.get("invalid_signature") ?? 0) + (security.get("conflict") ?? 0),
+        suspicious_payments: incidents.get("suspicious_payment") ?? 0, double_parking: (incidents.get("double_parking") ?? 0) + (incidents.get("vehicle_multiple_spots") ?? 0),
+        gate_failovers: incidents.get("gate_failover") ?? 0,
       },
       buckets: buckets.map((b) => ({ ...b, revenue: round(b.revenue) })),
       stay_histogram: [...stay.entries()].sort((a, b) => a[0] - b[0]).map(([minutes, count]) => ({ minutes, count })),

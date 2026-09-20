@@ -74,6 +74,7 @@ export class ComponentRegistry implements Subsystem {
   health(p: Part): ComponentHealth {
     const flags = p.kind === "gate" ? this.engine.gates.get(p.name) : p.kind === "spot" ? this.engine.spots.get(p.name) : p;
     if (!flags) return "ok";
+    if (p.kind === "spot" && this.engine.spots.get(p.name)?.sensorAbnormal) return "sensor_abnormal";
     return flags.maintenance ? "maintenance" : flags.broken ? "broken" : "ok";
   }
 
@@ -150,7 +151,24 @@ export class ComponentRegistry implements Subsystem {
         uses: Math.round(p.uses * 100) / 100, uses_total: Math.round(p.usesTotal * 100) / 100,
         breakdowns: p.breakdowns, uses_at_breakdown: p.usesAtBreakdown,
         last_broken_at: p.lastBrokenAt, last_fixed_at: p.lastFixedAt, waiting: p.waiting,
+        maintenance_due: this.wornOut(p.kind, p.name),
       }));
+  }
+
+  summary() {
+    const result = { total: 0, available: 0, broken: 0, maintenance: 0, sensor_abnormal: 0,
+      by_zone: {} as Record<string, { total: number; available: number; broken: number; maintenance: number; sensor_abnormal: number }> };
+    for (const p of this.parts.values()) {
+      const health = this.health(p);
+      const zone = p.zone || "-";
+      const z = result.by_zone[zone] ??= { total: 0, available: 0, broken: 0, maintenance: 0, sensor_abnormal: 0 };
+      result.total++; z.total++;
+      if (health === "ok") { result.available++; z.available++; }
+      else if (health === "broken") { result.broken++; z.broken++; }
+      else if (health === "maintenance") { result.maintenance++; z.maintenance++; }
+      else { result.sensor_abnormal++; z.sensor_abnormal++; }
+    }
+    return result;
   }
 
   // ---------------------------------------------------------------------------
@@ -396,7 +414,8 @@ export class ComponentRegistry implements Subsystem {
   // helpers
   // ---------------------------------------------------------------------------
   private partOf(e: EventRecord): Part | undefined {
-    const kind = KIND_OF_TYPE[String(e.Type)];
+    const raw = String(e.Type ?? "");
+    const kind = KIND_OF_TYPE[raw] ?? (/(parking.?spot|spot.?sensor|sensor)/i.test(raw) ? "spot" : undefined);
     return kind ? this.get(kind, String(e.Name)) : undefined;
   }
 

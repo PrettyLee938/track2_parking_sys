@@ -37,6 +37,9 @@ export interface SpotView {
   reserved_for: string | null;
   detected: number;
   available: boolean;
+  /** The spot is withheld from allocation because its sensor is abnormal. */
+  sensor_abnormal?: boolean;
+  sensor_reason?: string | null;
 }
 
 /** An operator's manual override on a gate; null = automatic. */
@@ -90,6 +93,12 @@ export interface CarView {
   exit_lane: string | null;
   arrived_at: string | null;
   spot: string | null;
+  /** The spot selected by the controller; spot is the last physically observed spot. */
+  assigned_spot?: string | null;
+  /** Last known physical location, including transit and exit sensors. */
+  location?: string | null;
+  location_confidence?: "high" | "medium" | "low" | null;
+  last_location_at?: string | null;
   parked_at: string | null;
   left_spot_at: string | null;
   exit_at: string | null;
@@ -127,6 +136,10 @@ export interface Counters {
   command_errors: number;
   /** Payment webhooks rejected as fake/invalid by the intake layer. */
   fake_payments: number;
+  suspicious_payments: number;
+  duplicate_requests: number;
+  gate_failovers: number;
+  double_parking: number;
 }
 
 /** Where the game speed figure came from (see the server's config.ts, "game clock"). */
@@ -156,6 +169,7 @@ export interface StateSnapshot {
   environment?: EnvironmentSnapshot;
   /** Open incidents that need operator/admin attention. */
   incidents?: IncidentView[];
+  component_summary?: ComponentSummary;
 }
 
 // ---------------------------------------------------------------------------
@@ -163,7 +177,7 @@ export interface StateSnapshot {
 // ---------------------------------------------------------------------------
 export type ComponentKind = "gate" | "spot" | "fan" | "light";
 /** ok, broken (waiting for a repair), maintenance (repair under way). */
-export type ComponentHealth = "ok" | "broken" | "maintenance";
+export type ComponentHealth = "ok" | "broken" | "maintenance" | "sensor_abnormal";
 
 export interface ComponentView {
   kind: ComponentKind;
@@ -183,6 +197,15 @@ export interface ComponentView {
   /** Why a broken part is not being repaired yet, e.g. "a car is passing". */
   waiting: string | null;
   maintenance_due?: boolean;
+}
+
+export interface ComponentSummary {
+  total: number;
+  available: number;
+  broken: number;
+  maintenance: number;
+  sensor_abnormal: number;
+  by_zone: Record<string, { total: number; available: number; broken: number; maintenance: number; sensor_abnormal: number }>;
 }
 
 export type ComponentEventKind = "broken" | "fixed" | "repair_sent" | "repair_failed" | "preventive_repair";
@@ -240,6 +263,18 @@ export interface AuditEntryView {
   detail: string | null;
 }
 export interface AuditResponse { items: AuditEntryView[] }
+
+export type SecurityDecision = "accepted" | "duplicate" | "invalid_signature" | "conflict" | "malformed" | "rejected";
+export interface SecurityEventView {
+  id: number;
+  at: string;
+  ip: string | null;
+  event_id: string | null;
+  event_class: string | null;
+  decision: SecurityDecision;
+  reason: string;
+  payload_hash: string | null;
+}
 
 export type IncidentStatus = "open" | "provisional" | "resolved" | "dismissed";
 export interface IncidentView {
@@ -300,6 +335,20 @@ export interface EnvironmentSnapshot {
   zones: EnvironmentZoneView[];
 }
 
+export interface VehicleLocationView {
+  id: number;
+  at: string;
+  visit_id: string | null;
+  plate: string;
+  location: string;
+  zone: string | null;
+  assigned_spot: string | null;
+  actual_spot: string | null;
+  confidence: "high" | "medium" | "low";
+  source: string;
+  detail: string | null;
+}
+
 export interface DailyReport {
   run_id: string | null;
   day: string;
@@ -311,6 +360,11 @@ export interface DailyReport {
   equipment: Record<string, unknown>[];
   incidents: IncidentView[];
   penalties: PenaltyView[];
+  /** Level 3 evidence attached to the report so incidents remain auditable offline. */
+  security_events?: SecurityEventView[];
+  vehicle_locations?: VehicleLocationView[];
+  maintenance?: MaintenanceJobView[];
+  audit?: AuditEntryView[];
 }
 
 /** A fine from the simulator, for the penalties page. */
@@ -427,6 +481,11 @@ export interface StatsResponse {
     fines: number;
     payment_mismatches: number;
     escaped: number;
+    duplicate_requests?: number;
+    tampered_requests?: number;
+    suspicious_payments?: number;
+    double_parking?: number;
+    gate_failovers?: number;
   };
   buckets: { t: string; arrivals: number; departures: number; revenue: number; turned_away: number; penalties: number }[];
   stay_histogram: { minutes: number; count: number }[];

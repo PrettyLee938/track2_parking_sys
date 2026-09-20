@@ -53,6 +53,9 @@ export function Overview({ s }: { s: StateSnapshot }) {
           tone={c.penalties ? "critical" : "good"} />
         <Tile label="Open incidents" value={fmtInt(incidents.length)} sub={incidents.length ? "Needs operator attention" : "No unresolved alerts"}
           tone={incidents.length ? "critical" : "good"} />
+        {s.component_summary && <Tile label="Equipment available" value={`${s.component_summary.available} / ${s.component_summary.total}`}
+          sub={`${s.component_summary.broken} broken Â· ${s.component_summary.maintenance} maintenance${s.component_summary.sensor_abnormal ? ` Â· ${s.component_summary.sensor_abnormal} sensor abnormal` : ""}`}
+          tone={s.component_summary.broken || s.component_summary.maintenance || s.component_summary.sensor_abnormal ? "warning" : "good"} />}
         <Tile label="Game speed" value={`×${s.time_scale.toFixed(2)}`} sub={s.time_scale_source} />
       </section>
 

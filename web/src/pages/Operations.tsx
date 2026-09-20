@@ -85,7 +85,7 @@ export function Operations({ s }: { s: StateSnapshot }) {
           {!spot ? <Empty>Select a spot on the map.</Empty> : (
             <>
               <dl className="details">
-                <dt>State</dt><dd>{{ free: "Free", occupied: "Occupied", reserved: "Reserved", out: spot.broken ? "Broken" : "Under maintenance" }[spotState(spot)]}</dd>
+                <dt>State</dt><dd>{{ free: "Free", occupied: "Occupied", reserved: "Reserved", out: spot.sensor_abnormal ? "Sensor abnormal" : spot.broken ? "Broken" : "Under maintenance" }[spotState(spot)]}</dd>
                 <dt>Car</dt><dd className="mono">{spot.occupant === "?" ? "unknown car" : spot.occupant ?? spot.reserved_for ?? "—"}</dd>
                 <dt>Zone</dt><dd>{spot.zone || "—"}</dd>
                 <dt>For</dt><dd>{spot.car_type === "Any" ? "Any car" : `${spot.car_type} cars only`}</dd>

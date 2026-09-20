@@ -5,7 +5,7 @@ import { api } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { fmtDateTime, fmtInt } from "../lib/format";
 
-const healthTone = (health: ComponentView["health"]) => health === "ok" ? "good" : health === "broken" ? "critical" : "warning";
+const healthTone = (health: ComponentView["health"]) => health === "ok" ? "good" : health === "broken" || health === "sensor_abnormal" ? "critical" : "warning";
 
 export function Equipment({ s }: { s: StateSnapshot }) {
   const { can } = useAuth();
