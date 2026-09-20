@@ -18,6 +18,8 @@
     "topology": "npm run topology -w server --",
     "smoke": "npm run smoke -w server --",
     "level2-live": "npm run level2-live -w server --",
+    "level3-live": "npm run level3-live -w server --",
+    "level3-stress": "npm run level3-stress -w server --",
     "single-car": "npm run single-car -w server --"
   },
   "engines": {

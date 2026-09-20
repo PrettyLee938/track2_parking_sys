@@ -12,10 +12,10 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import { DEVICE_ACTIONS } from "@gpa/shared";
 import type {
-  ActionsResponse, ApiError, ControlResult, CreateUserRequest, DeviceAction, EventsResponse, GateAction, LoginRequest, MeResponse, Role,
+  ActionsResponse, ApiError, ControlResult, CreateUserRequest, EventsResponse, GateAction, LoginRequest, MeResponse, Role,
   ComponentsResponse, SessionsResponse, StateSnapshot, StatsResponse, TimeseriesResponse, UpdateUserRequest, UserView, UsersResponse,
+  SecurityDecision,
 } from "@gpa/shared";
 import { AuthService, hashPassword, hasRole, validateCredentials } from "./auth";
 import { REPO_ROOT, type Settings } from "./config";
@@ -72,6 +72,9 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
   const { cfg, controller, store, auth } = deps;
   const intake = deps.intake ?? new Intake(cfg.signatureMode);
   const recent: EventRecord[] = [];
+  const security = (input: { ip?: string | null; eventId?: string | null; eventClass?: string | null; decision: SecurityDecision; reason: string; payload?: Record<string, unknown> | null }) => {
+    store.recordSecurityEvent(input);
+  };
 
   // Fastify logs every request at info level; one line per webhook is noise.
   app.addHook("onRoute", (route) => {
@@ -93,6 +96,7 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
     if (!req.user) return err(reply, 401, "not signed in");
     if (!hasRole(req.user, role)) return err(reply, 403, `requires the ${role} role`);
   };
+  const maintenance = { preHandler: guard("maintenance") };
   const operator = { preHandler: guard("operator") };
   const admin = { preHandler: guard("admin") };
   const debugAccess = {
@@ -105,12 +109,14 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
   // simulator -> us
   // ---------------------------------------------------------------------------
   app.post("/webhook", async (req, reply) => {
-    const level2 = cfg.levelProfile === "level2" || cfg.levelProfile === "level3" ||
+    const level3 = cfg.levelProfile === "level3";
+    const level2 = cfg.levelProfile === "level2" || level3 ||
       (cfg.levelProfile === "auto" && (/lvl[23]/i.test(deps.controller.topology?.name ?? "") ||
         deps.controller.components.all("fan").length > 0 || deps.controller.components.all("light").length > 0));
     if ((level2 && cfg.webhookLoopbackOnly) && !isLoopback(req.ip)) {
+      security({ ip: req.ip, decision: "rejected", reason: "non-loopback Level 3 webhook ingress" });
       store.recordAudit({ action: "webhook.rejected", target: req.ip, ok: false, reason: "non-loopback Level 2 ingress" });
-      return err(reply, 403, "Level 2 webhooks are restricted to loopback");
+      return err(reply, 403, "Level 3 webhooks are restricted to loopback");
     }
     const receivedAt = new Date().toISOString();
     let event;
@@ -118,22 +124,31 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
       event = parseRaw(String(req.body ?? ""));
     } catch {
       req.log.error({ body: String(req.body).slice(0, 300) }, "non-JSON webhook");
+      security({ ip: req.ip, decision: "malformed", reason: "malformed JSON" });
       store.recordAudit({ action: "webhook.rejected", target: req.ip, ok: false, reason: "malformed JSON" });
       return reply.code(400).send({ ok: false });
     }
     if (typeof event.EventClass !== "string" || !event.EventClass) {
+      security({ ip: req.ip, decision: "malformed", reason: "missing EventClass", payload: event });
       store.recordAudit({ action: "webhook.rejected", target: req.ip, ok: false, reason: "missing EventClass" });
       return err(reply, 400, "webhook EventClass is required");
     }
+    if (level3 && (typeof event.EventId !== "string" || !event.EventId.trim())) {
+      security({ ip: req.ip, eventClass: event.EventClass, decision: "malformed", reason: "Level 3 webhook EventId is required", payload: event });
+      store.recordAudit({ action: "webhook.rejected", target: event.EventClass, ok: false, reason: "missing EventId" });
+      return err(reply, 400, "Level 3 webhooks require EventId");
+    }
     const identity = store.eventIdentity(event.EventId, event);
     if (identity === "conflict") {
-      const incident = store.createIncident({ status: "open", kind: "event_id_conflict", reason: `EventId ${event.EventId} was reused with a different payload`,
+      security({ ip: req.ip, eventId: event.EventId, eventClass: event.EventClass, decision: "conflict", reason: "event ID payload conflict", payload: event });
+      const incident = store.findOpenIncidentByEvidence("event_id_conflict", "event_id", String(event.EventId)) ?? store.createIncident({ status: "open", kind: "event_id_conflict", reason: `EventId ${event.EventId} was reused with a different payload`,
         confidence: "high", evidence: { event_id: event.EventId, payload: event } });
       store.recordAudit({ action: "webhook.rejected", target: String(event.EventId), ok: false, reason: "event ID payload conflict", detail: { incident: incident.id } });
       return err(reply, 409, "event ID was already used for a different payload");
     }
     const mode = cfg.signatureMode === "strict" || level2 ? "strict" : cfg.signatureMode;
     const meta = intake.check(event, identity === "duplicate", mode);
+    if (meta.duplicate) controller.counters.duplicate_requests++;
     const record: EventRecord = {
       ...event, _received_at: receivedAt, _sig: meta.sig, _duplicate: meta.duplicate,
       _seq_note: meta.seqNote, _accepted: meta.accept,
@@ -143,6 +158,9 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
     if (recent.length > cfg.recentEventsSize) recent.shift();
 
     if (meta.seqNote) req.log.warn(`sequence gap: ${meta.seqNote}`);
+    security({ ip: req.ip, eventId: event.EventId, eventClass: event.EventClass,
+      decision: meta.accept ? "accepted" : meta.duplicate ? "duplicate" : "invalid_signature",
+      reason: meta.accept ? "signature accepted" : meta.duplicate ? "duplicate event delivery" : `signature ${meta.sig}`, payload: event });
     if (!meta.accept) {
       req.log.warn(`dropped ${event.EventClass} (${meta.duplicate ? "duplicate" : `signature ${meta.sig}`})`);
       store.recordAudit({ action: "webhook.rejected", target: String(event.EventId ?? event.EventClass), ok: false,
@@ -183,20 +201,20 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
     return { ok: true };
   });
 
-  app.get("/api/auth/me", operator, async (req): Promise<MeResponse> => ({
+  app.get("/api/auth/me", maintenance, async (req): Promise<MeResponse> => ({
     user: req.user!, previous_login_attempts: store.listLoginAttempts(req.user!.username, 3),
   }));
-  app.get<{ Querystring: { limit?: string } }>("/api/auth/login-attempts", operator, async (req) => ({
+  app.get<{ Querystring: { limit?: string } }>("/api/auth/login-attempts", maintenance, async (req) => ({
     items: store.listLoginAttempts(req.user!.username, Math.min(Number(req.query.limit) || 3, 50)),
   }));
 
   // ---------------------------------------------------------------------------
   // live state (operator+)
   // ---------------------------------------------------------------------------
-  app.get("/api/state", operator, async (): Promise<StateSnapshot> => controller.snapshot());
+  app.get("/api/state", maintenance, async (): Promise<StateSnapshot> => controller.snapshot());
 
   /** Server-sent events: a snapshot every streamIntervalS, until the session ends. */
-  app.get("/api/stream", operator, (req, reply) => {
+  app.get("/api/stream", maintenance, (req, reply) => {
     const token = cookies(req)[SESSION_COOKIE];
     reply.hijack();
     const res = reply.raw;
@@ -215,21 +233,21 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
     req.raw.on("close", () => clearInterval(timer));
   });
 
-  app.get("/api/timeseries", operator, async (): Promise<TimeseriesResponse> =>
+  app.get("/api/timeseries", maintenance, async (): Promise<TimeseriesResponse> =>
     ({ sample_s: cfg.statsSampleS, points: controller.timeseries }));
 
   // Every gate, spot, fan and light with health and usage, plus breakdown/repair history.
-  app.get<{ Querystring: { name?: string; limit?: string } }>("/api/components", operator, async (req): Promise<ComponentsResponse> => ({
+  app.get<{ Querystring: { name?: string; limit?: string } }>("/api/components", maintenance, async (req): Promise<ComponentsResponse> => ({
     items: controller.components.views(),
     events: store.listComponentEvents({ name: req.query.name || undefined, limit: Number(req.query.limit) || 200 }),
   }));
 
-  app.get<{ Querystring: { kind?: string; zone?: string; limit?: string } }>("/api/equipment", operator, async (req) => {
+  app.get<{ Querystring: { kind?: string; zone?: string; limit?: string } }>("/api/equipment", maintenance, async (req) => {
     const items = controller.components.views().filter((c) => (!req.query.kind || c.kind === req.query.kind) && (!req.query.zone || c.zone === req.query.zone));
     return { items: items.slice(0, Math.min(Number(req.query.limit) || 500, 1000)) };
   });
 
-  app.post<{ Params: { id: string } }>("/api/equipment/:id/maintenance", operator, async (req, reply) => {
+  app.post<{ Params: { id: string } }>("/api/equipment/:id/maintenance", maintenance, async (req, reply) => {
     const [kind, ...nameParts] = decodeURIComponent(req.params.id).split(":");
     const target = `${kind}:${nameParts.join(":")}`;
     const audit = { actor: req.user!.username, action: "component.repair", target, permission: "repair" };
@@ -239,14 +257,14 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
     return err(reply, 400, "equipment id must be kind:name");
   });
 
-  app.get<{ Querystring: { limit?: string } }>("/api/maintenance", operator, async (req) => ({
+  app.get<{ Querystring: { limit?: string } }>("/api/maintenance", maintenance, async (req) => ({
     items: store.listMaintenanceJobs(Number(req.query.limit) || 100),
   }));
 
-  app.get<{ Querystring: { status?: "open" | "provisional" | "resolved" | "dismissed"; limit?: string } }>("/api/incidents", operator, async (req) => ({
+  app.get<{ Querystring: { status?: "open" | "provisional" | "resolved" | "dismissed"; limit?: string } }>("/api/incidents", maintenance, async (req) => ({
     items: store.listIncidents({ status: req.query.status, limit: Number(req.query.limit) || 100 }),
   }));
-  app.get<{ Params: { id: string } }>("/api/incidents/:id", operator, async (req, reply) => {
+  app.get<{ Params: { id: string } }>("/api/incidents/:id", maintenance, async (req, reply) => {
     const incident = store.getIncident(Number(req.params.id));
     return incident ? incident : err(reply, 404, "no such incident");
   });
@@ -261,9 +279,13 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
     });
   });
 
-  app.get("/api/penalties", operator, async (): Promise<{ items: ReturnType<Store["listPenalties"]> }> => ({ items: store.listPenalties() }));
+  app.get("/api/penalties", maintenance, async (): Promise<{ items: ReturnType<Store["listPenalties"]> }> => ({ items: store.listPenalties() }));
 
-  app.get<{ Querystring: { minutes?: string } }>("/api/stats", operator, async (req): Promise<StatsResponse> => {
+  app.get<{ Querystring: { plate?: string; limit?: string } }>("/api/vehicles/locations", maintenance, async (req) => ({
+    items: store.listVehicleLocations({ plate: req.query.plate, limit: Number(req.query.limit) || 200 }),
+  }));
+
+  app.get<{ Querystring: { minutes?: string } }>("/api/stats", maintenance, async (req): Promise<StatsResponse> => {
     const minutes = Math.min(Math.max(Number(req.query.minutes) || 60, 5), 7 * 24 * 60);
     const bucket = BUCKETS_S.find((b) => (minutes * 60) / b <= 40) ?? BUCKETS_S.at(-1)!;
     const until = Date.now();
@@ -272,6 +294,7 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
 
   const dailyReport = (day: string, kind: "operations" | "financial") => {
     const start = Date.parse(`${day}T00:00:00Z`), end = start + 86_400_000;
+    const startAt = new Date(start).toISOString(), endAt = new Date(end).toISOString();
     const stats = store.stats(start, end, 3600);
     const invoiceCount = store.db.prepare("SELECT count(*) n FROM invoices WHERE created_at >= ? AND created_at < ?")
       .get(new Date(start).toISOString(), new Date(end).toISOString()) as { n: number };
@@ -281,12 +304,19 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
       ? { ...stats.totals, invoices: Number(invoiceCount.n ?? 0), uncertain_payments: Number(uncertainCount.n ?? 0) }
       : { arrivals: stats.totals.arrivals, departures: stats.totals.departures, turned_away: stats.totals.turned_away,
         neglected: stats.totals.neglected, lost: stats.totals.lost, penalties: stats.totals.penalties, fines: stats.totals.fines,
-        payment_mismatches: stats.totals.payment_mismatches, escaped: stats.totals.escaped };
+        payment_mismatches: stats.totals.payment_mismatches, escaped: stats.totals.escaped,
+        duplicate_requests: stats.totals.duplicate_requests ?? 0, tampered_requests: stats.totals.tampered_requests ?? 0,
+        suspicious_payments: stats.totals.suspicious_payments ?? 0, duplicate_payments: stats.totals.duplicate_payments ?? 0, double_parking: stats.totals.double_parking ?? 0,
+        gate_failovers: stats.totals.gate_failovers ?? 0 };
     return { run_id: null, day, kind, time_basis: "UTC received time; simulator calendar is provisional until anchored",
       provisional: true, generated_at: new Date().toISOString(), totals,
       equipment: controller.components.views() as unknown as Record<string, unknown>[],
-      incidents: store.listIncidents({ limit: 1000, since: new Date(start).toISOString(), until: new Date(end).toISOString() }),
-      penalties: store.listPenalties(1000, { sinceMs: start, untilMs: end }) };
+      incidents: store.listIncidents({ limit: 1000, since: startAt, until: endAt }),
+      penalties: store.listPenalties(1000, { sinceMs: start, untilMs: end }),
+      security_events: store.listSecurityEvents({ limit: 2000, since: startAt, until: endAt }),
+      vehicle_locations: store.listVehicleLocations({ limit: 2000, since: startAt, until: endAt }),
+      maintenance: store.listMaintenanceJobs(1000, { since: startAt, until: endAt }),
+      audit: store.listAudit(1000, { since: startAt, until: endAt }) };
   };
   const csv = (report: ReturnType<typeof dailyReport>) => {
     const rows = [["field", "value"], ...Object.entries(report.totals).map(([k, v]) => [k, String(v)])];
@@ -322,17 +352,17 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
   type ListQuery = { plate?: string; status?: string; class?: string; since?: string; until?: string; limit?: string; before?: string };
   const num = (v?: string) => (v ? Number(v) || undefined : undefined);
 
-  app.get<{ Querystring: ListQuery }>("/api/sessions", operator, async (req): Promise<SessionsResponse> => ({
+  app.get<{ Querystring: ListQuery }>("/api/sessions", maintenance, async (req): Promise<SessionsResponse> => ({
     items: store.searchSessions({ plate: req.query.plate, status: req.query.status, since: req.query.since,
       until: req.query.until, limit: num(req.query.limit), beforeId: num(req.query.before) }),
   }));
 
-  app.get<{ Querystring: ListQuery }>("/api/events", operator, async (req): Promise<EventsResponse> => ({
+  app.get<{ Querystring: ListQuery }>("/api/events", maintenance, async (req): Promise<EventsResponse> => ({
     items: store.searchEvents({ plate: req.query.plate, eventClass: req.query.class, since: req.query.since,
       until: req.query.until, limit: num(req.query.limit), beforeId: num(req.query.before) }),
   }));
 
-  app.get<{ Querystring: { manual?: string; limit?: string } }>("/api/actions", operator, async (req): Promise<ActionsResponse> => ({
+  app.get<{ Querystring: { manual?: string; limit?: string } }>("/api/actions", maintenance, async (req): Promise<ActionsResponse> => ({
     items: store.searchActions({ manualOnly: req.query.manual === "1", limit: num(req.query.limit) }),
   }));
 
@@ -359,20 +389,7 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
       { actor: req.user!.username, action: `gate.${action}`, target: req.params.name, permission: "control" });
   });
 
-  /** Exhaust fans and lights, the same way a gate is held: on / off / auto. */
-  app.post<{ Params: { kind: string; name: string; action: string } }>(
-    "/api/control/devices/:kind/:name/:action", operator, async (req, reply) => {
-      const { kind, action } = req.params;
-      const name = decodeURIComponent(req.params.name);
-      if (kind !== "fan" && kind !== "light") return err(reply, 400, "kind must be fan or light");
-      if (!DEVICE_ACTIONS.includes(action as DeviceAction)) {
-        return err(reply, 400, `action must be one of ${DEVICE_ACTIONS.join(", ")}`);
-      }
-      return control(reply, () => controller.exclusive(() => controller.manualDevice(kind, name, action, req.user!.username)),
-        { actor: req.user!.username, action: `${kind}.${action}`, target: name, permission: "control" });
-    });
-
-  app.post<{ Params: { name: string } }>("/api/control/spots/:name/repair", operator, async (req, reply) =>
+  app.post<{ Params: { name: string } }>("/api/control/spots/:name/repair", maintenance, async (req, reply) =>
     control(reply, () => controller.exclusive(() => controller.manualSpotRepair(req.params.name, req.user!.username)),
       { actor: req.user!.username, action: "spot.repair", target: req.params.name, permission: "repair" }));
 
@@ -398,11 +415,14 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
   app.get("/api/users", admin, async (): Promise<UsersResponse> => ({ items: store.listUsers() }));
   app.get<{ Querystring: { limit?: string } }>("/api/audit", admin, async (req) => ({ items: store.listAudit(Number(req.query.limit) || 100) }));
   app.get<{ Querystring: { limit?: string } }>("/api/security/login-attempts", admin, async (req) => ({ items: store.listLoginAttemptsForAdmin(Number(req.query.limit) || 100) }));
+  app.get<{ Querystring: { decision?: string; limit?: string } }>("/api/security/events", admin, async (req) => ({
+    items: store.listSecurityEvents({ decision: req.query.decision as SecurityDecision | undefined, limit: Number(req.query.limit) || 200 }),
+  }));
 
   app.post("/api/users", admin, async (req, reply) => {
     const body = jsonBody<CreateUserRequest>(req);
     if (!body) return err(reply, 400, "invalid JSON");
-    if (body.role !== "admin" && body.role !== "operator") return err(reply, 400, "role must be admin or operator");
+    if (body.role !== "admin" && body.role !== "operator" && body.role !== "maintenance") return err(reply, 400, "role must be admin, operator or maintenance");
     const problem = validateCredentials(body.username ?? "", body.password ?? "");
     if (problem) return err(reply, 400, problem);
     if (store.findUser(body.username)) return err(reply, 409, `user ${body.username} already exists`);
@@ -419,12 +439,12 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
     if (!target) return err(reply, 404, "no such user");
     const body = jsonBody<UpdateUserRequest>(req);
     if (!body) return err(reply, 400, "invalid JSON");
-    if (body.role !== undefined && body.role !== "admin" && body.role !== "operator") return err(reply, 400, "role must be admin or operator");
+    if (body.role !== undefined && body.role !== "admin" && body.role !== "operator" && body.role !== "maintenance") return err(reply, 400, "role must be admin, operator or maintenance");
     if (body.password !== undefined) {
       const problem = validateCredentials(undefined, body.password);
       if (problem) return err(reply, 400, problem);
     }
-    const losesAdmin = target.role === "admin" && (body.role === "operator" || body.disabled === true);
+    const losesAdmin = target.role === "admin" && (body.role === "operator" || body.role === "maintenance" || body.disabled === true);
     if (losesAdmin && store.countOtherActiveAdmins(id) === 0) return err(reply, 409, "cannot remove the last active admin");
     if (id === req.user!.id && body.disabled === true) return err(reply, 409, "you cannot disable your own account");
 
@@ -449,13 +469,14 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
     ...intake.stats, last_sequence_id: intake.lastSeq, controller_enabled: cfg.controllerEnabled,
   }));
   app.get<{ Querystring: { n?: string } }>("/debug/recent", debugAccess, async (req) => recent.slice(-(Number(req.query.n) || 20)));
+  app.get("/debug/security", debugAccess, async () => ({ items: store.listSecurityEvents({ limit: 200 }) }));
   app.get("/debug/config", debugAccess, async () => ({ ...cfg, simPassword: "***", adminPassword: cfg.adminPassword ? "***" : undefined }));
   // Read-only controller view used by the live diagnostics. Keep this on the
   // loopback/debug surface; the authenticated dashboard uses /api/state.
   app.get("/debug/controller", debugAccess, async () => {
     const s = controller.snapshot();
     return {
-      synced: s.synced, topology: s.topology?.name ?? null, time_scale: s.time_scale, time_scale_source: s.time_scale_source,
+      synced: s.synced, simulator: s.simulator, topology: s.topology?.name ?? null, time_scale: s.time_scale, time_scale_source: s.time_scale_source,
       queue_depth: (controller.queue as { depth?: number }).depth ?? null,
       entry_lanes: s.entry_lanes, exit_lanes: s.exit_lanes,
       gates: s.gates.map((g) => {
@@ -464,7 +485,7 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
       }),
       gate_limit: controller.components.limit("gate"),
       out_of_service: s.components.filter((c) => c.health !== "ok").map((c) => `${c.kind} ${c.name} ${c.health}${c.waiting ? ` (${c.waiting})` : ""}`),
-      zones: s.zones, spots: s.spots, components: s.components, active_cars: s.active_cars,
+      zones: s.zones, spots: s.spots, components: s.components, component_summary: s.component_summary, active_cars: s.active_cars,
       environment: s.subsystems.environment ?? null, unreachable: [...controller.unreachable],
       cars: s.active_cars.length, counters: s.counters, feed: s.feed.slice(-40),
     };

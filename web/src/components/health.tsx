@@ -28,7 +28,7 @@ export function ComponentHealthCard({ components }: { components: ComponentView[
         {KINDS.map(({ kind, label }) => {
           const all = components.filter((c) => c.kind === kind);
           if (!all.length) return null;
-          const broken = all.filter((c) => c.health === "broken").length, repairing = all.filter((c) => c.health === "maintenance").length;
+          const broken = all.filter((c) => c.health === "broken" || c.health === "sensor_abnormal").length, repairing = all.filter((c) => c.health === "maintenance").length;
           return (
             <Tile key={kind} label={label} value={`${all.length - broken - repairing} / ${all.length} working`}
               tone={broken ? "critical" : repairing ? "warning" : "good"}
@@ -45,7 +45,7 @@ export function ComponentHealthCard({ components }: { components: ComponentView[
               <tr key={`${c.kind}:${c.name}`}>
                 <td>{c.kind} <b>{c.name}</b></td>
                 <td>{c.zone || "—"}</td>
-                <td>{c.health === "broken" ? <Badge tone="critical">broken</Badge> : <Badge tone="warning">being repaired</Badge>}</td>
+                <td>{c.health === "broken" ? <Badge tone="critical">broken</Badge> : c.health === "sensor_abnormal" ? <Badge tone="critical">sensor abnormal</Badge> : <Badge tone="warning">being repaired</Badge>}</td>
                 <td className="right">{c.uses}</td>
                 <td className="muted">{c.waiting ? `waiting: ${c.waiting}` : ""}</td>
               </tr>

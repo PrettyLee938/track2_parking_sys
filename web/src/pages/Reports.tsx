@@ -33,6 +33,11 @@ function ReportBody({ report }: { report: DailyReport }) {
       <Card title="Penalties"><CompactList items={report.penalties.map((p) => `${fmtMoney(p.fine)} · ${p.reason}`)} empty="No penalties for this report." /></Card>
     </div>
     <Card title="Equipment snapshot"><CompactList items={report.equipment.map((e) => `${String(e.kind ?? "equipment")} ${String(e.name ?? "")}: ${String(e.health ?? "unknown")}`)} empty="No equipment recorded." /></Card>
+    <div className="grid-2">
+      <Card title="Security decisions"><CompactList items={(report.security_events ?? []).map((e) => `${e.decision} · ${e.event_class ?? "request"} · ${e.reason}`)} empty="No security events for this report." /></Card>
+      <Card title="Maintenance activity"><CompactList items={(report.maintenance ?? []).map((m) => `${m.component_kind}:${m.component_name} · ${m.status} · ${m.reason}`)} empty="No maintenance jobs for this report." /></Card>
+    </div>
+    <Card title="Audit trail"><CompactList items={(report.audit ?? []).map((a) => `${a.actor ?? "system"} · ${a.action} · ${a.target ?? "-"}`)} empty="No audit entries for this report." /></Card>
   </>;
 }
 

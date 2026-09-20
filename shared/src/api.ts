@@ -37,6 +37,9 @@ export interface SpotView {
   reserved_for: string | null;
   detected: number;
   available: boolean;
+  /** The spot is withheld from allocation because its sensor is abnormal. */
+  sensor_abnormal?: boolean;
+  sensor_reason?: string | null;
 }
 
 /** An operator's manual override on a gate; null = automatic. */
@@ -90,6 +93,12 @@ export interface CarView {
   exit_lane: string | null;
   arrived_at: string | null;
   spot: string | null;
+  /** The spot selected by the controller; spot is the last physically observed spot. */
+  assigned_spot?: string | null;
+  /** Last known physical location, including transit and exit sensors. */
+  location?: string | null;
+  location_confidence?: "high" | "medium" | "low" | null;
+  last_location_at?: string | null;
   parked_at: string | null;
   left_spot_at: string | null;
   exit_at: string | null;
@@ -127,14 +136,30 @@ export interface Counters {
   command_errors: number;
   /** Payment webhooks rejected as fake/invalid by the intake layer. */
   fake_payments: number;
+  /** Valid or invalid payment attempts ignored because the same invoice/amount was already recorded. */
+  duplicate_payments: number;
+  suspicious_payments: number;
+  duplicate_requests: number;
+  gate_failovers: number;
+  double_parking: number;
 }
 
 /** Where the game speed figure came from (see the server's config.ts, "game clock"). */
 export type TimeScaleSource = "configured" | "gate timing" | "learned" | "simulator settings" | "default";
 
+/** Connectivity/readiness of the simulator REST API behind the controller. */
+export interface SimulatorStatus {
+  online: boolean;
+  last_success_at: string | null;
+  last_failure_at: string | null;
+  last_error: string | null;
+}
+
 /** GET /api/state */
 export interface StateSnapshot {
   synced: boolean;
+  /** The last simulator API probe. Inventory can remain cached while this is false. */
+  simulator: SimulatorStatus;
   /** Game seconds per real second, i.e. the simulator's game speed. */
   time_scale: number;
   time_scale_source: TimeScaleSource;
@@ -156,6 +181,7 @@ export interface StateSnapshot {
   environment?: EnvironmentSnapshot;
   /** Open incidents that need operator/admin attention. */
   incidents?: IncidentView[];
+  component_summary?: ComponentSummary;
 }
 
 // ---------------------------------------------------------------------------
@@ -163,7 +189,7 @@ export interface StateSnapshot {
 // ---------------------------------------------------------------------------
 export type ComponentKind = "gate" | "spot" | "fan" | "light";
 /** ok, broken (waiting for a repair), maintenance (repair under way). */
-export type ComponentHealth = "ok" | "broken" | "maintenance";
+export type ComponentHealth = "ok" | "broken" | "maintenance" | "sensor_abnormal";
 
 export interface ComponentView {
   kind: ComponentKind;
@@ -183,6 +209,15 @@ export interface ComponentView {
   /** Why a broken part is not being repaired yet, e.g. "a car is passing". */
   waiting: string | null;
   maintenance_due?: boolean;
+}
+
+export interface ComponentSummary {
+  total: number;
+  available: number;
+  broken: number;
+  maintenance: number;
+  sensor_abnormal: number;
+  by_zone: Record<string, { total: number; available: number; broken: number; maintenance: number; sensor_abnormal: number }>;
 }
 
 export type ComponentEventKind = "broken" | "fixed" | "repair_sent" | "repair_failed" | "preventive_repair";
@@ -214,6 +249,7 @@ export type Permission =
   | "config";           // settings, resync
 
 export const ROLE_PERMISSIONS: Record<Role, readonly Permission[]> = {
+  maintenance: ["view", "repair"],
   operator: ["view", "control", "repair"],
   admin: ["view", "control", "repair", "reports.financial", "users.manage", "config"],
 };
@@ -240,6 +276,18 @@ export interface AuditEntryView {
   detail: string | null;
 }
 export interface AuditResponse { items: AuditEntryView[] }
+
+export type SecurityDecision = "accepted" | "duplicate" | "invalid_signature" | "conflict" | "malformed" | "rejected";
+export interface SecurityEventView {
+  id: number;
+  at: string;
+  ip: string | null;
+  event_id: string | null;
+  event_class: string | null;
+  decision: SecurityDecision;
+  reason: string;
+  payload_hash: string | null;
+}
 
 export type IncidentStatus = "open" | "provisional" | "resolved" | "dismissed";
 export interface IncidentView {
@@ -294,21 +342,24 @@ export interface EnvironmentLightView {
   reason: string;
 }
 /** The snapshot emitted by the Level 2 CO/fan/light subsystem. */
-/** An operator override on one fan or light: the automatic rules leave it alone. */
-export interface DeviceHoldView {
-  kind: "fan" | "light";
-  name: string;
-  hold: "on" | "off";
-  actor: string;
-  at: string;
-}
-
 export interface EnvironmentSnapshot {
   polls: number;
   lights: EnvironmentLightView;
   zones: EnvironmentZoneView[];
-  /** Fans and lights an operator is holding; everything else follows CO and daylight. */
-  holds: DeviceHoldView[];
+}
+
+export interface VehicleLocationView {
+  id: number;
+  at: string;
+  visit_id: string | null;
+  plate: string;
+  location: string;
+  zone: string | null;
+  assigned_spot: string | null;
+  actual_spot: string | null;
+  confidence: "high" | "medium" | "low";
+  source: string;
+  detail: string | null;
 }
 
 export interface DailyReport {
@@ -322,6 +373,11 @@ export interface DailyReport {
   equipment: Record<string, unknown>[];
   incidents: IncidentView[];
   penalties: PenaltyView[];
+  /** Level 3 evidence attached to the report so incidents remain auditable offline. */
+  security_events?: SecurityEventView[];
+  vehicle_locations?: VehicleLocationView[];
+  maintenance?: MaintenanceJobView[];
+  audit?: AuditEntryView[];
 }
 
 /** A fine from the simulator, for the penalties page. */
@@ -343,8 +399,8 @@ export interface SessionsResponse {
 // ---------------------------------------------------------------------------
 // auth & users
 // ---------------------------------------------------------------------------
-/** admin can do everything an operator can, plus user management and site settings. */
-export type Role = "admin" | "operator";
+/** Maintenance can view and repair; operators control traffic; admins manage users, finance and site settings. */
+export type Role = "admin" | "operator" | "maintenance";
 
 export interface UserView {
   id: number;
@@ -374,11 +430,6 @@ export interface ApiError { error: string }
 // ---------------------------------------------------------------------------
 /** POST /api/control/gates/:name/:action */
 export type GateAction = "open" | "close" | "auto" | "repair";
-
-/** POST /api/control/devices/:kind/:name/:action - exhaust fans and lights.
- * "auto" hands the part back to the CO / daylight rules that normally drive it. */
-export type DeviceAction = "on" | "off" | "auto";
-export const DEVICE_ACTIONS: readonly DeviceAction[] = ["on", "off", "auto"];
 
 /** Result of any control command. */
 export interface ControlResult { ok: boolean; message: string }
@@ -443,6 +494,12 @@ export interface StatsResponse {
     fines: number;
     payment_mismatches: number;
     escaped: number;
+    duplicate_requests?: number;
+    tampered_requests?: number;
+    suspicious_payments?: number;
+    duplicate_payments?: number;
+    double_parking?: number;
+    gate_failovers?: number;
   };
   buckets: { t: string; arrivals: number; departures: number; revenue: number; turned_away: number; penalties: number }[];
   stay_histogram: { minutes: number; count: number }[];

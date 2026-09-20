@@ -113,7 +113,7 @@ expand `r`n; `"`n"` inside double quotes becomes a newline).
   from data: exit gates carry the per-car wear (gate2 247 openings/31 repairs vs entry gate1
   169 openings for 802 cars), so spreading zones spreads it. Fill-zone-1-first =
   `lane_zone_then_any`.
-- Fans (`environment.ts`): per zone on at CO >= `coFanOnLevel` (50), off below `coFanOffLevel` (40 since 8e94c38); list-zones polled every
+- Fans (`environment.ts`): per zone on at CO >= 50, off below 50; list-zones polled every
   15 game-s only while there is traffic or a fan runs; a CO penalty forces fans on.
 - Fake payments: counted (`counters.fake_payments`), re-charged up to 3x, never released.
 - Latest validated run (04:23-04:55, speeds x1.7-x5.8): no occupied-spot, CO or charge-timing
@@ -141,34 +141,7 @@ crossing an empty one does. Want = night && a car is driving in that zone.
 - On-time is usage in game hours, like fans. Snapshot: `subsystems.environment.lights`
   {on,total,mode,detail,night,hour,reason} + per-zone lights_on/lights.
 - Tests: `test/components.test.ts` describe "lights" (11), `test/lights.test.ts` (6 geometry).
-- **Manual control** (like gates): `POST /api/control/devices/(fan|light)/:name/(on|off|auto)`,
-  operator+, audited as `fan.on` etc. On/Off take a part out of automatic control until
-  Automatic hands it back; holds live in `Environment.holds` and show in
-  `subsystems.environment.holds`. Dashboard: "Fans & lights" card on the Equipment page with
-  On/Off/Automatic per part plus "Return all N to automatic". A hold *on* always stands (an
-  idle fan only costs wear), but a fan held OFF is refused - and released if it is already
-  held - while its zone is above the CO level: that is the "High CO gas level" penalty.
-  Routing: `Subsystem.control()` returns null for parts it does not own, so the controller
-  offers the command to each subsystem in turn (gates and spots stay on the controller).
-- **Repair**: fans repair normally (`/exhaust-fans/{n}/repair`), refused while running.
-  **Lights cannot be repaired at all** - probed live 2026-09-20: `/lights/{n}/repair`,
-  `/lights/group/{g}/repair` and `/lights/{n}/fix` all 404 while the fan one answers 201.
-  So "Report fault" on a light raises an open `light_fault` incident (one per light, audited
-  as `light.fault_reported`) instead of inventing a command. Both buttons live in the
-  Fans & lights card and in the Equipment health table.
-- Names mean nothing: lights are `t_0..t_11` and `light13..light41`, fans `f_0/f_1` and
-  `fan0..fan9` - two naming batches from the level editor. The level file's `LightType`
-  agrees exactly with our geometry: every `Spot` light is an aisle light, every `Wall` one
-  is over the bays (30/30 on lvl2).
-- **A group command is all-or-nothing**, so it cannot say "all on except this one": while a
-  whole group was switched together it undid an operator's hold on the very next tick, and a
-  light could not be switched at all from the dashboard (found 2026-09-20 in the audit log -
-  `light.off t_0` ok, light back on seconds later). The group command is now only sent while
-  every light in the group is usable and wants the same state; otherwise they go one by one.
-  An ungrouped light (`group: ""`) is switched individually too - it used to be skipped.
-- Reporting a light faulty also opens a `waiting_for_clearance` maintenance job, so the work
-  shows on the Maintenance page. Without it the button changed nothing an operator could see.
-- **Still to do**: show it in `tools/live.ts`; verify live at night
+- **Still to do**: show it in `web/.../health.tsx` and `tools/live.ts`; verify live at night
   (or with `GPA_LIGHTS_MODE=always`) that the right lights follow the cars.
 
 ## Other open items

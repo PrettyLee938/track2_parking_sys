@@ -17,18 +17,20 @@ import { Overview } from "./pages/Overview";
 import { Penalties } from "./pages/Penalties";
 import { Reports } from "./pages/Reports";
 import { Stats } from "./pages/Stats";
+import { VehicleLocations } from "./pages/VehicleLocations";
 import type { LoginAttemptView } from "@gpa/shared";
 import { fmtDateTime } from "./lib/format";
 
-type Route = "overview" | "operations" | "equipment" | "maintenance" | "incidents" | "penalties" | "reports" | "logs" | "stats" | "admin";
-const ROUTES: { id: Route; label: string; adminOnly?: boolean }[] = [
+type Route = "overview" | "operations" | "equipment" | "maintenance" | "incidents" | "penalties" | "reports" | "locations" | "logs" | "stats" | "admin";
+const ROUTES: { id: Route; label: string; adminOnly?: boolean; operatorOnly?: boolean }[] = [
   { id: "overview", label: "Overview" },
   { id: "operations", label: "Operations" },
   { id: "equipment", label: "Equipment" },
   { id: "maintenance", label: "Maintenance" },
   { id: "incidents", label: "Incidents" },
   { id: "penalties", label: "Penalties" },
-  { id: "reports", label: "Reports" },
+  { id: "reports", label: "Reports", operatorOnly: true },
+  { id: "locations", label: "Vehicles" },
   { id: "logs", label: "Logs" },
   { id: "stats", label: "Statistics" },
   { id: "admin", label: "Admin", adminOnly: true },
@@ -66,7 +68,7 @@ function Shell() {
   const { user, signOut, can, previousLoginAttempts } = useAuth();
   const route = useHashRoute();
   const { state, connected } = useLiveState();
-  const visible = ROUTES.filter((r) => !r.adminOnly || can("admin"));
+  const visible = ROUTES.filter((r) => (!r.adminOnly || can("admin")) && (!r.operatorOnly || can("operator")));
   const current = visible.some((r) => r.id === route) ? route : "overview";
 
   return (
@@ -99,6 +101,7 @@ function Shell() {
             {current === "incidents" && <Incidents />}
             {current === "penalties" && <Penalties />}
             {current === "reports" && <Reports />}
+            {current === "locations" && <VehicleLocations />}
             {current === "logs" && <Logs />}
             {current === "stats" && <Stats spots={state.spots} />}
             {current === "admin" && <Admin />}

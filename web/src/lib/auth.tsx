@@ -37,7 +37,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setPreviousLoginAttempts([]);
   }, []);
 
-  const can = useCallback((role: Role) => !!user && (role === "operator" || user.role === "admin"), [user]);
+  const can = useCallback((role: Role) => {
+    if (!user) return false;
+    const rank: Record<Role, number> = { maintenance: 1, operator: 2, admin: 3 };
+    return rank[user.role] >= rank[role];
+  }, [user]);
 
   return <AuthContext.Provider value={{ user, previousLoginAttempts, loading, signIn, signOut, can }}>{children}</AuthContext.Provider>;
 }

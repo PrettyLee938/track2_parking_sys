@@ -123,8 +123,10 @@ describe("exit and payment", () => {
     await fireTimers(c);
     await c.handle(payEv("A", 0.5));
     expect(sim.calls).not.toContainEqual(["goto", "A", "leavepark"]);
-    expect(c.cars.get("A")!.status).toBe("payment_mismatch");
+    expect(c.cars.get("A")!.status).toBe("at_exit");
     expect(c.counters.payment_mismatches).toBe(1);
+    await fireTimers(c);
+    expect(sim.charges()).toHaveLength(2); // the correct invoice is requested again
   });
 
   it("waits for a closed exit gate to open before releasing", async () => {
@@ -245,6 +247,50 @@ describe("exit and payment", () => {
     expect(sim.charges().at(-1)).toEqual(["charge", "VVV 071", 4, 0]);
     await c.handle(payEv("VVV 071", 4));
     expect(sim.gotos().at(-1)).toEqual(["goto", "VVV 071", "leavepark"]);
+  });
+});
+
+describe("startup discovery", () => {
+  it("does not consider the simulator menu a completed sync", async () => {
+    const { c } = await make({ sim: new FakeSim([], []) });
+    expect(c.synced).toBe(false);
+    expect(c.topology).toBeNull();
+  });
+
+  it("discovers a level loaded after the backend starts", async () => {
+    const sim = new FakeSim([], []);
+    const { c } = await make({ sim, cfg: { levelDiscoveryRetryS: 0.01 } });
+    const retryingSync = (c as unknown as { initialSync: () => Promise<void> }).initialSync();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const loaded = FakeSim.lvl1();
+    sim.spots = loaded.spots;
+    sim.barriers = loaded.barriers;
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    c.stop();
+    await retryingSync;
+    expect(c.synced).toBe(true);
+    expect(c.topology?.name).toBe("test-lvl1");
+  });
+});
+
+describe("simulator connectivity", () => {
+  it("marks cached state offline and rediscovers after the simulator returns", async () => {
+    const sim = FakeSim.lvl1();
+    const { c } = await make({ sim, cfg: { simulatorHealthPollS: 0.01 } });
+    c.start();
+    sim.offline = true;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await c.tick();
+    expect(c.snapshot().simulator.online).toBe(false);
+    expect(c.snapshot().simulator.last_error).toBe("fetch failed");
+    expect(c.synced).toBe(true); // inventory is retained, but explicitly stale
+
+    sim.offline = false;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await c.tick();
+    expect(c.snapshot().simulator.online).toBe(true);
+    expect(c.snapshot().simulator.last_error).toBeNull();
+    c.stop();
   });
 });
 
@@ -629,6 +675,31 @@ describe("topology", () => {
     expect(routesFromLevel(level, TWO_ZONES)).toEqual({
       ENTRY1: { ZONE1: { gates: ["g1"], sensors: ["ENTRY1"] }, ZONE2: { gates: ["g1", "g3"], sensors: ["ENTRY1", "ENTRY2"] } },
       ENTRY2: { ZONE2: { gates: ["g3"], sensors: ["ENTRY2"] } }, // no way back up to ZONE1
+    });
+  });
+
+  it("always includes an entrance's own gate even when road geometry omits it", () => {
+    const level = {
+      Paths: [{
+        Points: [{ Name: "E", X: 0, Y: 0 }, { Name: "Z", X: 0, Y: 1000 }],
+        Connections: [{ From: "E", To: "Z", Direction: 0 }],
+      }],
+      ParkingSpots: [
+        { Name: "ENTRY1", Purpose: "EntrySpot", X: 0, Y: 0 },
+        { Name: "S1", Purpose: "Park", ZoneParent: "ZONE1", X: 0, Y: 1000 },
+      ],
+      // Deliberately outside the route-distance threshold. It is still the gate
+      // paired with ENTRY1 and must be opened before the car is sent onward.
+      Gates: [{ Name: "g-entry", X: 500, Y: 0 }],
+    };
+    const topology: Topology = {
+      name: "entrance-gate-regression",
+      entry_lanes: [{ spot: "ENTRY1", gate: "g-entry", zone: "ZONE1" }],
+      exit_lanes: [],
+    };
+
+    expect(routesFromLevel(level, topology)).toEqual({
+      ENTRY1: { ZONE1: { gates: ["g-entry"], sensors: ["ENTRY1"] } },
     });
   });
 

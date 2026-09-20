@@ -5,7 +5,7 @@
  * - A login creates a random 256-bit token; the browser keeps it in an HttpOnly,
  *   SameSite=Strict cookie and the database keeps only its SHA-256 hash.
  * - Repeated failed logins for a username are throttled.
- * - Roles: "admin" can do everything an "operator" can, plus manage users and the site.
+ * - Roles: maintenance can view and repair; operator adds traffic control; admin adds users, finance and site settings.
  */
 import { createHash, randomBytes, scrypt as scryptCb, timingSafeEqual, type ScryptOptions } from "node:crypto";
 import type { Role, UserView } from "@gpa/shared";
@@ -35,10 +35,11 @@ export async function verifyPassword(password: string, stored: string): Promise<
 
 const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
 
-/** Role check: admin satisfies every requirement. */
+/** Role check: higher roles satisfy lower-level requirements. */
 export function hasRole(user: UserView | null | undefined, required: Role): boolean {
   if (!user || user.disabled) return false;
-  return required === "operator" ? user.role === "operator" || user.role === "admin" : user.role === "admin";
+  const rank: Record<Role, number> = { maintenance: 1, operator: 2, admin: 3 };
+  return rank[user.role] >= rank[required];
 }
 
 export const USERNAME_PATTERN = /^[A-Za-z0-9_.-]{3,32}$/;

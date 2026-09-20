@@ -42,7 +42,7 @@
  * is a penalty). Running time goes to the component registry as usage (game hours) - what
  * preventive maintenance learns a fan's limit from.
  */
-import { EventClass, SpotPurpose, type CarStatus, type ComponentKind, type ControlResult, type DeviceHoldView } from "@gpa/shared";
+import { EventClass, SpotPurpose, type CarStatus } from "@gpa/shared";
 import type { Car } from "./controller";
 import type { EventRecord } from "./store";
 import type { Engine, Subsystem } from "./subsystems";
@@ -55,10 +55,6 @@ interface ZoneAir {
   forced: boolean;        // a CO penalty: fans on until a reading below coFanOffLevel
   want: boolean;          // fans should run
 }
-
-const key = (kind: ComponentKind, name: string) => `${kind}:${name}`;
-const ok = (message: string): ControlResult => ({ ok: true, message });
-const fail = (message: string): ControlResult => ({ ok: false, message });
 
 /** Which cars are driving, and so what has to be lit. */
 const DRIVING_IN: ReadonlySet<CarStatus> = new Set(["dispatching", "dispatched", "entering"]);
@@ -84,12 +80,6 @@ export class Environment implements Subsystem {
   private lastSimHour: number | null = null;
   private lastAnyMovementG: number | null = null;
   private lightsNote = "";
-  /**
-   * "kind:name" -> an operator override from the dashboard. While one is set the automatic
-   * rules leave that part alone - the same contract gates have, so a manual decision is not
-   * undone a tick later. "auto" clears it.
-   */
-  private readonly holds = new Map<string, { hold: "on" | "off"; actor: string; at: string }>();
 
   constructor(private readonly engine: Engine) {}
 
@@ -144,64 +134,11 @@ export class Environment implements Subsystem {
     if (engine.replaying || !engine.cfg.fanControl) return;
     if (now >= this.nextPollG && this.worthMeasuring(now)) await this.poll(now);
     for (const fan of engine.components.all("fan")) {
-      let want = this.zones.get(fan.zone)?.want ?? false;
-      const held = this.holds.get(key("fan", fan.name));
-      if (held?.hold === "off" && want) {
-        // Ventilation is a safety function. An operator may keep a fan running as long as
-        // they like - that only costs wear - but holding one OFF while its zone is above
-        // the CO level is exactly the "High CO gas level" penalty we keep being fined for,
-        // and nothing else would ever reconsider the hold. So that one is released.
-        this.holds.delete(key("fan", fan.name));
-        engine.note("error", `${fan.name}: releasing ${held.actor}'s hold - ${fan.zone} needs ventilation`);
-      } else if (held) {
-        want = held.hold === "on";
-      }
+      const want = this.zones.get(fan.zone)?.want ?? false;
       if (fan.on === want || !engine.components.usable("fan", fan.name)) continue;
       const ok = await engine.cmd(want ? "fan-on" : "fan-off", () => want ? engine.sim.fanOn(fan.name) : engine.sim.fanOff(fan.name), [fan.name]);
       if (ok) engine.components.setOn("fan", fan.name, want);
     }
-  }
-
-  /**
-   * Manual control of one exhaust fan or light from the dashboard, the same way a gate is
-   * held open or closed: "on"/"off" take the part out of automatic control until "auto"
-   * hands it back. Anything the simulator would fine us for is refused with the reason.
-   */
-  async control(kind: ComponentKind, name: string, action: string, actor: string): Promise<ControlResult | null> {
-    if (kind !== "fan" && kind !== "light") return null; // not ours: gates and spots stay on the controller
-    if (action !== "on" && action !== "off" && action !== "auto") return null;
-
-    const { engine } = this;
-    const part = engine.components.get(kind, name);
-    if (!part) return fail(`unknown ${kind} ${name}`);
-
-    if (action === "auto") {
-      if (!this.holds.delete(key(kind, name))) return ok(`${name} is already automatic`);
-      engine.note("info", `${actor} returned ${kind} ${name} to automatic`);
-      // The next tick puts it wherever CO or daylight wants it; say which that is now.
-      return ok(`${name} back under ${kind === "fan" ? "CO" : "daylight"} control`);
-    }
-
-    const health = engine.components.health(part);
-    if (health !== "ok") return fail(`${name} is ${health} - operating it now is a penalty`);
-    const on = action === "on";
-    if (kind === "fan" && !on && (this.zones.get(part.zone)?.want ?? false)) {
-      return fail(`${part.zone} is above the CO level - ${name} must keep running`);
-    }
-
-    this.holds.set(key(kind, name), { hold: action, actor, at: new Date().toISOString() });
-    if (part.on === on) return ok(`${name} is already ${action}, and is now held ${action}`);
-
-    const send = kind === "fan"
-      ? () => (on ? engine.sim.fanOn(name) : engine.sim.fanOff(name))
-      : () => (on ? engine.sim.lightOn(name) : engine.sim.lightOff(name));
-    if (!(await engine.cmd(`${kind}-${action}`, send, [name], actor))) {
-      this.holds.delete(key(kind, name));
-      return fail(`the simulator rejected ${action} ${name}`);
-    }
-    engine.components.setOn(kind, name, on);
-    engine.note("warn", `${actor} switched ${kind} ${name} ${action}`);
-    return ok(`${name} switched ${action} and held there until Automatic`);
   }
 
   // ---------------------------------------------------------------------------
@@ -225,42 +162,34 @@ export class Environment implements Subsystem {
       for (const [name, until] of this.litUntilG) if (until <= now) this.litUntilG.delete(name);
     }
 
-    // An operator's hold beats both the automatic rules and the idle sweep above: lighting
-    // is not a safety function, so a manual decision simply stands until it is handed back.
-    const on = (name: string) => {
-      const held = this.holds.get(key("light", name));
-      return held ? held.hold === "on" : this.litUntilG.has(name);
-    };
+    const on = (name: string) => this.litUntilG.has(name);
     if (engine.cfg.lightsDetail === "group" || !this.placement) {
-      // One command per group, but only while the whole group agrees. A group command
-      // operates every light in it, so it cannot express "all on except this one" - it
-      // used to undo an operator's hold on the very next tick, which is why a single
-      // light could not be switched at all from the dashboard (reported 2026-09-20).
-      // It also operates a broken light, which is a penalty. Either way: one by one.
-      const groups = new Map<string, string[]>();
-      for (const l of lights) groups.set(l.group ?? "", [...(groups.get(l.group ?? "") ?? []), l.name]);
-
-      for (const [group, names] of groups) {
-        const usable = names.filter((n) => engine.components.usable("light", n));
-        if (!usable.length) continue;
-        const want = on(usable[0]);
-        // An ungrouped light ("" from list-lights) has no group command of its own.
-        const asGroup = group !== "" && usable.length === names.length && usable.every((n) => on(n) === want);
-        if (asGroup) {
-          if (usable.every((n) => engine.components.get("light", n)?.on === want)) continue;
-          const ok = await engine.cmd(want ? "light-group-on" : "light-group-off",
-            () => want ? engine.sim.lightGroupOn(group) : engine.sim.lightGroupOff(group), [group]);
-          if (ok) for (const n of usable) engine.components.setOn("light", n, want);
+      // One command per zone: a group is lit if anything in it is wanted.
+      const groups = new Map<string, { want: boolean; names: string[] }>();
+      for (const l of lights) {
+        const g = groups.get(l.group ?? "") ?? { want: false, names: [] };
+        g.want ||= on(l.name);
+        g.names.push(l.name);
+        groups.set(l.group ?? "", g);
+      }
+      for (const [group, g] of groups) {
+        if (!group) continue;
+        const usable = g.names.filter((n) => engine.components.usable("light", n));
+        if (!usable.length || usable.every((n) => engine.components.get("light", n)?.on === g.want)) continue;
+        // A group command operates every light in the group, including a broken one - which
+        // is a penalty. With one out of service, switch the rest individually instead.
+        if (usable.length < g.names.length) {
+          for (const n of usable) {
+            if (engine.components.get("light", n)?.on === g.want) continue;
+            const one = await engine.cmd(g.want ? "light-on" : "light-off",
+              () => g.want ? engine.sim.lightOn(n) : engine.sim.lightOff(n), [n]);
+            if (one) engine.components.setOn("light", n, g.want);
+          }
           continue;
         }
-        for (const n of usable) {
-          const one = on(n);
-          if (engine.components.get("light", n)?.on === one) continue;
-          if (await engine.cmd(one ? "light-on" : "light-off",
-            () => one ? engine.sim.lightOn(n) : engine.sim.lightOff(n), [n])) {
-            engine.components.setOn("light", n, one);
-          }
-        }
+        const ok = await engine.cmd(g.want ? "light-group-on" : "light-group-off",
+          () => g.want ? engine.sim.lightGroupOn(group) : engine.sim.lightGroupOff(group), [group]);
+        if (ok) for (const n of usable) engine.components.setOn("light", n, g.want);
       }
       return;
     }
@@ -370,10 +299,6 @@ export class Environment implements Subsystem {
         hour: this.lastSimHour,
         reason: this.lightsNote,
       },
-      holds: [...this.holds].map(([k, h]): DeviceHoldView => {
-        const [kind, ...rest] = k.split(":");
-        return { kind: kind as "fan" | "light", name: rest.join(":"), hold: h.hold, actor: h.actor, at: h.at };
-      }).sort((a, b) => a.kind.localeCompare(b.kind) || a.name.localeCompare(b.name)),
       zones: [...new Set([...fans, ...lights].map((c) => c.zone))].sort().map((zone) => {
         const air = this.zones.get(zone);
         return {

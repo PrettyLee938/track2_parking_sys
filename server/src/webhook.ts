@@ -73,7 +73,10 @@ export class Intake {
 
     let seqNote = "";
     const seq = /^\d+$/.test(String(event.SequenceId ?? "")) ? Number(event.SequenceId) : null;
-    if (!duplicate && seq !== null) {
+    // Untrusted traffic must not move the simulator cursor or manufacture sequence-gap
+    // alerts. Otherwise a tampered request can poison recovery diagnostics for the next
+    // legitimate webhook.
+    if (!duplicate && seq !== null && trusted(sig, mode)) {
       if (this.lastSeq !== null && seq !== this.lastSeq + 1) {
         seqNote = `expected ${this.lastSeq + 1}, got ${seq}`;
         this.stats.seq_gaps++;

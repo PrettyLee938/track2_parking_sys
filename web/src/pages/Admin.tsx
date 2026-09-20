@@ -1,6 +1,6 @@
 /** Admin only: accounts, site controls, audit trail, configuration. */
 import { useCallback, useEffect, useState, type FormEvent } from "react";
-import type { AuditEntryView, Role, UserView } from "@gpa/shared";
+import type { AuditEntryView, Role, SecurityEventView, UserView } from "@gpa/shared";
 import { Badge, Button, Card, Empty, useCommand, useToast } from "../components/ui";
 import { api } from "../lib/api";
 import { useAuth } from "../lib/auth";
@@ -14,6 +14,7 @@ export function Admin() {
         <SiteControls />
         <Audit />
       </div>
+      <SecurityEvents />
       <Config />
     </div>
   );
@@ -41,7 +42,7 @@ function Users() {
   };
 
   return (
-    <Card title="Users" subtitle="Operators can monitor and control gates and spots; admins can also manage users, entrances and the site">
+    <Card title="Users" subtitle="Maintenance can view and repair equipment; operators control traffic; admins manage users, entrances and the site">
       <div className="table-wrap">
         <table className="data">
           <thead><tr><th>User</th><th>Role</th><th>Status</th><th>Last sign-in</th><th>Created</th><th className="right">Actions</th></tr></thead>
@@ -52,6 +53,7 @@ function Users() {
                 <td>
                   <select value={u.role} aria-label={`Role of ${u.username}`}
                     onChange={(e) => update(u, { role: e.target.value as Role }, `${u.username} is now ${e.target.value}`)}>
+                    <option value="maintenance">Maintenance</option>
                     <option value="operator">Operator</option>
                     <option value="admin">Admin</option>
                   </select>
@@ -104,6 +106,7 @@ function CreateUser({ onCreated }: { onCreated: () => void }) {
       <input type="password" placeholder="Password (8+ characters)" value={password} onChange={(e) => setPassword(e.target.value)} required
         minLength={8} autoComplete="new-password" aria-label="New password" />
       <select value={role} onChange={(e) => setRole(e.target.value as Role)} aria-label="New user's role">
+        <option value="maintenance">Maintenance</option>
         <option value="operator">Operator</option>
         <option value="admin">Admin</option>
       </select>
@@ -166,4 +169,16 @@ function Config() {
       </div>
     </Card>
   );
+}
+
+function SecurityEvents() {
+  const [items, setItems] = useState<SecurityEventView[]>([]);
+  useEffect(() => { const load = () => api.securityEvents({ limit: 200 }).then((r) => setItems(r.items)).catch(() => undefined); load(); const id = setInterval(load, 5000); return () => clearInterval(id); }, []);
+  return <Card title="Webhook security events" subtitle="Accepted, duplicated, invalid, and tampered network requests; duplicated calls are retained for investigation">
+    {!items.length ? <Empty>No webhook security events yet.</Empty> : <div className="table-wrap tall"><table className="data compact">
+      <thead><tr><th>When</th><th>Decision</th><th>Event</th><th>Event ID</th><th>IP</th><th>Reason</th></tr></thead>
+      <tbody>{items.map((e) => <tr key={e.id}><td className="mono">{fmtDateTime(e.at)}</td><td><Badge tone={e.decision === "accepted" ? "good" : e.decision === "duplicate" ? "warning" : "critical"}>{e.decision}</Badge></td>
+        <td>{e.event_class ?? "-"}</td><td className="mono">{e.event_id ?? "-"}</td><td className="mono">{e.ip ?? "-"}</td><td>{e.reason}</td></tr>)}</tbody>
+    </table></div>}
+  </Card>;
 }

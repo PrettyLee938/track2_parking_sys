@@ -116,6 +116,10 @@ export interface SimParkingSpot {
   detectedCars: number;
   broken: boolean;
   isUnderMaintenance: boolean;
+  /** Optional Level 3 diagnostics exposed by newer simulator builds. */
+  sensorAbnormal?: boolean;
+  sensorError?: boolean;
+  sensorStatus?: string;
 }
 
 export interface SimBarrier {
