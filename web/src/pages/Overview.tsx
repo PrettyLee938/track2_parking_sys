@@ -54,6 +54,8 @@ export function Overview({ s }: { s: StateSnapshot }) {
         <Tile label="Open incidents" value={fmtInt(incidents.length)} sub={incidents.length ? "Needs operator attention" : "No unresolved alerts"}
           tone={incidents.length ? "critical" : "good"} />
         <Tile label="Game speed" value={`×${s.time_scale.toFixed(2)}`} sub={s.time_scale_source} />
+        {s.queue && <Tile label="Events waiting" value={fmtInt(s.queue.depth)} tone={s.queue.depth >= 25 ? "critical" : s.queue.depth >= 10 ? "warning" : "good"}
+          sub={s.queue.depth ? `oldest ${Math.round(s.queue.oldest_wait_ms)} ms · see Operations` : "engine is keeping up"} />}
       </section>
 
       <div className="grid-2">

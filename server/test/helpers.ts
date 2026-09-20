@@ -6,7 +6,7 @@ import { AuthService, hashPassword } from "../src/auth";
 import { loadSettings, type Settings } from "../src/config";
 import { Controller, type Logger } from "../src/controller";
 import { GameClock } from "../src/gameClock";
-import type { Task, TaskQueue } from "../src/serialQueue";
+import { SerialQueue, type Task, type TaskQueue } from "../src/serialQueue";
 import type { SimApi } from "../src/simClient";
 import { Store, type EventRecord } from "../src/store";
 import type { Topology } from "../src/topology";
@@ -63,7 +63,8 @@ export class FakeSim implements SimApi {
 /** Collects scheduled tasks instead of running them, so tests stay deterministic. */
 export class RecordingQueue implements TaskQueue {
   tasks: Task[] = [];
-  push(task: Task) { this.tasks.push(task); }
+  labels: string[] = [];
+  push(task: Task, label = "task") { this.tasks.push(task); this.labels.push(label); }
   /** Manual commands run straight away: tests await them directly. */
   run<T>(fn: () => Promise<T> | T): Promise<T> { return Promise.resolve(fn()); }
 }
@@ -129,10 +130,11 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
   return loadSettings({}, { signatureMode: "lenient", levelProfile: "level1", ...overrides });
 }
 
-export async function make(opts: { sim?: FakeSim; topo?: Topology; topologies?: Topology[]; cfg?: Partial<Settings> } = {}) {
+export interface MakeOpts { sim?: FakeSim; topo?: Topology; topologies?: Topology[]; cfg?: Partial<Settings> }
+
+async function build(queue: TaskQueue, opts: MakeOpts) {
   const sim = opts.sim ?? FakeSim.lvl1();
   const store = new Store(":memory:");
-  const queue = new RecordingQueue();
   // closeIdleGatesOnSync off keeps call logs simple; it has its own test.
   // Unit tests that exercise limit learning start with unknown limits; the
   // production defaults are calibrated for the real Level 2 simulator.
@@ -151,7 +153,23 @@ export async function make(opts: { sim?: FakeSim; topo?: Topology; topologies?: 
       if (live) clock.activity();
     }
   };
-  return { c, sim, store, queue, clock, advance };
+  return { c, sim, store, clock, advance };
+}
+
+export async function make(opts: MakeOpts = {}) {
+  const queue = new RecordingQueue();
+  return { ...await build(queue, opts), queue };
+}
+
+/**
+ * Like make(), but with the real SerialQueue, so a test can submit() a burst of webhooks
+ * the way app.ts does and assert what the engine did with them in order. drain() waits
+ * for everything queued so far.
+ */
+export async function makeQueued(opts: MakeOpts = {}) {
+  const errors: unknown[] = [];
+  const queue = new SerialQueue((err) => errors.push(err));
+  return { ...await build(queue, opts), queue, errors, drain: () => queue.idle() };
 }
 
 /**

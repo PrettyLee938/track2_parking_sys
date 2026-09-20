@@ -314,11 +314,11 @@ export class Controller implements Engine {
     this.started = true;
     // Events arriving before the first sync wait behind it in the queue; handling them
     // against an empty map would turn every car away.
-    this.queue.push(() => this.initialSync());
+    this.queue.push(() => this.initialSync(), "initial sync");
     this.tickHandle = setInterval(() => {
       if (this.tickPending) return;
       this.tickPending = true;
-      this.queue.push(async () => { this.tickPending = false; await this.tick(); });
+      this.queue.push(async () => { this.tickPending = false; await this.tick(); }, "tick");
     }, this.cfg.tickIntervalS * 1000);
   }
 
@@ -328,17 +328,17 @@ export class Controller implements Engine {
   }
 
   submit(e: EventRecord): void {
-    this.queue.push(() => this.handle(e));
+    this.queue.push(() => this.handle(e), `event ${e.EventClass}`);
   }
 
   /** A webhook the intake refused (bad signature): not acted on, only looked at - a refused
    * payment_made is a car trying to leave with a fake payment. */
   submitRejected(e: EventRecord): void {
-    this.queue.push(() => this.onRejected(e));
+    this.queue.push(() => this.onRejected(e), `rejected ${e.EventClass}`);
   }
 
   requestResync(): void {
-    this.queue.push(() => this.sync());
+    this.queue.push(() => this.sync(), "resync");
   }
 
   private async initialSync() {
@@ -721,9 +721,6 @@ export class Controller implements Engine {
       await this.turnAway(car, "no suitable spot");
       return this.pumpEntry(lane);
     }
-    // #region agent log
-    fetch('http://127.0.0.1:7502/ingest/5b601716-2241-46fc-9c1b-1aa5e55ae0bd',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'6f1c01'},body:JSON.stringify({sessionId:'6f1c01',hypothesisId:'A',location:'controller.ts:pumpEntry',message:'dispatch reserve',data:{plate,spot:spot.name,available:spot.available,occupants:[...spot.occupants],reserved_for:spot.reserved_for,detected:spot.detected,lane:lane.spot,queueLen:lane.queue.length,current:lane.current,timeScale:this.timeScale,qDepth:(this.queue as {depth?:number}).depth},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
     spot.reserved_for = plate;
     car.spot = spot.name;
     car.status = "dispatching";
@@ -882,18 +879,9 @@ export class Controller implements Engine {
 
   private async onExitIn(e: EventRecord, lane: ExitLane) {
     const plate = str(e, "CarPlateNumber")!;
-    if (this.drivingIn(plate)) {
-      const inbound = this.cars.get(plate);
-      // #region agent log
-      fetch('http://127.0.0.1:7502/ingest/5b601716-2241-46fc-9c1b-1aa5e55ae0bd',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'6f1c01'},body:JSON.stringify({sessionId:'6f1c01',hypothesisId:'D',location:'controller.ts:onExitIn',message:'ignored exit CarIn while driving in',data:{plate,status:inbound?.status??null,spot:inbound?.spot??null,lane:lane.spot},timestamp:Date.now()})}).catch(()=>{});
-      // #endregion
-      return;
-    }
+    if (this.drivingIn(plate)) return;
     const known = this.cars.get(plate);
     const car = known ?? this.adopt(e);
-    // #region agent log
-    fetch('http://127.0.0.1:7502/ingest/5b601716-2241-46fc-9c1b-1aa5e55ae0bd',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'6f1c01'},body:JSON.stringify({sessionId:'6f1c01',hypothesisId:'D',location:'controller.ts:onExitIn',message:'exit CarIn',data:{plate,status:car.status,spot:car.spot,charge_parking:car.charge_parking,lane:lane.spot,recentPaid:this.recentPaid.has(plate),timeScale:this.timeScale},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
     car.exit_lane = lane.spot;
     car.exit_at = e.ServerDateTime ?? null;
     // A car that appears at an exit without an accepted entry/spot flow may have
@@ -971,9 +959,6 @@ export class Controller implements Engine {
     car.billing_basis = basis;
     this.store.createInvoice({ invoiceId, visitId: car.visit_id, plate: car.plate,
       parkingAmount: parking, electricAmount: electric, basis });
-    // #region agent log
-    fetch('http://127.0.0.1:7502/ingest/5b601716-2241-46fc-9c1b-1aa5e55ae0bd',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'6f1c01'},body:JSON.stringify({sessionId:'6f1c01',hypothesisId:'B',location:'controller.ts:charge',message:'issuing charge',data:{plate,status:car.status,attempts:car.charge_attempts,planned:car.planned_minutes,gameS,parking,electric,basis,timeScale:this.timeScale,timeScaleSrc:this.timeScaleInfo.source,exitAt:car.exit_at,carType:car.car_type,qDepth:(this.queue as {depth?:number}).depth},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
     if (await this.cmd("charge", () => this.sim.carCharge(plate, parking, electric), [plate, parking, electric])) {
       car.charge_parking = parking;
       car.charge_electric = electric;
@@ -1103,9 +1088,6 @@ export class Controller implements Engine {
     if (car.status !== "released") {
       this.counters.escaped++;
       this.note("error", `${plate} left without being released (status ${car.status})`);
-      // #region agent log
-      fetch('http://127.0.0.1:7502/ingest/5b601716-2241-46fc-9c1b-1aa5e55ae0bd',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'6f1c01'},body:JSON.stringify({sessionId:'6f1c01',hypothesisId:'D',location:'controller.ts:onExitOut',message:'escaped unpaid',data:{plate,status:car.status,spot:car.spot,charge_parking:car.charge_parking,payment_ok:car.payment_ok,lane:lane.spot},timestamp:Date.now()})}).catch(()=>{});
-      // #endregion
     }
     lane.releasing.delete(plate);
     this.counters.exited++;
@@ -1121,13 +1103,6 @@ export class Controller implements Engine {
     this.counters.fines += Number(e.FineAmount) || 0;
     const reason = str(e, "Reason") ?? "";
     this.note("error", `PENALTY ${e.FineAmount}: ${reason} (${e.ComponentName})`);
-    const carForLog = this.carByComponent(str(e, "ComponentName"));
-    const spotNameForLog = OCCUPIED_SPOT_PATTERN.exec(reason)?.[1]?.trim();
-    const spotForLog = spotNameForLog ? this.spots.get(spotNameForLog) : (carForLog?.spot ? this.spots.get(carForLog.spot) : undefined);
-    // #region agent log
-    fetch('http://127.0.0.1:7502/ingest/5b601716-2241-46fc-9c1b-1aa5e55ae0bd',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'6f1c01'},body:JSON.stringify({sessionId:'6f1c01',hypothesisId:'A',location:'controller.ts:onPenalty',message:'penalty received',data:{reason,component:str(e,"ComponentName"),fine:e.FineAmount,carStatus:carForLog?.status??null,carSpot:carForLog?.spot??null,charge_parking:carForLog?.charge_parking??null,charge_attempts:carForLog?.charge_attempts??null,spotName:spotForLog?.name??null,occupants:spotForLog?[...spotForLog.occupants]:null,reserved_for:spotForLog?.reserved_for??null,detected:spotForLog?.detected??null,timeScale:this.timeScale,qDepth:(this.queue as {depth?:number}).depth},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
-
     const car = this.carByComponent(str(e, "ComponentName"));
     const lowered = reason.toLowerCase();
     if (lowered.includes(PenaltyReason.OccupiedSpot)) return this.onOccupiedSpotPenalty(reason, car);
@@ -1353,9 +1328,6 @@ export class Controller implements Engine {
     const gate = name ? this.gates.get(name) : undefined;
     if (gate && gate.operable && gate.hold !== "open" && !this.gateBusy(gate.name) && !gate.onOpen.length &&
         (gate.state === GateState.Open || gate.state === GateState.Opening)) {
-      // #region agent log
-      fetch('http://127.0.0.1:7502/ingest/5b601716-2241-46fc-9c1b-1aa5e55ae0bd',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'6f1c01'},body:JSON.stringify({sessionId:'6f1c01',hypothesisId:'E',location:'controller.ts:closeGateIfIdle',message:'closing idle gate',data:{name:gate.name,state:gate.state,busy:this.gateBusy(gate.name),onOpen:gate.onOpen.length,timeScale:this.timeScale},timestamp:Date.now()})}).catch(()=>{});
-      // #endregion
       await this.requestClose(gate);
     }
   }
@@ -1578,7 +1550,7 @@ export class Controller implements Engine {
       if (timer.done) return;
       if (this.clock.now() < timer.due - 1e-3) this.arm(timer); // game time ran slower than planned
       else await this.runTimer(timer);
-    }), this.clock.realUntil(timer.due) * 1000);
+    }, `timer ${timer.label}`), this.clock.realUntil(timer.due) * 1000);
   }
 
   private async runTimer(t: Timer) {
@@ -1715,9 +1687,6 @@ export class Controller implements Engine {
       error = (ex as Error).message ?? String(ex);
       this.counters.command_errors++;
       this.note("error", `command ${what}(${args.join(", ")}) failed: ${error}`);
-      // #region agent log
-      fetch('http://127.0.0.1:7502/ingest/5b601716-2241-46fc-9c1b-1aa5e55ae0bd',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'6f1c01'},body:JSON.stringify({sessionId:'6f1c01',hypothesisId:'F',location:'controller.ts:cmd',message:'command failed',data:{what,args,error,ms:Math.round(performance.now()-t0),qDepth:(this.queue as {depth?:number}).depth},timestamp:Date.now()})}).catch(()=>{});
-      // #endregion
     }
     this.store.recordAction({
       at: new Date().toISOString(), cmd: what, args: args.map(String), ok, error,
@@ -1755,8 +1724,8 @@ export class Controller implements Engine {
   }
 
   /** Run fn in turn with webhooks and ticks, so it never sees half-updated state. */
-  exclusive<T>(fn: () => Promise<T> | T): Promise<T> {
-    return this.queue.run(fn);
+  exclusive<T>(fn: () => Promise<T> | T, label = "manual command"): Promise<T> {
+    return this.queue.run(fn, label);
   }
 
   /**
@@ -1948,6 +1917,7 @@ export class Controller implements Engine {
       subsystems: Object.fromEntries(this.subsystems.filter((s) => s !== this.components && s.snapshot)
         .map((s) => [s.name, s.snapshot!()])),
       environment,
+      queue: this.queue.stats?.() ?? null,
     };
   }
 }

@@ -9,11 +9,17 @@ const res = await fetch(`${LISTENER}/debug/controller`).catch((e) => { console.e
 const s = await res.json() as Record<string, any>;
 type ComponentDebug = { kind: string; name: string; uses?: number; health?: string; waiting?: string | null };
 const components = new Map<string, ComponentDebug>((s.components ?? []).map((c: ComponentDebug) => [`${c.kind}:${c.name}`, c]));
-const queueDepth = (s.entry_lanes ?? []).reduce((n: number, l: any) => n + (l.queue?.length ?? 0), 0);
 const cars = s.cars ?? (s.active_cars ?? []).length;
 const level = typeof s.topology === "string" ? s.topology : s.topology?.name ?? "-";
 const gateLimit = s.gate_limit ?? "learned";
-console.log(`synced=${s.synced} level=${level} speed=x${s.time_scale} (${s.time_scale_source}) queue_depth=${s.queue_depth ?? queueDepth} cars=${cars} gate_limit=${gateLimit}`);
+console.log(`synced=${s.synced} level=${level} speed=x${s.time_scale} (${s.time_scale_source}) cars=${cars} gate_limit=${gateLimit}`);
+// The serial queue is the only writer, so a backlog here is the whole system falling
+// behind - the first thing to look at during a Level 3 burst.
+const q = s.queue;
+if (q) {
+  console.log(`queue: depth=${q.depth} running=${q.running ?? "-"} (${q.running_ms}ms) oldest_wait=${q.oldest_wait_ms}ms` +
+    ` done=${q.completed} failed=${q.failed} handler avg=${q.avg_ms}ms p95=${q.p95_ms}ms max=${q.max_ms}ms (${q.slowest ?? "-"})`);
+}
 console.log("\nentrances");
 for (const l of s.entry_lanes ?? []) console.log(`  ${l.spot} gate=${l.gate} current=${l.current ?? "-"} queue=${l.queue?.length ?? 0}${l.closed ? " CLOSED" : ""}`);
 console.log("exits");

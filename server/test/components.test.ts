@@ -237,10 +237,13 @@ describe("exhaust fans", () => {
   const zone1 = (level: number) => [{ name: "ZONE1", gasCarbonMonoxideLevel: level, risk: level >= 50 ? "Mid" : "Safe" }];
   const fanCalls = (sim: FakeSim) => sim.calls.filter((x) => x[0].startsWith("fan-"));
 
-  it("runs a zone's fans while its CO is 50 or more, and switches them off once it drops below", async () => {
+  it("runs a zone's fans from coFanOnLevel and keeps them on until CO drops below coFanOffLevel", async () => {
     // Spec: "better to turn off when CO levels are below 50". 2026-09-20: no CO webhook ever
     // came - only "High CO gas level" penalties (30 each) - so the level is read (list-zones).
+    // The off level is deliberately lower than the on level: without that gap a zone sitting
+    // at ~50 switches its fans on and off on every poll, and every switch is fan wear.
     const { c, sim, advance } = await make({ sim: withFans(), cfg: { gameSpeed: 1 } });
+    expect(c.cfg.coFanOffLevel).toBeLessThan(c.cfg.coFanOnLevel);
     sim.zones = zone1(20);
     await c.handle(carEv("A", "S1", "CarIn", "10:00:00")); // traffic: worth measuring
     await c.tick();
@@ -250,7 +253,11 @@ describe("exhaust fans", () => {
     advance(c.cfg.coPollGameS);
     await c.tick();
     expect(fanCalls(sim)).toEqual([["fan-on", "fan0"], ["fan-on", "fan1"]]);
-    sim.zones = zone1(49);
+    sim.zones = zone1(c.cfg.coFanOffLevel + 1); // inside the gap: still venting
+    advance(c.cfg.coPollGameS);
+    await c.tick();
+    expect(fanCalls(sim).slice(2)).toEqual([]);
+    sim.zones = zone1(c.cfg.coFanOffLevel - 1);
     advance(c.cfg.coPollGameS);
     await c.tick();
     expect(fanCalls(sim).slice(2)).toEqual([["fan-off", "fan0"], ["fan-off", "fan1"]]);

@@ -1,9 +1,9 @@
 /** Component health: what is broken or being repaired, and the breakdown/repair history. */
 import { useEffect, useState } from "react";
-import type { ComponentEventView, ComponentKind, ComponentView } from "@gpa/shared";
+import type { ComponentEventView, ComponentKind, ComponentView, QueueStats } from "@gpa/shared";
 import { api } from "../lib/api";
 import { fmtTimeSec } from "../lib/format";
-import { Badge, Card, Empty, Tile } from "./ui";
+import { Badge, Card, Empty, Tile, type Tone } from "./ui";
 
 const KINDS: { kind: ComponentKind; label: string; unit: string }[] = [
   { kind: "gate", label: "Gates", unit: "cycles" },
@@ -71,6 +71,36 @@ export function ComponentHealthCard({ components }: { components: ComponentView[
       </table>
       <h3 className="section-title">Breakdowns and repairs</h3>
       <ComponentHistory />
+    </Card>
+  );
+}
+
+/**
+ * Every webhook, tick and manual command runs through one queue, in order, so nothing is
+ * ever lost - but a queue that keeps growing means the engine is falling behind the
+ * simulator. This is what an operator watches when a lot of cars leave at once.
+ *
+ * Thresholds are judgement, not measurement: a handful of tasks in flight is normal at a
+ * busy moment, tens of them mean the dashboard is showing stale state.
+ */
+const QUEUE_BUSY = 10, QUEUE_BEHIND = 25;
+
+export function EventQueueCard({ queue }: { queue?: QueueStats | null }) {
+  if (!queue) return null;
+  const tone: Tone = queue.depth >= QUEUE_BEHIND ? "critical" : queue.depth >= QUEUE_BUSY ? "warning" : "good";
+  const state = queue.depth >= QUEUE_BEHIND ? "Falling behind" : queue.depth >= QUEUE_BUSY ? "Busy" : "Keeping up";
+  return (
+    <Card title="Event queue" subtitle="Simulator events, ticks and your commands all run here, one at a time and in order">
+      <div className="tiles">
+        <Tile label="Waiting" value={queue.depth} tone={tone} sub={state} />
+        <Tile label="Longest wait" value={`${Math.round(queue.oldest_wait_ms)} ms`}
+          sub={queue.oldest_label ? `oldest: ${queue.oldest_label}` : "nothing waiting"} />
+        <Tile label="Handling now" value={queue.running ?? "idle"} sub={queue.running ? `${Math.round(queue.running_ms)} ms so far` : undefined} />
+        <Tile label="Handler time" value={`${queue.avg_ms.toFixed(1)} ms avg`} sub={`95th ${queue.p95_ms.toFixed(1)} ms · worst ${queue.max_ms.toFixed(1)} ms`} />
+        <Tile label="Slowest handler" value={queue.slowest ?? "—"} sub="over the last 200 tasks" />
+        <Tile label="Handled" value={queue.completed.toLocaleString()} tone={queue.failed ? "critical" : "good"}
+          sub={queue.failed ? `${queue.failed} failed` : "none failed"} />
+      </div>
     </Card>
   );
 }

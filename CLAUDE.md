@@ -163,6 +163,33 @@ crossing an empty one does. Want = night && a car is driving in that zone.
 - **Still to do**: show it in `tools/live.ts`; verify live at night
   (or with `GPA_LIGHTS_MODE=always`) that the right lights follow the cars.
 
+## Level 3 (branch `miro_level3`) - brief in `docs/LEVEL3_CONTEXT.md`
+Nothing below has been near the simulator: Level 3 work is proven by unit tests only
+(`npm test`, 160 today). Each item says what still needs a live run.
+
+### Done: burst safety + queue visibility (§7.6)
+- The 8 `#region agent log` blocks that `fetch()`ed every event, command and penalty to
+  127.0.0.1:7502 are gone from `controller.ts`.
+- `SerialQueue` now measures itself: depth, the label and age of the oldest waiting task,
+  what is running, and per-handler durations (avg/p95/max + the slowest label over the last
+  200 tasks). Every `queue.push/run` carries a label (`event car_spot_action`, `tick`,
+  `timer close gate1`, `manual command`, ...). `QueueStats` is in `shared/src/api.ts`;
+  `StateSnapshot.queue` carries it, the Operations page shows an "Event queue" card, the
+  Overview an "Events waiting" tile, and `report:live` prints a queue line.
+- `/webhook` already persisted-then-queued and answered without waiting for the engine;
+  there is now a test that proves it (`test/burst.test.ts`).
+- Burst tests (`test/burst.test.ts`, 5): 40 cars leaving in the same tick get exactly one
+  charge and one leavepark each, in arrival order, nothing dropped; one non-payer in that
+  burst stays shut in while the other 39 leave; a thrown handler does not stop the queue.
+- Test harness: `makeQueued()` in `test/helpers.ts` builds the same fixture as `make()` but
+  on the real `SerialQueue`, with `drain()`; `RecordingQueue` also records task labels.
+- **Needs a live run:** the queue figures under real Level 3 traffic (3 emitters) - watch
+  `report:live` and the Operations card for depth/oldest-wait climbing.
+- **Heads-up for the team:** `coFanOffLevel` was changed from 50 to 40 in `8e94c38` without
+  updating its test, so `main`/`miro_level3` had a failing test. The test now documents the
+  50-on/40-off hysteresis (fewer fan switches around 50) rather than changing behaviour back
+  - say if you want the spec's plain "off below 50" instead.
+
 ## Other open items
 - Team split: B environment (lights), C RBAC (enforce ROLE_PERMISSIONS: repair +
   reports.financial), login attempts table + last 3 after login, audit log, rejected-webhook
@@ -170,8 +197,6 @@ crossing an empty one does. Want = night && a car is driving in that zone.
 - Manual-parked-car scenario (car appears at an exit with no record): currently "adopted" and
   billed from the event's planned minutes / 1 minute. Decide a policy (flag, keep gate shut,
   flat/max fee or operator-entered amount, audit entry, operator override).
-- `controller.ts` still has `#region agent log` blocks posting to 127.0.0.1:7502 (from another
-  debugging tool) - remove when nobody needs them.
 
 ## Working conventions
 - Don't commit or push unless asked; branch off `main` for new work.

@@ -132,6 +132,35 @@ export interface Counters {
 /** Where the game speed figure came from (see the server's config.ts, "game clock"). */
 export type TimeScaleSource = "configured" | "gate timing" | "learned" | "simulator settings" | "default";
 
+/**
+ * How the single serial queue every state change runs through is coping.
+ *
+ * Level 3 has three car emitters, so genuinely simultaneous events are normal and a slow
+ * handler shows up as a growing backlog rather than as a lost event. These figures are what
+ * an operator (and the load test) watches: a depth that keeps climbing, or an oldest-wait
+ * that grows, means the handlers are too expensive for the arrival rate.
+ */
+export interface QueueStats {
+  /** Tasks queued and not finished, including the one running. */
+  depth: number;
+  /** Label of the task in flight, and how long it has been running (real ms). */
+  running: string | null;
+  running_ms: number;
+  /** How long the task at the head of the queue has been waiting (real ms). */
+  oldest_wait_ms: number;
+  /** Label of the task that has waited longest, so a backlog can be attributed. */
+  oldest_label: string | null;
+  completed: number;
+  failed: number;
+  /** Handler durations over the sampled window (real ms). */
+  last_ms: number;
+  avg_ms: number;
+  p95_ms: number;
+  max_ms: number;
+  /** The slowest handler in the window - what to make cheaper first. */
+  slowest: string | null;
+}
+
 /** GET /api/state */
 export interface StateSnapshot {
   synced: boolean;
@@ -156,6 +185,8 @@ export interface StateSnapshot {
   environment?: EnvironmentSnapshot;
   /** Open incidents that need operator/admin attention. */
   incidents?: IncidentView[];
+  /** Serial-queue health; null when the queue does not report it (tests). */
+  queue?: QueueStats | null;
 }
 
 // ---------------------------------------------------------------------------

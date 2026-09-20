@@ -456,7 +456,7 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
     const s = controller.snapshot();
     return {
       synced: s.synced, topology: s.topology?.name ?? null, time_scale: s.time_scale, time_scale_source: s.time_scale_source,
-      queue_depth: (controller.queue as { depth?: number }).depth ?? null,
+      queue: s.queue ?? null,
       entry_lanes: s.entry_lanes, exit_lanes: s.exit_lanes,
       gates: s.gates.map((g) => {
         const c = s.components.find((x) => x.kind === "gate" && x.name === g.name);
