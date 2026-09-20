@@ -16,6 +16,17 @@ export class SimError extends Error {}
 export interface SimApi {
   listParkingSpots(): Promise<SimParkingSpot[]>;
   listBarriers(): Promise<SimBarrier[]>;
+  /** Optional Level 2 environment capabilities; legacy fakes need not implement them. */
+  listLights?(): Promise<unknown>;
+  listExhaustFans?(): Promise<unknown>;
+  listZones?(): Promise<unknown>;
+  lightOn?(name: string): Promise<void>;
+  lightOff?(name: string): Promise<void>;
+  lightGroupOn?(group: string): Promise<void>;
+  lightGroupOff?(group: string): Promise<void>;
+  fanOn?(name: string): Promise<void>;
+  fanOff?(name: string): Promise<void>;
+  repairFan?(name: string): Promise<void>;
   openGate(name: string): Promise<void>;
   closeGate(name: string): Promise<void>;
   carGoto(plate: string, destination: string): Promise<void>;
@@ -71,10 +82,11 @@ export class SimClient implements SimApi {
   // ---- discovery (costly: once per level load) --------------------------------
   listParkingSpots = () => this.request<SimParkingSpot[]>("GET", "/list-parking-spots");
   listBarriers = () => this.request<SimBarrier[]>("GET", "/list-barriers");
-  listLights = () => this.request<unknown[]>("GET", "/list-lights");
-  listExhaustFans = () => this.request<unknown[]>("GET", "/list-exhaust-fans");
+  // These rows are normalized after retrieval: keep the raw wrapper shape intact here.
+  listLights = () => this.request<unknown>("GET", "/list-lights");
+  listExhaustFans = () => this.request<unknown>("GET", "/list-exhaust-fans");
   listAlarms = () => this.request<unknown[]>("GET", "/list-alarms");
-  listZones = () => this.request<unknown[]>("GET", "/list-zones");
+  listZones = () => this.request<unknown>("GET", "/list-zones");
   testWebhook = () => this.request<string>("GET", "/test");
 
   // ---- gates ------------------------------------------------------------------

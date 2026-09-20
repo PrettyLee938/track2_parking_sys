@@ -5,7 +5,7 @@
  * - A login creates a random 256-bit token; the browser keeps it in an HttpOnly,
  *   SameSite=Strict cookie and the database keeps only its SHA-256 hash.
  * - Repeated failed logins for a username are throttled.
- * - Roles: "admin" can do everything an "operator" can, plus manage users and the site.
+ * - Admin is the dashboard superuser; Maintenance and Operator are separate capabilities.
  */
 import { createHash, randomBytes, scrypt as scryptCb, timingSafeEqual, type ScryptOptions } from "node:crypto";
 import type { Role, UserView } from "@gpa/shared";
@@ -38,7 +38,7 @@ const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
 /** Role check: admin satisfies every requirement. */
 export function hasRole(user: UserView | null | undefined, required: Role): boolean {
   if (!user || user.disabled) return false;
-  return required === "operator" ? user.role === "operator" || user.role === "admin" : user.role === "admin";
+  return user.role === "admin" || user.role === required;
 }
 
 export const USERNAME_PATTERN = /^[A-Za-z0-9_.-]{3,32}$/;
@@ -50,7 +50,10 @@ export function validateCredentials(username: string | undefined, password: stri
   return null;
 }
 
-type LoginResult = { ok: true; token: string; user: UserView } | { ok: false; reason: "invalid" | "throttled"; retryAfterS?: number };
+export type LoginContext = { sourceIp?: string; userAgent?: string };
+export type LoginResult =
+  | { ok: true; token: string; user: UserView; previousAttempts: ReturnType<Store["recentLoginAttemptsForUser"]>; attemptId: number }
+  | { ok: false; reason: "invalid" | "throttled"; retryAfterS?: number };
 
 export class AuthService {
   private readonly failures = new Map<string, { count: number; until: number }>();
@@ -70,27 +73,51 @@ export class AuthService {
     return { username: this.cfg.adminUsername, generatedPassword: generated };
   }
 
-  async login(username: string, password: string): Promise<LoginResult> {
+  async login(username: string, password: string, context: LoginContext = {}): Promise<LoginResult> {
     const key = username.toLowerCase(), now = Date.now();
     const f = this.failures.get(key);
-    if (f && f.until > now) return { ok: false, reason: "throttled", retryAfterS: Math.ceil((f.until - now) / 1000) };
-
     const row = this.store.findUser(username);
+    const source = { username, userId: row?.id ?? null, sourceIp: context.sourceIp ?? null, userAgent: context.userAgent ?? null };
+    if (f && f.until > now) {
+      this.store.recordLoginAttempt({ ...source, success: false, category: "throttled" });
+      this.store.recordAudit({ actorId: row?.id ?? null, actorUsername: row?.username ?? null,
+        action: "auth.login.failed", target: username, details: { category: "throttled", source_ip: context.sourceIp ?? null } });
+      return { ok: false, reason: "throttled", retryAfterS: Math.ceil((f.until - now) / 1000) };
+    }
+
     // Hash even when the user does not exist, so timing does not reveal valid usernames.
     const ok = await verifyPassword(password, row?.password_hash ?? DUMMY_HASH);
     if (!row || !ok || row.disabled) {
       const count = (f?.count ?? 0) + 1;
       const locked = count >= this.cfg.loginMaxFailures;
       this.failures.set(key, { count: locked ? 0 : count, until: locked ? now + this.cfg.loginLockoutS * 1000 : 0 });
+      const category = !row ? "unknown_user" : row.disabled ? "disabled_account" : "invalid_password";
+      this.store.recordLoginAttempt({ ...source, success: false, category });
+      this.store.recordAudit({ actorId: row?.id ?? null, actorUsername: row?.username ?? null,
+        action: "auth.login.failed", target: username, details: { category, source_ip: context.sourceIp ?? null } });
       return { ok: false, reason: "invalid" };
     }
     this.failures.delete(key);
+    const previousAttempts = this.store.recentLoginAttemptsForUser(row.id, 3);
     const token = randomBytes(32).toString("base64url");
-    this.store.createAuthSession(sha256(token), row.id, now + this.cfg.sessionTtlH * 3600_000);
+    const tokenHash = sha256(token);
+    const attemptId = this.store.recordLoginAttempt({ ...source, success: true, category: "success" });
+    this.store.createAuthSession(tokenHash, row.id, now + this.cfg.sessionTtlH * 3600_000);
+    this.store.setAuthSessionLoginAttempt(tokenHash, attemptId);
+    this.store.recordAudit({ actorId: row.id, actorUsername: row.username, action: "auth.login.success", details: { source_ip: context.sourceIp ?? null } });
     this.store.touchLogin(row.id);
     this.store.purgeExpiredAuthSessions(now);
     const { password_hash, ...user } = row;
-    return { ok: true, token, user: { ...user, last_login_at: new Date().toISOString() } };
+    return { ok: true, token, user: { ...user, last_login_at: new Date().toISOString() }, previousAttempts, attemptId };
+  }
+
+  loginAttemptsForToken(token: string | undefined, limit = 3) {
+    if (!token) return [];
+    const tokenHash = sha256(token);
+    const user = this.store.userForSession(tokenHash, Date.now());
+    const attemptId = this.store.sessionLoginAttemptId(tokenHash, Date.now());
+    if (!user || attemptId === null) return [];
+    return this.store.previousLoginAttempts(user.id, attemptId, limit);
   }
 
   userForToken(token: string | undefined): UserView | null {

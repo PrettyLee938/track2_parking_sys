@@ -39,9 +39,14 @@ const schema = z.object({
   // false = passive listener (log events, send no commands). Use it with the
   // single-car tool, which drives cars by hand.
   controllerEnabled: bool().default(true),
-  // Level 1 sends Signature=null. Turn on once a level signs its webhooks, so
-  // unsigned events are dropped as untrusted.
+  // Select the trust policy explicitly; Level 1 is compatible with Signature=null.
+  webhookProfile: z.enum(["level1", "level2"]).default("level1"),
+  // Legacy hardening switch: when true, require signatures even in the Level 1 profile.
+  // The Level 2 profile always requires a valid signature regardless of this value.
   requireSignature: bool().default(false),
+  // The supplied simulator runs locally and its MD5 checksum has no secret, so default
+  // webhook ingress to loopback. Set false only behind a separately trusted network edge.
+  webhookLoopbackOnly: bool().default(true),
 
   // ---- site layout ----------------------------------------------------------
   topologyDir: repoPath().default(path.resolve(REPO_ROOT, "topology")),
@@ -89,6 +94,9 @@ const schema = z.object({
   // No webhook at all for this many REAL seconds: the game is paused (or on its menu) and
   // the game clock stops, so parked cars are not aged into "missed their exit".
   pauseAfterSilenceS: num().positive().default(20),
+  // Leave unset until a safe Level 2 calibration establishes a ventilation interval.
+  // If configured, manual CO recovery checks require this many simulator game-seconds.
+  coMinimumVentilationGameS: num().positive().optional(),
 
   // ---- simulator timing (GAME seconds: scaled by game speed) ------------------------
   // Charging the instant exit CarIn arrives is rejected ("Car should be charged at the
@@ -184,6 +192,9 @@ export function loadSettings(env: NodeJS.ProcessEnv = process.env, overrides: Pa
     throw new Error(`Invalid settings:\n  ${problems.join("\n  ")}`);
   }
   const cfg = { ...parsed.data, ...overrides };
+  if (cfg.webhookProfile === "level2" && !cfg.webhookLoopbackOnly) {
+    throw new Error("GPA_WEBHOOK_LOOPBACK_ONLY must remain true for Level 2: the simulator signature is not a secret MAC");
+  }
   if (!cfg.simSettingsFile && cfg.simLevelsDir) cfg.simSettingsFile = path.join(cfg.simLevelsDir, "settings.json");
   return cfg;
 }

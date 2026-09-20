@@ -1,0 +1,247 @@
+{
+  "info": {
+    "_postman_id": "b3e0e7c1-b79e-4c54-8a29-8edb1f16dfe1",
+    "name": "Track 2 Parking System — Level 2 Smoke",
+    "description": "Local Level 2 smoke workflows for the app API. Configure credentials in a private Postman environment; no passwords or tokens are embedded here.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://127.0.0.1:8000", "type": "string" },
+    { "key": "operator_username", "value": "", "type": "string" },
+    { "key": "operator_password", "value": "", "type": "string" },
+    { "key": "maintenance_username", "value": "", "type": "string" },
+    { "key": "maintenance_password", "value": "", "type": "string" },
+    { "key": "admin_username", "value": "", "type": "string" },
+    { "key": "admin_password", "value": "", "type": "string" },
+    { "key": "utc_day", "value": "", "type": "string" },
+    { "key": "webhook_profile", "value": "level2", "type": "string" },
+    { "key": "require_signature", "value": "false", "type": "string" },
+    { "key": "incident_id", "value": "", "type": "string" },
+    { "key": "incident_ack_reason", "value": "Reviewed the evidence; assigning follow-up investigation.", "type": "string" },
+    { "key": "maintenance_component_type", "value": "gate", "type": "string" },
+    { "key": "maintenance_component", "value": "", "type": "string" },
+    { "key": "maintenance_reason", "value": "Scheduled maintenance request from the Level 2 API smoke collection.", "type": "string" },
+    { "key": "maintenance_job_id", "value": "", "type": "string" },
+    { "key": "zone_name", "value": "", "type": "string" },
+    { "key": "co_recovery_reason", "value": "Operator requested a one-shot CO recovery verification after ventilation.", "type": "string" },
+    { "key": "simulator_run_id", "value": "", "type": "string" },
+    { "key": "simulator_time_iso", "value": "", "type": "string" },
+    { "key": "calendar_seconds_per_real_second", "value": "", "type": "string" },
+    { "key": "day_start_minute", "value": "", "type": "string" },
+    { "key": "night_start_minute", "value": "", "type": "string" },
+    { "key": "simulator_clock_anchor_reason", "value": "", "type": "string" },
+    { "key": "simulator_clock_invalidation_reason", "value": "", "type": "string" }
+  ],
+  "item": [
+    {
+      "name": "Authentication — choose one role per session",
+      "description": "Postman stores the HttpOnly gpa_session cookie from a successful login. Re-run the login for the role needed before its protected requests; do not run all role logins in sequence and then assume the cookie still represents the earlier role.",
+      "item": [
+        {
+          "name": "Login — Operator",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "Accept", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"username\": \"{{operator_username}}\",\n  \"password\": \"{{operator_password}}\"\n}", "options": { "raw": { "language": "json" } } },
+            "url": { "raw": "{{base_url}}/api/auth/login" },
+            "description": "Signs in and sets the app's HttpOnly gpa_session cookie in Postman's cookie jar."
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('operator login succeeds', function () { pm.response.to.have.status(200); });", "const body = pm.response.json();", "pm.test('response identifies an Operator', function () { pm.expect(body.user.role).to.eql('operator'); });"] } }]
+        },
+        {
+          "name": "Login — Maintenance",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "Accept", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"username\": \"{{maintenance_username}}\",\n  \"password\": \"{{maintenance_password}}\"\n}", "options": { "raw": { "language": "json" } } },
+            "url": { "raw": "{{base_url}}/api/auth/login" },
+            "description": "Signs in as Maintenance; the cookie replaces the previous role's cookie for this host."
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('maintenance login succeeds', function () { pm.response.to.have.status(200); });", "const body = pm.response.json();", "pm.test('response identifies Maintenance', function () { pm.expect(body.user.role).to.eql('maintenance'); });"] } }]
+        },
+        {
+          "name": "Login — Admin",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "Accept", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"username\": \"{{admin_username}}\",\n  \"password\": \"{{admin_password}}\"\n}", "options": { "raw": { "language": "json" } } },
+            "url": { "raw": "{{base_url}}/api/auth/login" },
+            "description": "Use before Admin-only reports and the audit endpoint."
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('admin login succeeds', function () { pm.response.to.have.status(200); });", "const body = pm.response.json();", "pm.test('response identifies Admin', function () { pm.expect(body.user.role).to.eql('admin'); });"] } }]
+        },
+        {
+          "name": "Who am I",
+          "request": { "method": "GET", "header": [{ "key": "Accept", "value": "application/json" }], "url": { "raw": "{{base_url}}/api/auth/me" }, "description": "Confirms the active cookie and its role." },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('session is authenticated', function () { pm.response.to.have.status(200); });", "pm.test('user role is returned', function () { pm.expect(pm.response.json().user.role).to.be.oneOf(['operator', 'maintenance', 'admin']); });"] } }]
+        },
+        {
+          "name": "Logout",
+          "request": { "method": "POST", "header": [{ "key": "Accept", "value": "application/json" }], "url": { "raw": "{{base_url}}/api/auth/logout" }, "description": "Clears the session cookie from the Postman cookie jar." }
+        }
+      ]
+    },
+    {
+      "name": "Operator workflows",
+      "description": "Login as Operator first. Admin can also run these operator-capability requests.",
+      "item": [
+        { "name": "Operations state", "request": { "method": "GET", "header": [{ "key": "Accept", "value": "application/json" }], "url": { "raw": "{{base_url}}/api/state" } } },
+        { "name": "Equipment inventory", "request": { "method": "GET", "header": [{ "key": "Accept", "value": "application/json" }], "url": { "raw": "{{base_url}}/api/equipment" } } },
+        { "name": "Zone CO safety state", "request": { "method": "GET", "header": [{ "key": "Accept", "value": "application/json" }], "url": { "raw": "{{base_url}}/api/environment/zones" } } },
+        {
+          "name": "One-shot CO recovery check",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "Accept", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"reason\": \"{{co_recovery_reason}}\"\n}", "options": { "raw": { "language": "json" } } },
+            "url": { "raw": "{{base_url}}/api/environment/zones/{{zone_name}}/recovery-check" },
+            "description": "Explicitly calls list-zones once. The server may return 409 (not ready/unsafe) or 503 (unsupported/unavailable); neither result clears the restriction. Requires an Operator or Admin session."
+          }
+        },
+        {
+          "name": "Daily operational report",
+          "request": {
+            "method": "GET", "header": [{ "key": "Accept", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/api/reports/daily?day={{utc_day}}&kind=operations" },
+            "description": "Uses the requested server-UTC day. If utc_day is blank, the pre-request script selects today's UTC date; results remain provisional because simulator calendar/run identity is unavailable."
+          },
+          "event": [{ "listen": "prerequest", "script": { "type": "text/javascript", "exec": ["const day = pm.variables.get('utc_day') || new Date().toISOString().slice(0, 10);", "pm.variables.set('utc_day', day);"] } }]
+        },
+        {
+          "name": "Export daily operational report (CSV)",
+          "request": {
+            "method": "GET", "header": [{ "key": "Accept", "value": "text/csv" }],
+            "url": { "raw": "{{base_url}}/api/reports/daily/export?day={{utc_day}}&kind=operations" }
+          },
+          "event": [{ "listen": "prerequest", "script": { "type": "text/javascript", "exec": ["const day = pm.variables.get('utc_day') || new Date().toISOString().slice(0, 10);", "pm.variables.set('utc_day', day);"] } }]
+        },
+        {
+          "name": "List open incidents",
+          "request": { "method": "GET", "header": [{ "key": "Accept", "value": "application/json" }], "url": { "raw": "{{base_url}}/api/incidents?status=open&limit=100" }
+          }
+        },
+        {
+          "name": "Acknowledge incident",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "Accept", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"reason\": \"{{incident_ack_reason}}\"\n}", "options": { "raw": { "language": "json" } } },
+            "url": { "raw": "{{base_url}}/api/incidents/{{incident_id}}/acknowledge" },
+            "description": "Requires a reason of at least 8 characters. This acknowledges only; it does not perform a domain-specific incident resolution."
+          }
+        },
+        {
+          "name": "Accepted simulator penalties (amounts redacted for non-Admin)",
+          "request": { "method": "GET", "header": [{ "key": "Accept", "value": "application/json" }], "url": { "raw": "{{base_url}}/api/penalties?day={{utc_day}}&limit=100" }, "description": "Operator/Admin endpoint. The server redacts fine values for non-Admin roles." },
+          "event": [{ "listen": "prerequest", "script": { "type": "text/javascript", "exec": ["const day = pm.variables.get('utc_day') || new Date().toISOString().slice(0, 10);", "pm.variables.set('utc_day', day);"] } }]
+        },
+        {
+          "name": "Request maintenance work",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "Accept", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"component_type\": \"{{maintenance_component_type}}\",\n  \"component\": \"{{maintenance_component}}\",\n  \"reason\": \"{{maintenance_reason}}\"\n}", "options": { "raw": { "language": "json" } } },
+            "url": { "raw": "{{base_url}}/api/maintenance" },
+            "description": "Requires a loaded component name and reason of at least 8 characters. Accepted component_type values are gate, spot, and fan; light repair is unsupported. Run as Operator to create an unassigned job for the Maintenance smoke flow."
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('maintenance request is created', function () { pm.response.to.have.status(201); });", "const body = pm.response.json();", "if (body.job && body.job.id) pm.collectionVariables.set('maintenance_job_id', body.job.id);"] } }]
+        }
+      ]
+    },
+    {
+      "name": "Maintenance workflows",
+      "description": "Run Login — Maintenance first. To exercise claim/start, first create a job in Operator workflows, or provide an existing unclaimed maintenance_job_id.",
+      "item": [
+        { "name": "List available maintenance jobs", "request": { "method": "GET", "header": [{ "key": "Accept", "value": "application/json" }], "url": { "raw": "{{base_url}}/api/maintenance?limit=100" } } },
+        {
+          "name": "Claim maintenance job",
+          "request": { "method": "POST", "header": [{ "key": "Accept", "value": "application/json" }], "url": { "raw": "{{base_url}}/api/maintenance/{{maintenance_job_id}}/claim" }, "description": "No request body. Requires a Maintenance or Admin session and a requested/unstarted job." }
+        },
+        {
+          "name": "Start claimed maintenance job",
+          "request": { "method": "POST", "header": [{ "key": "Accept", "value": "application/json" }], "url": { "raw": "{{base_url}}/api/maintenance/{{maintenance_job_id}}/start" }, "description": "No request body. Maintenance must claim the request first. Safety/clearance refusals are returned as HTTP 409." }
+        }
+      ]
+    },
+    {
+      "name": "Admin workflows",
+      "description": "Login as Admin before using these requests. Financial report access is server-enforced. The simulator clock is an explicit manual projection only; it does not enable automatic lighting or simulator-day reports.",
+      "item": [
+        {
+          "name": "Manual simulator clock status",
+          "request": { "method": "GET", "header": [{ "key": "Accept", "value": "application/json" }], "url": { "raw": "{{base_url}}/api/simulator-clock" }, "description": "Admin only. May be unavailable until manually anchored or after a process restart. This is not simulator-sourced time." },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('clock status is explicit', function () { pm.response.to.have.status(200); pm.expect(pm.response.json().status).to.be.oneOf(['available', 'unavailable']); });"] } }]
+        },
+        {
+          "name": "Set manual simulator clock anchor",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "Accept", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"run_id\": \"{{simulator_run_id}}\",\n  \"simulator_time_iso\": \"{{simulator_time_iso}}\",\n  \"calendar_seconds_per_real_second\": {{calendar_seconds_per_real_second}},\n  \"day_start_minute\": {{day_start_minute}},\n  \"night_start_minute\": {{night_start_minute}},\n  \"reason\": \"{{simulator_clock_anchor_reason}}\"\n}", "options": { "raw": { "language": "json" } } },
+            "url": { "raw": "{{base_url}}/api/simulator-clock/anchor" },
+            "description": "Admin only. Fill every simulator_clock variable after observing the simulator. Timestamp must include a numeric offset, e.g. +08:00, never Z. The server captures its own monotonic anchor and process token. Re-anchor after server restart."
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('manual anchor accepted', function () { pm.response.to.have.status(200); pm.expect(pm.response.json()).to.include({ status: 'available', confidence: 'manual' }); });"] } }]
+        },
+        {
+          "name": "Invalidate manual simulator clock",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "Accept", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"reason\": \"{{simulator_clock_invalidation_reason}}\"\n}", "options": { "raw": { "language": "json" } } },
+            "url": { "raw": "{{base_url}}/api/simulator-clock/invalidate" },
+            "description": "Admin only. Use after a simulator pause/speed change or whenever the manually projected calendar becomes uncertain."
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('manual clock invalidated', function () { pm.response.to.have.status(200); pm.expect(pm.response.json()).to.include({ status: 'unavailable', confidence: 'none', reason: 'manual_invalidation' }); });"] } }]
+        },
+        {
+          "name": "Daily report including financial section",
+          "request": { "method": "GET", "header": [{ "key": "Accept", "value": "application/json" }], "url": { "raw": "{{base_url}}/api/reports/daily?day={{utc_day}}&kind=financial" }
+          },
+          "event": [{ "listen": "prerequest", "script": { "type": "text/javascript", "exec": ["const day = pm.variables.get('utc_day') || new Date().toISOString().slice(0, 10);", "pm.variables.set('utc_day', day);"] } }]
+        },
+        {
+          "name": "Export daily report including financial section (CSV)",
+          "request": { "method": "GET", "header": [{ "key": "Accept", "value": "text/csv" }], "url": { "raw": "{{base_url}}/api/reports/daily/export?day={{utc_day}}&kind=financial" }
+          },
+          "event": [{ "listen": "prerequest", "script": { "type": "text/javascript", "exec": ["const day = pm.variables.get('utc_day') || new Date().toISOString().slice(0, 10);", "pm.variables.set('utc_day', day);"] } }]
+        },
+        { "name": "Audit log", "request": { "method": "GET", "header": [{ "key": "Accept", "value": "application/json" }], "url": { "raw": "{{base_url}}/api/audit?limit=100" } } }
+      ]
+    },
+    {
+      "name": "Webhook signature diagnostics (local only)",
+      "description": "These use the documented app contract: POST /webhook, Signature is MD5 of pipe-joined field values in alphabetical-key order, excluding Signature. test_webhook triggers no car/equipment handler, but an accepted event still participates in activity/silence detection. Send only in an isolated smoke profile or with controller automation disabled.",
+      "item": [
+        {
+          "name": "Signed test_webhook (should be accepted)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "Accept", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"EventClass\": \"test_webhook\",\n  \"EventId\": \"postman-signed-placeholder\",\n  \"ServerDateTime\": \"2026-09-20 00:00:00\",\n  \"Signature\": \"\"\n}", "options": { "raw": { "language": "json" } } },
+            "url": { "raw": "{{base_url}}/webhook" },
+            "description": "Pre-request script generates a unique EventId/current ServerDateTime and computes the app's MD5 signature. It intentionally omits SequenceId so it does not advance the sequence cursor. An accepted test event still participates in controller activity/silence detection."
+          },
+          "event": [
+            { "listen": "prerequest", "script": { "type": "text/javascript", "exec": ["const event = JSON.parse(pm.request.body.raw);", "event.EventId = 'postman-' + pm.variables.replaceIn('{{$guid}}');", "event.ServerDateTime = new Date().toISOString().slice(0, 19).replace('T', ' ');", "const source = Object.keys(event).filter((key) => key !== 'Signature').sort().map((key) => String(event[key])).join('|');", "event.Signature = CryptoJS.MD5(source).toString();", "pm.request.body.update(JSON.stringify(event, null, 2));"] } },
+            { "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('signed test webhook accepted', function () { pm.response.to.have.status(200); });"] } }
+          ]
+        },
+        {
+          "name": "Unsigned test_webhook (expected rejection in strict Level 2)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "Accept", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"EventClass\": \"test_webhook\",\n  \"EventId\": \"postman-unsigned-placeholder\",\n  \"ServerDateTime\": \"2026-09-20 00:00:00\",\n  \"Signature\": null\n}", "options": { "raw": { "language": "json" } } },
+            "url": { "raw": "{{base_url}}/webhook" },
+            "description": "In webhookProfile=level2 or requireSignature=true, this is stored as unaccepted and returns HTTP 401. In permissive Level 1 mode, unsigned events may return 200."
+          },
+          "event": [
+            { "listen": "prerequest", "script": { "type": "text/javascript", "exec": ["const event = JSON.parse(pm.request.body.raw);", "event.EventId = 'postman-' + pm.variables.replaceIn('{{$guid}}');", "event.ServerDateTime = new Date().toISOString().slice(0, 19).replace('T', ' ');", "event.Signature = null;", "pm.request.body.update(JSON.stringify(event, null, 2));"] } },
+            { "listen": "test", "script": { "type": "text/javascript", "exec": ["const strict = pm.variables.get('webhook_profile') === 'level2' || String(pm.variables.get('require_signature')).toLowerCase() === 'true';", "pm.test(strict ? 'unsigned test webhook rejected in strict mode' : 'unsigned result matches permissive/strict profile', function () {", "  if (strict) pm.response.to.have.status(401);", "  else pm.expect(pm.response.code).to.be.oneOf([200, 401]);", "});"] } }
+          ]
+        }
+      ]
+    }
+  ]
+}

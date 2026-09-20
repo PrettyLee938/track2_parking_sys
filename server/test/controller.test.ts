@@ -100,6 +100,124 @@ describe("exit and payment", () => {
     expect(c.counters.payment_mismatches).toBe(1);
   });
 
+  it("gives one exit lane to one paid car at a time and waits for gate clearance", async () => {
+    const { c, sim } = await make();
+    await parkAndReachExit(c, "A");
+    await c.handle(carEv("B", "EXIT_EXIT", "CarIn", "10:03:11"));
+    expect(c.snapshot().exit_lanes[0]).toMatchObject({ queue: ["A", "B"], passage_owner: "A", passage_state: "waiting_payment" });
+    await fireTimers(c);
+    expect(sim.charges()).toEqual([["charge", "A", 2, 0]]); // B has no invoice while A owns the lane
+
+    await c.handle(payEv("B", 2)); // no B invoice exists; this cannot borrow A's open gate
+    expect(sim.gotos()).not.toContainEqual(["goto", "B", "leavepark"]);
+    await c.handle(payEv("A", 2));
+    expect(sim.gotos()).toContainEqual(["goto", "A", "leavepark"]);
+    await c.handle(carEv("A", "EXIT_EXIT", "CarOut", "10:03:12"));
+    await fireTimers(c); // clearance delay elapsed; close is sent but not yet confirmed
+    expect(sim.last()).toEqual(["close", "gateB"]);
+    expect(c.snapshot().exit_lanes[0]).toMatchObject({ passage_owner: "A", passage_state: "closing" });
+    expect(sim.charges()).toHaveLength(1);
+
+    await c.handle(gateEv("gateB", "Closed"));
+    expect(c.snapshot().exit_lanes[0]).toMatchObject({ passage_owner: "B", passage_state: "uncertain" });
+    await fireTimers(c);
+    expect(sim.charges()).toHaveLength(1); // no guessed charge for a visit without an entry/parking record
+    expect((await c.reviewUnknownDuration("B", c.cars.get("B")!.state_version ?? 0, 2, "verified entry record in lane log", "operator")).ok).toBe(true);
+    await fireTimers(c);
+    expect(sim.charges()[1]).toEqual(["charge", "B", 2, 0]);
+    await c.handle(payEv("B", 2));
+    expect(sim.calls).toContainEqual(["open", "gateB"]);
+    await c.handle(gateEv("gateB", "Open"));
+    expect(sim.gotos()).toContainEqual(["goto", "B", "leavepark"]);
+  });
+
+  it("marks a shared-open tailgate as uncertain and does not advance the next passage", async () => {
+    const { c, sim } = await make();
+    await parkAndReachExit(c, "A");
+    await c.handle(carEv("B", "EXIT_EXIT", "CarIn", "10:03:11"));
+    await fireTimers(c);
+    await c.handle(payEv("A", 2));
+    await c.handle(gateEv("gateB", "Open"));
+    await c.handle(carEv("A", "EXIT_EXIT", "CarOut", "10:03:12"));
+    await c.handle(carEv("B", "EXIT_EXIT", "CarOut", "10:03:13")); // uncharged follower crosses before close
+    await fireTimers(c);
+    expect(c.snapshot().exit_lanes[0]).toMatchObject({ passage_owner: "A", passage_state: "uncertain" });
+    expect(c.counters.escaped).toBe(1);
+    expect(sim.calls.filter((call) => call[0] === "close" && call[1] === "gateB")).toHaveLength(0);
+    expect(c.feed.some((f) => f.msg.includes("possible tailgate"))).toBe(true);
+  });
+
+  it("records a zero-value admin waiver separately from simulator revenue", async () => {
+    const { c, sim, store } = await make();
+    await c.handle(carEv("UNKNOWN", "EXIT_EXIT", "CarIn", "10:00:00"));
+    const car = c.cars.get("UNKNOWN")!;
+    const result = await c.adminWaiveVisit(car.visit_id!, "waiver-request-001", car.state_version ?? 0,
+      "validated camera evidence confirms a short stay", "admin");
+    expect(result.ok).toBe(true);
+    expect(sim.calls).toContainEqual(["goto", "UNKNOWN", "leavepark"]);
+    expect(store.listFinancialAdjustments(car.visit_id)).toMatchObject([{ kind: "waiver", amount_minor: 0, actor: "admin" }]);
+    expect(store.latestInvoice(car.visit_id!)?.status).toBe("waived");
+    expect(c.counters.revenue).toBe(0);
+    const before = sim.gotos().length;
+    expect((await c.adminWaiveVisit(car.visit_id!, "waiver-request-001", car.state_version ?? 0,
+      "validated camera evidence confirms a short stay", "admin")).ok).toBe(true);
+    expect(sim.gotos()).toHaveLength(before); // request ID makes retries idempotent
+  });
+
+  it("audits an admin emergency release without claiming payment", async () => {
+    const { c, sim, store } = await make();
+    await c.handle(carEv("EMERGENCY", "EXIT_EXIT", "CarIn", "10:00:00"));
+    const car = c.cars.get("EMERGENCY")!;
+    const result = await c.adminEmergencyRelease(car.visit_id!, "emergency-request-001", car.state_version ?? 0,
+      "medical emergency verified by the duty supervisor", "admin");
+    expect(result.ok).toBe(true);
+    expect(sim.calls).toContainEqual(["goto", "EMERGENCY", "leavepark"]);
+    expect(car.payment_ok).toBeNull();
+    expect(store.listFinancialAdjustments(car.visit_id)).toMatchObject([{ kind: "emergency_release", amount_minor: 0 }]);
+    expect(store.listIncidents().some((incident) => incident.type === "admin_emergency_release")).toBe(true);
+  });
+
+  it("records signed accounting adjustments without changing simulator settlement", async () => {
+    const { c, store } = await make();
+    await parkAndReachExit(c);
+    await fireTimers(c);
+    await feed(c, payEv("A", 2), carEv("A", "EXIT_EXIT", "CarOut", "10:03:12"));
+    const session = store.searchSessions({ plate: "A" })[0];
+    const revenueBefore = c.counters.revenue;
+    expect(c.adminApplyFinancialAdjustment(session.visit_id!, "adjustment-request-001", session.state_version ?? 0,
+      -0.5, "goodwill credit approved by finance", "admin").ok).toBe(true);
+    expect(store.listFinancialAdjustments(session.visit_id)).toMatchObject([{ kind: "adjustment", amount_minor: -50 }]);
+    expect(c.counters.revenue).toBe(revenueBefore);
+  });
+
+  it("retries a missing close confirmation once, then requires audited clearance", async () => {
+    const { c, sim } = await make();
+    await parkAndReachExit(c);
+    await fireTimers(c);
+    await c.handle(payEv("A", 2));
+    await c.handle(gateEv("gateB", "Open"));
+    await c.handle(carEv("A", "EXIT_EXIT", "CarOut", "10:03:12"));
+    await fireTimers(c); // close request sent
+    const gate = c.gates.get("gateB")!;
+    gate.closeRequestedAt = c.clock.now() - c.cfg.gateConfirmGameS - 1;
+    await c.tick();
+    expect(sim.calls.filter((call) => call[0] === "close" && call[1] === "gateB")).toHaveLength(2);
+    gate.closeRequestedAt = c.clock.now() - c.cfg.gateConfirmGameS - 1;
+    await c.tick();
+    expect(c.snapshot().exit_lanes[0]).toMatchObject({ passage_owner: "A", passage_state: "uncertain" });
+    expect((await c.confirmExitClearance("EXIT_EXIT", "verified exit lane is clear", "oper")).ok).toBe(true);
+    expect(sim.calls.filter((call) => call[0] === "close" && call[1] === "gateB")).toHaveLength(3);
+  });
+
+  it("refuses a manual gate-open while an exit passage is queued", async () => {
+    const { c, sim } = await make();
+    await parkAndReachExit(c, "A");
+    const result = await c.manualGate("gateB", "open", "oper");
+    expect(result.ok).toBe(false);
+    expect(result.message).toMatch(/payment\/passage queue/);
+    expect(sim.calls).not.toContainEqual(["open", "gateB"]);
+  });
+
   it("waits for a closed exit gate to open before releasing", async () => {
     const { c, sim } = await make();
     c.gates.get("gateB")!.state = "Closed";
@@ -536,6 +654,38 @@ describe("recovery", () => {
     expect(c.counters.admitted).toBe(1);
   });
 
+  it("re-arms the exit-gate clearance delay after a restart during the clearing phase", async () => {
+    const store = new Store(":memory:");
+    let t = Date.now() - 20_000;
+    const next = () => new Date((t += 1000)).toISOString();
+    const event = (value: ReturnType<typeof carEv>) => store.recordEvent({ ...value, _received_at: next(), _accepted: true });
+    const action = (cmd: string, ...args: string[]) => store.recordAction({ at: next(), cmd, args, ok: true, error: null, ms: 2 });
+    event(carEv("CLEARING", "ENTRY1", "CarIn", "10:00:00"));
+    action("goto", "CLEARING", "S1");
+    event(carEv("CLEARING", "ENTRY1", "CarOut", "10:00:02"));
+    event(carEv("CLEARING", "S1", "CarIn", "10:00:05"));
+    event(carEv("CLEARING", "S1", "CarOut", "10:02:05"));
+    event(carEv("CLEARING", "EXIT_EXIT", "CarIn", "10:02:10"));
+    action("charge", "CLEARING", "1", "0");
+    store.recordEvent({ ...payEv("CLEARING", 1), _received_at: next(), _accepted: true });
+    action("goto", "CLEARING", "leavepark");
+    store.recordEvent({ ...gateEv("gateB", "Open"), _received_at: next(), _accepted: true });
+    event(carEv("CLEARING", "EXIT_EXIT", "CarOut", "10:02:12"));
+
+    const sim = FakeSim.lvl1();
+    sim.barriers.find((barrier) => barrier.name === "gateB")!.state = "Open";
+    const c = new Controller({ sim, cfg: testSettings({ closeIdleGatesOnSync: false }), store, log: silentLog,
+      topologies: [LVL1], queue: new RecordingQueue() });
+    await c.sync({ replay: true });
+
+    const lane = c.exitLanes.get("EXIT_EXIT")!;
+    expect(lane).toMatchObject({ passageOwner: "CLEARING", passageState: "clearing", clearanceCloseScheduled: true });
+    expect(c.timers.filter((timer) => timer.label === "close gateB")).toHaveLength(1);
+    await fireTimers(c);
+    expect(sim.calls).toContainEqual(["close", "gateB"]);
+    expect(lane.passageState).toBe("closing");
+  });
+
   it("does not replay a stale log (simulator likely restarted)", async () => {
     const old = new Date(Date.now() - 25 * 60_000).toISOString();
     const { c, sim } = controllerWithLog(old, [carEv("P", "ENTRY1", "CarIn", "09:58:00"), carEv("P", "S1", "CarIn", "09:58:05"),
@@ -569,7 +719,10 @@ describe("simulator quirks", () => {
     const { c, sim } = await make();
     await parkAndReachExit(c);
     await fireTimers(c);
-    await feed(c, payEv("A", 2), carEv("A", "EXIT_EXIT", "CarOut", "10:03:12"),
+    await feed(c, payEv("A", 2), carEv("A", "EXIT_EXIT", "CarOut", "10:03:12"));
+    await fireTimers(c);
+    await c.handle(gateEv("gateB", "Closed")); // a new passage waits for the prior barrier cycle to finish
+    await feed(c,
       carEv("A", "ENTRY1", "CarIn", "10:10:00"), carEv("A", "ENTRY1", "CarOut", "10:10:02"),
       carEv("A", "S1", "CarIn", "10:10:05"), carEv("A", "S1", "CarOut", "10:11:05"), carEv("A", "EXIT_EXIT", "CarIn", "10:11:10"));
     await fireTimers(c);
@@ -705,6 +858,76 @@ describe("dropped gotos", () => {
     expect(sim.gotos().at(-1)).toEqual(["goto", "B", "S1"]); // A's spot went to B
   });
 
+  it("quarantines a Level 2 reservation when a dispatched car stops responding", async () => {
+    const { c, sim, advance, store } = await make({ cfg: { webhookProfile: "level2", maxGotoResends: 0, staleCarGameS: 1 } });
+    await feed(c, gateEv("gateA", "Open"), carEv("A", "ENTRY1", "CarIn", "10:00:00"),
+      carEv("B", "ENTRY1", "CarIn", "10:00:02"));
+    expect(c.spots.get("S1")!.reserved_for).toBe("A");
+    wait(advance, c, c.cfg.gotoConfirmGameS + 1);
+    await c.tick();
+
+    expect(c.cars.get("A")!.status).toBe("unknown");
+    expect(c.spots.get("S1")!.reserved_for).toBe("A");
+    expect(sim.gotos()).toContainEqual(["goto", "B", "S2"]);
+    expect(store.getIncidentByCorrelation("uncertain_reservation", c.cars.get("A")!.visit_id!)?.status).toBe("open");
+
+    wait(advance, c, 5);
+    await c.tick();
+    expect(c.cars.get("A")!.status).toBe("unknown");
+    expect(c.spots.get("S1")!.reserved_for).toBe("A");
+  });
+
+  it("releases a queued car's place without reserving a spot when it abandons before dispatch", async () => {
+    const { c, sim } = await make({ cfg: { webhookProfile: "level2" } });
+    await feed(c, gateEv("gateA", "Open"),
+      carEv("A", "ENTRY1", "CarIn", "10:00:00"), // dispatched and owns S1
+      carEv("B", "ENTRY1", "CarIn", "10:00:01"), // queued; no parking spot assigned yet
+      carEv("B", "ENTRY1", "CarOut", "10:00:02")); // leaves while still queued
+
+    expect(c.entryLanes.get("ENTRY1")!.queue).toEqual([]);
+    expect(c.entryLanes.get("ENTRY1")!.current).toBe("A");
+    expect(c.cars.has("B")).toBe(false); // completed/removed from active records
+    expect([...c.spots.values()].some((spot) => spot.reserved_for === "B")).toBe(false);
+    expect(sim.gotos().some(([, plate]) => plate === "B")).toBe(false);
+    expect(c.completed.at(-1)).toMatchObject({ plate: "B", status: "neglected", spot: null });
+  });
+
+  it("holds a car with no trusted parking history instead of falling back to a one-minute charge", async () => {
+    const { c, sim, store } = await make();
+    await c.handle(carEv("UNKNOWN 1", "EXIT_EXIT", "CarIn", "10:00:00"));
+    await fireTimers(c);
+
+    expect(c.cars.get("UNKNOWN 1")!.status).toBe("unknown");
+    expect(c.exitLanes.get("EXIT_EXIT")).toMatchObject({ passageOwner: "UNKNOWN 1", passageState: "uncertain" });
+    expect(sim.charges()).toEqual([]);
+    expect(sim.gotos()).toEqual([]);
+    expect(store.getIncidentByCorrelation("unknown_visit", "UNKNOWN 1")?.status).toBe("open");
+  });
+
+  it("only releases an uncertain Level 2 reservation after an explicit fresh empty-sensor review", async () => {
+    const { c, sim, advance, store } = await make({ cfg: { webhookProfile: "level2", maxGotoResends: 0 } });
+    await feed(c, gateEv("gateA", "Open"), carEv("A", "ENTRY1", "CarIn", "10:00:00"));
+    wait(advance, c, c.cfg.gotoConfirmGameS + 1);
+    await c.tick();
+    const car = c.cars.get("A")!;
+    const incidentId = store.getIncidentByCorrelation("uncertain_reservation", car.visit_id!)!.id;
+
+    sim.spots.find((spot) => spot.name === "S1")!.detectedCars = 1;
+    const held = await c.reviewUncertainReservation(car.visit_id!, "request-held-001", car.state_version!, "detector still reports a car", "oper");
+    expect(held.ok).toBe(false);
+    expect(c.spots.get("S1")!.reserved_for).toBe("A");
+
+    sim.spots.find((spot) => spot.name === "S1")!.detectedCars = 0;
+    const duplicate = await c.reviewUncertainReservation(car.visit_id!, "request-held-001", car.state_version!, "retry same decision", "oper");
+    expect(duplicate.ok).toBe(false); // same request ID retains its original outcome
+    const cleared = await c.reviewUncertainReservation(car.visit_id!, "request-clear-001", car.state_version!, "operator visually confirms empty bay", "oper");
+    expect(cleared.ok).toBe(true);
+    expect(c.cars.has("A")).toBe(false);
+    expect(c.spots.get("S1")!.reserved_for).toBeNull();
+    expect(store.getIncident(incidentId)?.status).toBe("resolved");
+    expect(store.searchSessions({ plate: "A" })[0]).toMatchObject({ status: "lost", payment_ok: null });
+  });
+
   it("re-sends leavepark to a paid car still on the exit sensor, holding the gate open for it", async () => {
     // 21:31:06 run: AAA 509 paid, its leavepark was dropped; gateB closed after 6 s and the
     // car sat on EXIT_EXIT for another minute.
@@ -765,7 +988,7 @@ describe("lost webhooks", () => {
     expect(c.cars.get("A")!.status).toBe("invoiced"); // still billed normally
   });
 
-  it("closes the exit gate when a released car's exit CarOut is lost", async () => {
+  it("holds an uncertain exit passage for operator clearance when CarOut is lost", async () => {
     const { c, sim } = await make();
     c.gates.get("gateB")!.state = "Closed";
     await parkAndReachExit(c);
@@ -776,9 +999,77 @@ describe("lost webhooks", () => {
     expect(sim.calls).not.toContainEqual(["close", "gateB"]); // not yet: it may still be driving out
     back(c, "A", "releasedG", c.cfg.releaseTimeoutGameS);
     await c.tick();
-    expect(sim.last()).toEqual(["close", "gateB"]); // the gate does not stay open forever
+    expect(sim.calls).not.toContainEqual(["close", "gateB"]); // do not close over a possibly uncleared car
     expect(c.cars.has("A")).toBe(false);
     expect(c.completed.at(-1)).toMatchObject({ plate: "A", status: "gone", payment_ok: true });
+    expect(c.snapshot().exit_lanes[0]).toMatchObject({ passage_owner: "A", passage_state: "uncertain" });
+    expect((await c.confirmExitClearance("EXIT_EXIT", "", "oper")).ok).toBe(false);
+    expect((await c.confirmExitClearance("EXIT_EXIT", "camera confirms lane clear", "oper")).ok).toBe(true);
+    expect(sim.last()).toEqual(["close", "gateB"]);
+    await c.handle(gateEv("gateB", "Closed"));
+    expect(c.snapshot().exit_lanes[0]).toMatchObject({ passage_owner: null, passage_state: "idle" });
+  });
+
+  it("requires loopback-only webhook ingress for the Level 2 checksum profile", () => {
+    expect(() => loadSettings({ GPA_WEBHOOK_PROFILE: "level2", GPA_WEBHOOK_LOOPBACK_ONLY: "false" }))
+      .toThrow(/must remain true for Level 2/);
+  });
+
+  it("rehydrates visits beyond the replay window and quarantines an uncorroborated reservation", async () => {
+    const store = new Store(":memory:");
+    const now = new Date().toISOString();
+    const parked = (visitId: string, plate: string, spot: string) => ({ visit_id: visitId, plate, car_type: "Normal",
+      planned_minutes: 5, status: "parked", entry_lane: "ENTRY1", exit_lane: null, arrived_at: now, spot,
+      parked_at: now, left_spot_at: null, exit_at: null, charge_parking: null, charge_electric: null,
+      charge_attempts: 0, charge_override: null, invoice_id: null, invoice_status: "none", paid: null,
+      payment_ok: null, left_at: null });
+    for (const [id, plate, spot] of [["visit-a", "A", "S1"], ["visit-b", "B", "S2"]]) {
+      store.saveVisitState(parked(id, plate, spot));
+    }
+    const sim = FakeSim.lvl1();
+    for (const s of sim.spots) s.detectedCars = s.name === "S1" ? 1 : 0;
+    const c = new Controller({ sim, cfg: testSettings({ webhookProfile: "level2" }), store, log: silentLog,
+      topologies: [LVL1], queue: new RecordingQueue() });
+    await c.sync();
+    expect(c.cars.get("A")!.status).toBe("parked");
+    expect(c.spots.get("S1")!.occupant).toBe("A");
+    expect(c.cars.get("B")!.status).toBe("unknown");
+    expect(c.spots.get("S2")!.reserved_for).toBe("B");
+    expect(c.spots.get("S2")!.available).toBe(false);
+    expect(store.listIncidents().some((incident) => incident.type === "uncertain_reservation" && incident.plate === "B")).toBe(true);
+  });
+
+  it("does not release a replayed Level 2 parked space merely because the live detector reports zero", async () => {
+    const store = new Store(":memory:");
+    const now = new Date().toISOString();
+    for (const event of [
+      carEv("PARKED", "ENTRY1", "CarIn", "10:00:00"),
+      carEv("PARKED", "ENTRY1", "CarOut", "10:00:02"),
+      carEv("PARKED", "S1", "CarIn", "10:00:05"),
+    ]) store.recordEvent({ ...event, _received_at: now, _accepted: true });
+    const sim = FakeSim.lvl1();
+    for (const s of sim.spots) s.detectedCars = 0;
+    const c = new Controller({ sim, cfg: testSettings({ webhookProfile: "level2" }), store, log: silentLog,
+      topologies: [LVL1], queue: new RecordingQueue() });
+
+    await c.sync({ replay: true });
+
+    expect(c.cars.get("PARKED")?.status).toBe("parked");
+    expect(c.spots.get("S1")?.occupant).toBe("PARKED");
+    expect(c.spots.get("S1")?.available).toBe(false);
+    expect(store.listIncidents({ status: "open" }).some((incident) => incident.type === "occupancy_evidence_conflict")).toBe(true);
+  });
+
+  it("does not assume an unconfirmed gate opened in the Level 2 profile", async () => {
+    const { c, sim, advance, store } = await make({ cfg: { webhookProfile: "level2", gateConfirmGameS: 1 } });
+    await c.handle(carEv("SAFE 1", "ENTRY1", "CarIn", "10:00:00"));
+    advance(1.1);
+    await c.tick();
+    advance(1.1);
+    await c.tick();
+    expect(sim.gotos()).not.toContainEqual(["goto", "SAFE 1", "S1"]);
+    expect(c.gates.get("gateA")!.state).toBe("Opening");
+    expect(store.listIncidents().some((i) => i.type === "uncertain_gate_open")).toBe(true);
   });
 
   it("retires a parked car well past its planned stay", async () => {

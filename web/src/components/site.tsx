@@ -52,6 +52,7 @@ export function SpotMap({ spots, selected, onSelect }: { spots: SpotView[]; sele
 export function gateTone(g: GateView): { tone: Tone; text: string } {
   if (g.broken) return { tone: "critical", text: "Broken" };
   if (g.maintenance) return { tone: "warning", text: "Maintenance" };
+  if (g.draining) return { tone: "warning", text: "Draining for maintenance" };
   if (g.state === "Open") return { tone: "good", text: "Open" };
   if (g.state === "Closed") return { tone: "neutral", text: "Closed" };
   return { tone: "info", text: g.state }; // Opening / Closing

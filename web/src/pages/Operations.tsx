@@ -22,8 +22,9 @@ export function Operations({ s }: { s: StateSnapshot }) {
   const gates = [...s.gates].sort((a, b) => Number(onLane(b)) - Number(onLane(a)) || a.name.localeCompare(b.name));
 
   const gateCmd = (g: GateView, action: "open" | "close" | "auto" | "repair") => {
-    if (action === "repair" && !confirm(`Start maintenance on ${g.name}? It cannot be used until the simulator reports it repaired.`)) return;
-    return run(`${g.name}:${action}`, () => api.gate(g.name, action));
+    const reason = action === "repair" ? prompt(`Reason for maintenance on ${g.name} (at least 8 characters):`) : undefined;
+    if (action === "repair" && (!reason || reason.trim().length < 8)) return;
+    return run(`${g.name}:${action}`, () => api.gate(g.name, action, reason?.trim()));
   };
 
   return (
@@ -37,14 +38,15 @@ export function Operations({ s }: { s: StateSnapshot }) {
                 <div className="gate-head"><b>{g.name}</b><span className="muted small">{laneOf(g)}</span></div>
                 <GateBadge gate={g} />
                 <div className="btn-row">
-                  <Button small onClick={() => gateCmd(g, "open")} busy={busy === `${g.name}:open`} disabled={unusable || g.hold === "open"}
+                  <Button small onClick={() => gateCmd(g, "open")} busy={busy === `${g.name}:open`} disabled={unusable || g.draining || g.hold === "open"}
                     title="Open and keep open">Hold open</Button>
-                  <Button small onClick={() => gateCmd(g, "close")} busy={busy === `${g.name}:close`} disabled={unusable || g.hold === "closed"}
+                  <Button small onClick={() => gateCmd(g, "close")} busy={busy === `${g.name}:close`} disabled={unusable || g.draining || g.hold === "closed"}
                     title="Close and keep closed - cars for this lane will wait">Hold closed</Button>
-                  <Button small variant="primary" onClick={() => gateCmd(g, "auto")} busy={busy === `${g.name}:auto`} disabled={!g.hold}
+                  <Button small variant="primary" onClick={() => gateCmd(g, "auto")} busy={busy === `${g.name}:auto`} disabled={!g.hold || g.draining}
                     title="Give the gate back to the automation">Automatic</Button>
-                  <Button small variant="danger" onClick={() => gateCmd(g, "repair")} busy={busy === `${g.name}:repair`} disabled={g.maintenance}
-                    title="Start maintenance (refused while a car is passing)">Repair</Button>
+                  {can("maintenance") && <Button small variant="danger" onClick={() => gateCmd(g, "repair")} busy={busy === `${g.name}:repair`} disabled={g.maintenance || g.draining}
+                    title="Start maintenance; new passages pause and the current passage drains first">Repair</Button>
+                  }
                 </div>
               </div>
             );
@@ -87,13 +89,51 @@ export function Operations({ s }: { s: StateSnapshot }) {
                 <dt>Zone</dt><dd>{spot.zone || "—"}</dd>
                 <dt>For</dt><dd>{spot.car_type === "Any" ? "Any car" : `${spot.car_type} cars only`}</dd>
               </dl>
-              <Button variant="danger" busy={busy === `spot:${spot.name}`}
+              {spot.manual_occupancy && <p><Badge tone="warning">Manual occupancy quarantine · physical clearance required</Badge></p>}
+              {can("operator") && spot.purpose === "Park" && !spot.manual_occupancy && (
+                <Button small variant="danger" busy={busy === `manual-occupancy:${spot.name}`}
+                  disabled={!!spot.reserved_for || spot.occupants.some((plate) => plate !== "?")}
+                  title="Use when a person physically observes an unidentified car that the simulator sensor cannot report"
+                  onClick={() => {
+                    if (!window.confirm(`Confirm you physically observed an unidentified vehicle occupying ${spot.name}? This will quarantine the spot.`)) return;
+                    const observation = prompt("Describe the physical observation (at least 8 characters):");
+                    if (!observation || observation.trim().length < 8) return;
+                    const reason = prompt("Reason for recording this occupancy (at least 8 characters):");
+                    if (!reason || reason.trim().length < 8) return;
+                    void run(`manual-occupancy:${spot.name}`, () => api.reportManualOccupancy(spot.name, {
+                      request_id: crypto.randomUUID(), expected_version: spot.manual_occupancy_version,
+                      observed_occupied: true, observation: observation.trim(), reason: reason.trim(),
+                    }));
+                  }}>
+                  Report physically observed occupancy
+                </Button>
+              )}
+              {can("operator") && spot.manual_occupancy && (
+                <Button small variant="primary" busy={busy === `manual-occupancy:${spot.name}`}
+                  title="Only clears after an explicit physical observation; the simulator sensor alone is not trusted"
+                  onClick={() => {
+                    if (!window.confirm(`Confirm you physically inspected ${spot.name} and observed that it is clear?`)) return;
+                    const observation = prompt("Describe the physical clearance observation (at least 8 characters):");
+                    if (!observation || observation.trim().length < 8) return;
+                    const reason = prompt("Reason for clearing the quarantine (at least 8 characters):");
+                    if (!reason || reason.trim().length < 8) return;
+                    void run(`manual-occupancy:${spot.name}`, () => api.clearManualOccupancy(spot.name, {
+                      request_id: crypto.randomUUID(), expected_version: spot.manual_occupancy_version,
+                      observed_clear: true, observation: observation.trim(), reason: reason.trim(),
+                    }));
+                  }}>
+                  Confirm physically clear
+                </Button>
+              )}
+              {can("maintenance") && <Button variant="danger" busy={busy === `spot:${spot.name}`}
                 disabled={spotState(spot) === "occupied" || spotState(spot) === "reserved" || spot.maintenance}
                 title={spot.occupant || spot.reserved_for ? "Repairing an occupied spot is a penalty" : "Start maintenance"}
-                onClick={() => confirm(`Start maintenance on ${spot.name}? It will not be offered to cars until repaired.`) &&
-                  run(`spot:${spot.name}`, () => api.repairSpot(spot.name))}>
+                onClick={() => {
+                  const reason = prompt(`Reason for maintenance on ${spot.name} (at least 8 characters):`);
+                  if (reason && reason.trim().length >= 8) void run(`spot:${spot.name}`, () => api.repairSpot(spot.name, reason.trim()));
+                }}>
                 Start maintenance
-              </Button>
+              </Button>}
               {(spot.occupant || spot.reserved_for) && <p className="muted small">Available once the spot is empty - repairing an occupied spot is a penalty.</p>}
             </>
           )}

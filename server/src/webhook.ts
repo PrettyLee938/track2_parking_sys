@@ -32,6 +32,19 @@ export function computeSignature(payload: Record<string, unknown>): string {
 
 export type SigStatus = "valid" | "unsigned" | "invalid";
 
+/** A stable hash independent of JSON whitespace or object-key order. */
+export function payloadHash(payload: unknown): string {
+  const stable = (value: unknown): string => {
+    if (Array.isArray(value)) return `[${value.map(stable).join(",")}]`;
+    if (value && typeof value === "object") {
+      const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
+      return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${stable(v)}`).join(",")}}`;
+    }
+    return JSON.stringify(value) ?? "null";
+  };
+  return createHash("sha256").update(stable(payload), "utf8").digest("hex");
+}
+
 /** Level 1 sends Signature=null on every event. */
 export function signatureStatus(payload: Record<string, unknown>): SigStatus {
   const received = payload.Signature;
@@ -43,29 +56,74 @@ export interface IntakeResult {
   accept: boolean;
   sig: SigStatus;
   duplicate: boolean;
+  conflict: boolean;
   seqNote: string;
+}
+
+export interface SignatureAssessment {
+  sig: SigStatus;
+  trusted: boolean;
+}
+
+export interface PersistedIntakeOutcome {
+  accept: boolean;
+  duplicate: boolean;
+  conflict: boolean;
+  seqNote: string;
+  lastSeq: number | null;
 }
 
 /** Decides whether an incoming event should be processed, and keeps counters. */
 export class Intake {
-  private readonly seenIds = new Set<string>();
+  private readonly seenIds = new Map<string, string>();
   lastSeq: number | null = null;
   readonly stats = { received: 0, accepted: 0, sig_valid: 0, sig_unsigned: 0, sig_invalid: 0, duplicates: 0, seq_gaps: 0 };
 
   constructor(private readonly requireSignature: boolean) {}
 
+  assess(event: SimEventBase): SignatureAssessment {
+    const sig = signatureStatus(event);
+    const trusted = sig === "valid" || (sig === "unsigned" && !this.requireSignature);
+    return { sig, trusted };
+  }
+
+  /** Update process-local counters only after the delivery transaction commits. */
+  recordPersisted(sig: SigStatus, outcome: PersistedIntakeOutcome): void {
+    this.stats.received++;
+    this.stats[`sig_${sig}`]++;
+    if (outcome.accept) this.stats.accepted++;
+    if (outcome.duplicate) this.stats.duplicates++;
+    if (outcome.seqNote) this.stats.seq_gaps++;
+    this.lastSeq = outcome.lastSeq;
+  }
+
+  recordMalformed(): void {
+    this.stats.received++;
+  }
+
+  restoreSequence(lastSeq: number | null): void {
+    this.lastSeq = lastSeq;
+  }
+
+  /**
+   * In-memory helper retained for focused unit tests. The HTTP path uses the
+   * SQLite-backed transaction so accepted IDs and sequence state survive restart.
+   */
   check(event: SimEventBase): IntakeResult {
     this.stats.received++;
-    const sig = signatureStatus(event);
+    const { sig, trusted } = this.assess(event);
     this.stats[`sig_${sig}`]++;
 
     const eventId = event.EventId ?? "";
-    const duplicate = eventId !== "" && this.seenIds.has(eventId);
+    const hash = payloadHash(event);
+    const priorHash = eventId ? this.seenIds.get(eventId) : undefined;
+    const duplicate = trusted && priorHash === hash;
+    const conflict = trusted && priorHash !== undefined && priorHash !== hash;
     if (duplicate) this.stats.duplicates++;
 
     let seqNote = "";
     const seq = /^\d+$/.test(String(event.SequenceId ?? "")) ? Number(event.SequenceId) : null;
-    if (!duplicate && seq !== null) {
+    if (trusted && !duplicate && !conflict && seq !== null) {
       if (this.lastSeq !== null && seq !== this.lastSeq + 1) {
         seqNote = `expected ${this.lastSeq + 1}, got ${seq}`;
         this.stats.seq_gaps++;
@@ -73,12 +131,13 @@ export class Intake {
       if (this.lastSeq === null || seq > this.lastSeq) this.lastSeq = seq;
     }
 
-    const trusted = sig === "valid" || (sig === "unsigned" && !this.requireSignature);
-    const accept = trusted && !duplicate;
+    const accept = trusted && !duplicate && !conflict;
+    if (accept && eventId) {
+      this.seenIds.set(eventId, hash);
+    }
     if (accept) {
-      if (eventId) this.seenIds.add(eventId);
       this.stats.accepted++;
     }
-    return { accept, sig, duplicate, seqNote };
+    return { accept, sig, duplicate, conflict, seqNote };
   }
 }

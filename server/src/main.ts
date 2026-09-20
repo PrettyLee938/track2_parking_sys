@@ -27,6 +27,8 @@ if (cfg.adminPassword && cfg.adminPassword.length < 8) {
 }
 
 const store = new Store(cfg.dataDir);
+const unknownCommands = store.markInterruptedCommandIntentsUnknown();
+if (unknownCommands) app.log.error({ count: unknownCommands }, "commands were interrupted; outcomes must be reconciled before repeating them");
 const auth = new AuthService(store, cfg);
 const created = await auth.bootstrap();
 if (created) {
