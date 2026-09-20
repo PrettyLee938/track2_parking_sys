@@ -28,6 +28,7 @@ import {
   type CarStatus, type CarView, type ControlResult, type Counters, type FeedItem, type FeedLevel, type GateAction,
   type GateHold, type SessionView, type SimParkingSpot, type StateSnapshot, type TimeScaleSource, type TimeseriesPoint,
   type ZoneSummary,
+  type ComponentKind,
 } from "@gpa/shared";
 import { getAllocator, spotNumber, type AllocContext, type Allocator, type AllocSpot } from "./allocation";
 import { chargingCost, parkingCost } from "./billing";
@@ -1816,16 +1817,61 @@ export class Controller implements Engine {
     return ok(`maintenance started on ${name}`);
   }
 
-  /** Fans can be repaired through the simulator API; lights have no repair endpoint. */
+  /**
+   * Fans can be repaired through the simulator API; lights cannot.
+   *
+   * Verified against the running simulator on 2026-09-20: POST /lights/{name}/repair,
+   * /lights/group/{group}/repair and /lights/{name}/fix all answer 404, while
+   * /exhaust-fans/{name}/repair answers 201. The documented endpoint list says the same.
+   * So the only thing an operator can do about a broken light is put it on record - which
+   * is worth doing properly rather than refusing, because nothing else will chase it.
+   */
   async manualComponentRepair(kind: "fan" | "light", name: string, actor: string): Promise<ControlResult> {
     const part = this.components.get(kind, name);
     if (!part) return fail(`unknown ${kind} ${name}`);
-    if (kind === "light") return fail("the simulator exposes no light repair endpoint; record an incident instead");
+    if (kind === "light") return this.reportLightFault(part, actor);
     if (part.maintenance) return fail(`${name} is already under maintenance`);
     if (part.on) return fail(`${name} is operating - wait for it to be idle`);
     if (!(await this.cmd("repair", () => this.sim.repairFan(name), [name], actor))) return fail(`the simulator rejected repair ${name}`);
     this.components.repairStarted(kind, name, actor, !part.broken);
     return ok(`maintenance started on ${name}`);
+  }
+
+  /**
+   * Manual control of a part a subsystem owns - the environment's exhaust fans and lights.
+   * Each subsystem is offered the command and returns null for anything that is not its
+   * own, so a new subsystem can add controls without this method knowing about it.
+   */
+  async manualDevice(kind: ComponentKind, name: string, action: string, actor: string): Promise<ControlResult> {
+    for (const s of this.subsystems) {
+      const result = await s.control?.(kind, name, action, actor);
+      if (result) return result;
+    }
+    return fail(`nothing can ${action} ${kind} ${name}`);
+  }
+
+  /**
+   * A broken light cannot be repaired through the API, so record it as an incident that an
+   * operator has to close by hand. One open incident per light: pressing the button again
+   * points at the one already raised rather than filling the page with duplicates.
+   */
+  private reportLightFault(part: { name: string; zone: string }, actor: string): ControlResult {
+    const open = this.store.listIncidents({ status: "open", limit: 1000 })
+      .find((i) => i.kind === "light_fault" && i.component === part.name);
+    if (open) return ok(`${part.name} is already reported - incident #${open.id}`);
+
+    const incident = this.store.createIncident({
+      status: "open",
+      kind: "light_fault",
+      zone: part.zone || null,
+      component: part.name,
+      reason: `${part.name} reported faulty by ${actor}; the simulator has no light repair endpoint`,
+      confidence: "high",
+      evidence: { reported_by: actor, health: this.components.health(this.components.get("light", part.name)!) },
+    });
+    this.store.recordAudit({ actor, action: "light.fault_reported", target: part.name, ok: true });
+    this.note("warn", `${actor} reported light ${part.name} faulty - incident #${incident.id}`);
+    return ok(`${part.name} cannot be repaired through the simulator - raised incident #${incident.id}`);
   }
 
   /** Close an entrance (arriving cars are turned away; queued cars are still served) or reopen it. */

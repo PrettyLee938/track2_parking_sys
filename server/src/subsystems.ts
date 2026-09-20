@@ -14,7 +14,7 @@
  * To add one: implement Subsystem in its own file and add it to createSubsystems() below.
  * The environment (CO fans, lights) is the next planned one.
  */
-import type { FeedLevel } from "@gpa/shared";
+import type { ComponentKind, ControlResult, FeedLevel } from "@gpa/shared";
 import type { ComponentRegistry } from "./components";
 import type { Settings } from "./config";
 import { Environment } from "./environment";
@@ -30,6 +30,13 @@ export interface Subsystem {
   onEvent?(e: EventRecord): Promise<void> | void;
   onTick?(gameNow: number): Promise<void> | void;
   snapshot?(): unknown;
+  /**
+   * Manual control from the dashboard, for the parts this subsystem owns - the environment
+   * owns the exhaust fans and lights. Return null for anything it does not own so the
+   * controller can offer it to the next subsystem; gates and spots stay on the controller.
+   */
+  control?(kind: ComponentKind, name: string, action: string, actor: string):
+    Promise<ControlResult | null> | ControlResult | null;
 }
 
 /** The controller as subsystems see it. */

@@ -12,8 +12,9 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { DEVICE_ACTIONS } from "@gpa/shared";
 import type {
-  ActionsResponse, ApiError, ControlResult, CreateUserRequest, EventsResponse, GateAction, LoginRequest, MeResponse, Role,
+  ActionsResponse, ApiError, ControlResult, CreateUserRequest, DeviceAction, EventsResponse, GateAction, LoginRequest, MeResponse, Role,
   ComponentsResponse, SessionsResponse, StateSnapshot, StatsResponse, TimeseriesResponse, UpdateUserRequest, UserView, UsersResponse,
 } from "@gpa/shared";
 import { AuthService, hashPassword, hasRole, validateCredentials } from "./auth";
@@ -357,6 +358,19 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
     return control(reply, () => controller.exclusive(() => controller.manualGate(req.params.name, action, req.user!.username)),
       { actor: req.user!.username, action: `gate.${action}`, target: req.params.name, permission: "control" });
   });
+
+  /** Exhaust fans and lights, the same way a gate is held: on / off / auto. */
+  app.post<{ Params: { kind: string; name: string; action: string } }>(
+    "/api/control/devices/:kind/:name/:action", operator, async (req, reply) => {
+      const { kind, action } = req.params;
+      const name = decodeURIComponent(req.params.name);
+      if (kind !== "fan" && kind !== "light") return err(reply, 400, "kind must be fan or light");
+      if (!DEVICE_ACTIONS.includes(action as DeviceAction)) {
+        return err(reply, 400, `action must be one of ${DEVICE_ACTIONS.join(", ")}`);
+      }
+      return control(reply, () => controller.exclusive(() => controller.manualDevice(kind, name, action, req.user!.username)),
+        { actor: req.user!.username, action: `${kind}.${action}`, target: name, permission: "control" });
+    });
 
   app.post<{ Params: { name: string } }>("/api/control/spots/:name/repair", operator, async (req, reply) =>
     control(reply, () => controller.exclusive(() => controller.manualSpotRepair(req.params.name, req.user!.username)),

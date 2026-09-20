@@ -1,6 +1,6 @@
 /** Typed calls to our own server. The session travels in an HttpOnly cookie. */
 import type {
-  ActionsResponse, AuditResponse, ComponentsResponse, ControlResult, CreateUserRequest, DailyReport, EventsResponse, GateAction,
+  ActionsResponse, AuditResponse, ComponentsResponse, ControlResult, CreateUserRequest, DailyReport, DeviceAction, EventsResponse, GateAction,
   IncidentView, LoginAttemptView, MaintenanceJobView, MeResponse, PenaltiesResponse, SessionsResponse, StateSnapshot,
   StatsResponse, TimeseriesResponse, UpdateUserRequest, UsersResponse,
 } from "@gpa/shared";
@@ -70,6 +70,9 @@ export const api = {
 
   gate: (name: string, action: GateAction) => call<ControlResult>("POST", `/api/control/gates/${encodeURIComponent(name)}/${action}`),
   repairSpot: (name: string) => call<ControlResult>("POST", `/api/control/spots/${encodeURIComponent(name)}/repair`),
+  /** Exhaust fans and lights: on / off hold the part, auto hands it back to CO or daylight. */
+  device: (kind: "fan" | "light", name: string, action: DeviceAction) =>
+    call<ControlResult>("POST", `/api/control/devices/${kind}/${encodeURIComponent(name)}/${action}`),
   entrance: (spot: string, open: boolean) =>
     call<ControlResult>("POST", `/api/control/entries/${encodeURIComponent(spot)}/${open ? "open" : "close"}`),
   resync: () => call<ControlResult>("POST", "/api/resync"),

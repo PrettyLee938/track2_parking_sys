@@ -294,10 +294,21 @@ export interface EnvironmentLightView {
   reason: string;
 }
 /** The snapshot emitted by the Level 2 CO/fan/light subsystem. */
+/** An operator override on one fan or light: the automatic rules leave it alone. */
+export interface DeviceHoldView {
+  kind: "fan" | "light";
+  name: string;
+  hold: "on" | "off";
+  actor: string;
+  at: string;
+}
+
 export interface EnvironmentSnapshot {
   polls: number;
   lights: EnvironmentLightView;
   zones: EnvironmentZoneView[];
+  /** Fans and lights an operator is holding; everything else follows CO and daylight. */
+  holds: DeviceHoldView[];
 }
 
 export interface DailyReport {
@@ -363,6 +374,11 @@ export interface ApiError { error: string }
 // ---------------------------------------------------------------------------
 /** POST /api/control/gates/:name/:action */
 export type GateAction = "open" | "close" | "auto" | "repair";
+
+/** POST /api/control/devices/:kind/:name/:action - exhaust fans and lights.
+ * "auto" hands the part back to the CO / daylight rules that normally drive it. */
+export type DeviceAction = "on" | "off" | "auto";
+export const DEVICE_ACTIONS: readonly DeviceAction[] = ["on", "off", "auto"];
 
 /** Result of any control command. */
 export interface ControlResult { ok: boolean; message: string }
