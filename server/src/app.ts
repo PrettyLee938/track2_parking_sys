@@ -415,6 +415,19 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
     control(reply, () => controller.exclusive(() => controller.manualSpotRepair(req.params.name, req.user!.username)),
       { actor: req.user!.username, action: "spot.repair", target: req.params.name, permission: "repair" }));
 
+  /**
+   * Our own maintenance mode for a spot whose sensor cannot be trusted (Level 3 §7.2).
+   * Nothing is sent to the simulator; the spot is simply not offered to cars.
+   */
+  app.post<{ Params: { name: string; state: string } }>("/api/control/spots/:name/service/:state", operator, async (req, reply) => {
+    if (req.params.state !== "in" && req.params.state !== "out") return err(reply, 400, "state must be in or out");
+    const inService = req.params.state === "in";
+    const name = decodeURIComponent(req.params.name);
+    const reason = jsonBody<{ reason?: string }>(req)?.reason?.trim() ?? "";
+    return control(reply, () => controller.exclusive(() => controller.setSpotService(name, inService, req.user!.username, reason)),
+      { actor: req.user!.username, action: inService ? "spot.back_in_service" : "spot.out_of_service", target: name, permission: "repair" });
+  });
+
   // ---------------------------------------------------------------------------
   // administration (admin only)
   // ---------------------------------------------------------------------------
@@ -528,7 +541,7 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
       gate_limit: controller.components.limit("gate"),
       out_of_service: s.components.filter((c) => c.health !== "ok").map((c) => `${c.kind} ${c.name} ${c.health}${c.waiting ? ` (${c.waiting})` : ""}`),
       zones: s.zones, spots: s.spots, components: s.components, active_cars: s.active_cars,
-      environment: s.subsystems.environment ?? null, unreachable: [...controller.unreachable],
+      environment: s.subsystems.environment ?? null, subsystems: s.subsystems, unreachable: [...controller.unreachable],
       cars: s.active_cars.length, counters: s.counters, feed: s.feed.slice(-40),
     };
   });

@@ -18,6 +18,7 @@ import type { ComponentKind, ControlResult, FeedLevel } from "@gpa/shared";
 import type { ComponentRegistry } from "./components";
 import type { Settings } from "./config";
 import { Environment } from "./environment";
+import { SpotSensors } from "./sensorHealth";
 import type { Car, EntryLane, ExitLane, Gate, Spot } from "./controller";
 import type { EventRecord, Store } from "./store";
 import type { Topology } from "./topology";
@@ -29,6 +30,9 @@ export interface Subsystem {
   onSync?(): Promise<void> | void;
   onEvent?(e: EventRecord): Promise<void> | void;
   onTick?(gameNow: number): Promise<void> | void;
+  /** The controller has reserved a spot for a car and is sending it there. Sensor health
+   * uses it to notice spots that never report the car we sent them. */
+  reserved?(spot: string, plate: string): void;
   snapshot?(): unknown;
   /**
    * Manual control from the dashboard, for the parts this subsystem owns - the environment
@@ -71,5 +75,5 @@ export interface Engine {
 
 /** Every subsystem, in the order they see events. */
 export function createSubsystems(engine: Engine): Subsystem[] {
-  return [new Environment(engine)];
+  return [new SpotSensors(engine), new Environment(engine)];
 }

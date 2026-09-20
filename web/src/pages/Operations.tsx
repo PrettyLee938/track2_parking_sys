@@ -1,8 +1,8 @@
 /** Manual control: gates, spots and (admin) entrances. The server refuses anything the simulator penalises. */
 import { useEffect, useState } from "react";
-import type { ActionView, GateView, StateSnapshot } from "@gpa/shared";
-import { ComponentHealthCard, EventQueueCard } from "../components/health";
-import { CarsTable, GateBadge, SpotMap, spotState } from "../components/site";
+import type { ActionView, GateView, SpotSensorSnapshot, StateSnapshot } from "@gpa/shared";
+import { ComponentHealthCard, EventQueueCard, SpotSensorCard } from "../components/health";
+import { CarsTable, GateBadge, SpotMap, outOfServiceReason, spotState } from "../components/site";
 import { Badge, Button, Card, Empty, useCommand } from "../components/ui";
 import { api } from "../lib/api";
 import { useAuth } from "../lib/auth";
@@ -30,6 +30,7 @@ export function Operations({ s }: { s: StateSnapshot }) {
   return (
     <div className="page">
       <EventQueueCard queue={s.queue} />
+      <SpotSensorCard sensors={s.subsystems?.spot_sensors as SpotSensorSnapshot | undefined} />
       <ComponentHealthCard components={s.components ?? []} />
 
       <Card title="Barrier gates" subtitle="Holding a gate open or closed overrides the automation until you return it to automatic">
@@ -86,18 +87,35 @@ export function Operations({ s }: { s: StateSnapshot }) {
           {!spot ? <Empty>Select a spot on the map.</Empty> : (
             <>
               <dl className="details">
-                <dt>State</dt><dd>{{ free: "Free", occupied: "Occupied", reserved: "Reserved", out: spot.broken ? "Broken" : "Under maintenance" }[spotState(spot)]}</dd>
+                <dt>State</dt><dd>{{ free: "Free", occupied: "Occupied", reserved: "Reserved", out: outOfServiceReason(spot) }[spotState(spot)]}</dd>
                 <dt>Car</dt><dd className="mono">{spot.occupant === "?" ? "unknown car" : spot.occupant ?? spot.reserved_for ?? "—"}</dd>
                 <dt>Zone</dt><dd>{spot.zone || "—"}</dd>
                 <dt>For</dt><dd>{spot.car_type === "Any" ? "Any car" : `${spot.car_type} cars only`}</dd>
+                <dt>Sensor</dt><dd>{spot.out_of_service ?? <span className="muted">reading normally</span>}</dd>
               </dl>
-              <Button variant="danger" busy={busy === `spot:${spot.name}`}
-                disabled={spotState(spot) === "occupied" || spotState(spot) === "reserved" || spot.maintenance}
-                title={spot.occupant || spot.reserved_for ? "Repairing an occupied spot is a penalty" : "Start maintenance"}
-                onClick={() => confirm(`Start maintenance on ${spot.name}? It will not be offered to cars until repaired.`) &&
-                  run(`spot:${spot.name}`, () => api.repairSpot(spot.name))}>
-                Start maintenance
-              </Button>
+              <div className="btn-row">
+                <Button variant="danger" busy={busy === `spot:${spot.name}`}
+                  disabled={spotState(spot) === "occupied" || spotState(spot) === "reserved" || spot.maintenance}
+                  title={spot.occupant || spot.reserved_for ? "Repairing an occupied spot is a penalty" : "Start maintenance"}
+                  onClick={() => confirm(`Start maintenance on ${spot.name}? It will not be offered to cars until repaired.`) &&
+                    run(`spot:${spot.name}`, () => api.repairSpot(spot.name))}>
+                  Start maintenance
+                </Button>
+                {/* Our own soft lock: nothing is sent to the simulator, the spot is just not offered to cars. */}
+                {spot.out_of_service
+                  ? <Button variant="primary" busy={busy === `service:${spot.name}`}
+                    title="Offer this spot to cars again" onClick={() => run(`service:${spot.name}`, () => api.spotService(spot.name, true))}>
+                    Return to service
+                  </Button>
+                  : <Button busy={busy === `service:${spot.name}`} disabled={spotState(spot) === "occupied" || spotState(spot) === "reserved"}
+                    title="Stop offering this spot to cars, without telling the simulator"
+                    onClick={() => {
+                      const reason = prompt(`Why is ${spot.name} being taken out of service?`, "sensor not trusted");
+                      if (reason !== null) run(`service:${spot.name}`, () => api.spotService(spot.name, false, reason));
+                    }}>
+                    Take out of service
+                  </Button>}
+              </div>
               {(spot.occupant || spot.reserved_for) && <p className="muted small">Available once the spot is empty - repairing an occupied spot is a penalty.</p>}
             </>
           )}

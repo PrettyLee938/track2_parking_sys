@@ -37,6 +37,11 @@ export interface SpotView {
   reserved_for: string | null;
   detected: number;
   available: boolean;
+  /**
+   * Taken out of service by us because its sensor is misbehaving (Level 3 §7.2), with the
+   * reason. Different from `broken`/`maintenance`, which is what the simulator says.
+   */
+  out_of_service?: string | null;
 }
 
 /** An operator's manual override on a gate; null = automatic. */
@@ -320,6 +325,38 @@ export interface DeliveriesResponse {
   offset: number;
   /** Deliveries per outcome over the same time filter: "accepted" plus each rejection. */
   counts: Record<string, number>;
+}
+
+// ---------------------------------------------------------------------------
+// spot sensor health and maintenance mode (Level 3 §7.2)
+// ---------------------------------------------------------------------------
+/** Which abnormality took a spot's sensor out of our trust (see server/src/sensorHealth.ts). */
+export type SensorFaultKind =
+  | "ghost"      // reports a car we have no plate for, across several syncs
+  | "over_count" // reports more cars than ever arrived
+  | "flapping"   // changes its mind several times in a short game window
+  | "silent"     // cars sent here keep parking somewhere else
+  | "operator";  // an operator took it out of service by hand
+
+export type SpotSensorMode = "off" | "watch" | "maintenance";
+
+export interface SpotSensorFaultView {
+  spot: string;
+  zone: string;
+  signal: SensorFaultKind;
+  reason: string;
+  since_game_s: number | null;
+  incident: number | null;
+  /** True when the spot is actually excluded from allocation (mode "maintenance"). */
+  locked: boolean;
+}
+
+/** StateSnapshot.subsystems.spot_sensors */
+export interface SpotSensorSnapshot {
+  mode: SpotSensorMode;
+  faults: number;
+  out_of_service: number;
+  spots: SpotSensorFaultView[];
 }
 
 export type IncidentStatus = "open" | "provisional" | "resolved" | "dismissed";

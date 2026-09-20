@@ -1,6 +1,6 @@
 /** Component health: what is broken or being repaired, and the breakdown/repair history. */
 import { useEffect, useState } from "react";
-import type { ComponentEventView, ComponentKind, ComponentView, QueueStats } from "@gpa/shared";
+import type { ComponentEventView, ComponentKind, ComponentView, QueueStats, SensorFaultKind, SpotSensorSnapshot } from "@gpa/shared";
 import { api } from "../lib/api";
 import { fmtTimeSec } from "../lib/format";
 import { Badge, Card, Empty, Tile, type Tone } from "./ui";
@@ -101,6 +101,53 @@ export function EventQueueCard({ queue }: { queue?: QueueStats | null }) {
         <Tile label="Handled" value={queue.completed.toLocaleString()} tone={queue.failed ? "critical" : "good"}
           sub={queue.failed ? `${queue.failed} failed` : "none failed"} />
       </div>
+    </Card>
+  );
+}
+
+/**
+ * Parking spots whose sensor we do not trust (Level 3 §7.2). The simulator has no
+ * maintenance command for a spot, so "out of service" here is our own decision: the spot
+ * is simply not offered to cars. In "watch" mode nothing is locked and this card is a
+ * warning list only.
+ */
+const SIGNAL: Record<SensorFaultKind, string> = {
+  ghost: "Reports a car nobody arrived in",
+  over_count: "Counts more cars than arrived",
+  flapping: "Changes its mind repeatedly",
+  silent: "Never sees the cars sent to it",
+  operator: "Taken out of service by an operator",
+};
+
+export function SpotSensorCard({ sensors }: { sensors?: SpotSensorSnapshot }) {
+  if (!sensors || sensors.mode === "off") return null;
+  const subtitle = sensors.mode === "maintenance"
+    ? "Spots with an unreliable sensor are not offered to cars until they read clean again"
+    : "Watching only: these spots are still offered to cars. Set GPA_SPOT_SENSOR_MODE=maintenance to take them out.";
+  return (
+    <Card title="Spot sensors" subtitle={subtitle}>
+      <div className="tiles">
+        <Tile label="Sensors in doubt" value={sensors.faults} tone={sensors.faults ? "warning" : "good"}
+          sub={sensors.faults ? "see the list below" : "all reading normally"} />
+        <Tile label="Out of service" value={sensors.out_of_service} tone={sensors.out_of_service ? "warning" : "good"}
+          sub={sensors.mode === "maintenance" ? "not offered to cars" : "locking is switched off"} />
+      </div>
+      {!sensors.spots.length ? <Empty>No sensor abnormalities.</Empty> : (
+        <table className="data compact">
+          <thead><tr><th>Spot</th><th>Zone</th><th>Signal</th><th>What we saw</th><th>State</th></tr></thead>
+          <tbody>
+            {sensors.spots.map((f) => (
+              <tr key={f.spot}>
+                <td><b>{f.spot}</b></td>
+                <td>{f.zone || "—"}</td>
+                <td title={SIGNAL[f.signal]}>{SIGNAL[f.signal]}</td>
+                <td className="muted">{f.reason}</td>
+                <td>{f.locked ? <Badge tone="warning">out of service</Badge> : <Badge tone="neutral">still in use</Badge>}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
     </Card>
   );
 }

@@ -233,6 +233,28 @@ const schema = z.object({
   // car record that never closed.
   lightsIdleOffGameS: num().min(0).default(300),
 
+  // ---- spot sensor health (Level 3, sensorHealth.ts) --------------------------------
+  // Spots whose sensor misbehaves are recorded and can be taken out of allocation. The
+  // simulator has no maintenance-mode command for a spot, so this is our own soft lock:
+  // nothing is sent to the simulator and nothing here can earn a penalty.
+  //   off         do nothing
+  //   watch       detect and record incidents, change no behaviour (default: locking
+  //               spots is new behaviour and should be switched on deliberately)
+  //   maintenance also stop offering the spot to cars until it reads clean again
+  spotSensorMode: z.enum(["off", "watch", "maintenance"]).default("watch"),
+  // A single odd reading is a car we lost track of; this many in a row is a stuck sensor.
+  spotGhostSyncs: num().int().min(1).default(2),
+  // More CarIn/CarOut changes than this inside the window = the sensor is not watching cars.
+  spotFlapMax: num().int().min(1).default(6),
+  spotFlapWindowGameS: num().positive().default(60),
+  // Cars sent to a spot that parked somewhere else instead: the sensor never sees them.
+  spotSilentMisses: num().int().min(1).default(2),
+  // Consecutive clean syncs before a spot goes back into service by itself.
+  spotSensorClearSyncs: num().int().min(1).default(2),
+  // Never lock more than this share of a zone's spots on suspicion: a wrong sensor costs
+  // one penalty, a zone nobody is sent to costs every arrival.
+  spotSensorMaxLockedRatio: num().min(0).max(1).default(0.2),
+
   // ---- payments --------------------------------------------------------------------
   // A payment_made with a bad signature is a fake: the car has not paid. It is never
   // released for it; ask it to pay once more (the only way it can still pay).

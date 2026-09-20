@@ -71,6 +71,9 @@ export const api = {
 
   gate: (name: string, action: GateAction) => call<ControlResult>("POST", `/api/control/gates/${encodeURIComponent(name)}/${action}`),
   repairSpot: (name: string) => call<ControlResult>("POST", `/api/control/spots/${encodeURIComponent(name)}/repair`),
+  /** Our own maintenance mode: stop offering a spot to cars, or put it back. */
+  spotService: (name: string, inService: boolean, reason = "") =>
+    call<ControlResult>("POST", `/api/control/spots/${encodeURIComponent(name)}/service/${inService ? "in" : "out"}`, { reason }),
   /** Exhaust fans and lights: on / off hold the part, auto hands it back to CO or daylight. */
   device: (kind: "fan" | "light", name: string, action: DeviceAction) =>
     call<ControlResult>("POST", `/api/control/devices/${kind}/${encodeURIComponent(name)}/${action}`),

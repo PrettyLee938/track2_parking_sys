@@ -218,6 +218,31 @@ Nothing below has been near the simulator: Level 3 work is proven by unit tests 
   `report:level` for the ServerDateTime/our-clock difference before turning the replay
   window on. Also confirm no legitimate Level 3 class trips `malformed`.
 
+### Done: spot sensor abnormalities + our own maintenance mode (§7.2)
+- New subsystem `server/src/sensorHealth.ts` (`SpotSensors`, registered first in
+  `createSubsystems()`). Four signals, all from data we already hold: `ghost` (a car we
+  cannot name, across `spotGhostSyncs` syncs) · `over_count` (more cars than ever arrived -
+  deliberately NOT the two-real-CarIns case, which is double parking) · `flapping`
+  (`spotFlapMax` changes inside `spotFlapWindowGameS`) · `silent` (`spotSilentMisses` cars
+  sent here parked elsewhere). Plus `operator` for a manual lock.
+- Each detection writes an `incidents` row (evidence + confidence) **and** a
+  `maintenance_jobs` row, and an audit entry. Auto-resolved after
+  `spotSensorClearSyncs` clean syncs.
+- **Maintenance mode is our own soft lock**: `Spot.out_of_service` (new field, also in
+  `SpotView`) makes `available` false so allocation skips it. Nothing is sent to the
+  simulator - it exposes only `repair` for a spot - so none of this can earn a penalty.
+  `GPA_SPOT_SENSOR_MODE=off|watch|maintenance`, **default `watch`** (records only, changes
+  no behaviour). **Set `maintenance` for a Level 3 run.** `GPA_SPOT_SENSOR_MAX_LOCKED_RATIO`
+  (0.2) stops us locking out a zone on suspicion.
+- Operator control: `POST /api/control/spots/:name/service/(in|out)` with a reason,
+  audited; buttons in the Operations spot panel; a "Spot sensors" card on Operations; the
+  spot map and `report:live` show it. New `Subsystem.reserved(spot, plate)` hook.
+- Tests: `test/sensors.test.ts` (15).
+- **Needs a live run** and an answer to §9.1: does the Level 3 API have a real
+  maintenance endpoint for a spot? If it does, call it from `lock()`/`clear()` behind a
+  new flag. Also worth checking against real data whether `spotFlapMax=6` per 60 game-s is
+  loose enough for a busy Level 3 spot.
+
 ## Other open items
 - Team split: B environment (lights), C RBAC (enforce ROLE_PERMISSIONS: repair +
   reports.financial), login attempts table + last 3 after login, audit log, rejected-webhook

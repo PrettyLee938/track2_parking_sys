@@ -6,8 +6,12 @@ import { Badge, Empty, StatusIcon, type Tone } from "./ui";
 
 export type SpotState = "free" | "occupied" | "reserved" | "out";
 
+/** out = unusable, whether the simulator says so or we took it out over its sensor. */
 export const spotState = (s: SpotView): SpotState =>
-  s.broken || s.maintenance ? "out" : s.occupant ? "occupied" : s.reserved_for ? "reserved" : "free";
+  s.broken || s.maintenance || s.out_of_service ? "out" : s.occupant ? "occupied" : s.reserved_for ? "reserved" : "free";
+
+export const outOfServiceReason = (s: SpotView) =>
+  s.broken ? "broken" : s.maintenance ? "under maintenance" : s.out_of_service ?? "out of service";
 
 export const SPOT_LEGEND = [
   { label: "Free", color: "var(--free-fill)" },
@@ -31,7 +35,7 @@ export function SpotMap({ spots, selected, onSelect }: { spots: SpotView[]; sele
             {park.filter((s) => (s.zone || "-") === z).map((s) => {
               const st = spotState(s);
               const who = s.occupant && s.occupant !== "?" ? s.occupant : s.reserved_for ?? "";
-              const label = `${s.name}: ${st === "out" ? (s.broken ? "broken" : "under maintenance") : st}${who ? ` (${who})` : ""}${s.car_type !== "Any" ? `, ${s.car_type} only` : ""}`;
+              const label = `${s.name}: ${st === "out" ? outOfServiceReason(s) : st}${who ? ` (${who})` : ""}${s.car_type !== "Any" ? `, ${s.car_type} only` : ""}`;
               return (
                 <button key={s.name} className={`spot ${st}${selected === s.name ? " selected" : ""}`} title={label} aria-label={label}
                   onClick={onSelect ? () => onSelect(s.name) : undefined} disabled={!onSelect}>

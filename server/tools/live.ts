@@ -31,6 +31,12 @@ for (const g of s.gates ?? []) {
 }
 const outOfService = s.out_of_service ?? (s.components ?? []).filter((c: any) => c.health !== "ok").map((c: any) => `${c.kind}:${c.name}=${c.health}`);
 console.log(`out of service: ${outOfService.join("; ") || "none"}`);
+// Spots WE took out (their sensor cannot be trusted) - the simulator still calls them healthy.
+const spotSensors = s.subsystems?.spot_sensors;
+if (spotSensors && spotSensors.mode !== "off") {
+  console.log(`spot sensors (${spotSensors.mode}): ${spotSensors.faults} in doubt, ${spotSensors.out_of_service} not offered to cars`);
+  for (const f of spotSensors.spots ?? []) console.log(`  ${f.spot.padEnd(8)} ${f.signal.padEnd(10)} ${f.locked ? "LOCKED " : "in use "} ${f.reason}`);
+}
 const environment = s.environment ?? s.subsystems?.environment;
 for (const z of environment?.zones ?? []) console.log(`fans ${z.zone}: CO ${z.co === null ? "?" : Number(z.co).toFixed(0)} ${z.risk ?? ""} -> ${z.fans_on}/${z.fans} on${z.forced ? " (CO penalty)" : ""}  [list-zones polls: ${environment.polls}]`);
 if (s.unreachable?.length) console.log(`unreachable (learned): ${s.unreachable.join(", ")}`);

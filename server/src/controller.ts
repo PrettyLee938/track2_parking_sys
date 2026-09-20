@@ -35,6 +35,7 @@ import { chargingCost, parkingCost } from "./billing";
 import { readSimGameSpeed, type Settings } from "./config";
 import { ComponentRegistry } from "./components";
 import { GameClock } from "./gameClock";
+import type { SpotSensors } from "./sensorHealth";
 import { createSubsystems, type Engine, type Subsystem } from "./subsystems";
 import { SerialQueue, type TaskQueue } from "./serialQueue";
 import type { SimApi } from "./simClient";
@@ -88,6 +89,13 @@ export class Spot implements AllocSpot {
   readonly occupants = new Set<string>();
   reserved_for: string | null = null; // plate sent here but not arrived yet
   detected = 0;                       // car count from the last list-parking-spots
+  /**
+   * Taken out of service by US, not by the simulator: its sensor is behaving oddly, so no
+   * car is sent here until it reads clean again. Holds the reason, for the dashboard.
+   * The simulator has no maintenance-mode command for a spot, so this is a soft lock;
+   * see sensorHealth.ts.
+   */
+  out_of_service: string | null = null;
 
   constructor(readonly name: string, public zone: string, readonly purpose: string, readonly car_type: string) {}
 
@@ -98,7 +106,7 @@ export class Spot implements AllocSpot {
   }
 
   get available(): boolean {
-    return this.purpose === SpotPurpose.Park && !this.broken && !this.maintenance &&
+    return this.purpose === SpotPurpose.Park && !this.broken && !this.maintenance && this.out_of_service === null &&
       this.occupants.size === 0 && this.reserved_for === null;
   }
 
@@ -722,6 +730,7 @@ export class Controller implements Engine {
       return this.pumpEntry(lane);
     }
     spot.reserved_for = plate;
+    await this.each("reserved", (s) => s.reserved?.(spot.name, plate));
     car.spot = spot.name;
     car.status = "dispatching";
     car.dispatchedG = this.clock.now();
@@ -1172,6 +1181,7 @@ export class Controller implements Engine {
       return;
     }
     alt.reserved_for = car.plate;
+    await this.each("reserved", (s) => s.reserved?.(alt.name, car.plate));
     car.spot = alt.name;
     car.gotoResends = 0;
     car.dispatchedG = this.clock.now();
@@ -1773,6 +1783,20 @@ export class Controller implements Engine {
     }
   }
 
+  /**
+   * Put a parking spot into, or take it out of, OUR maintenance mode (sensorHealth.ts).
+   * Nothing is sent to the simulator - it has no maintenance command for a spot - so this
+   * only changes whether cars are offered it. Different from manualSpotRepair(), which
+   * asks the simulator to repair a spot it reports broken.
+   */
+  async setSpotService(name: string, inService: boolean, actor: string, reason = ""): Promise<ControlResult> {
+    const sensors = this.subsystems.find((s) => s.name === "spot_sensors") as SpotSensors | undefined;
+    if (!sensors) return fail("spot sensor monitoring is not running");
+    const result = sensors.setService(name, inService, actor, reason);
+    if (result.ok && inService) await this.resume(); // a spot came back: cars may be waiting
+    return result;
+  }
+
   async manualSpotRepair(name: string, actor: string): Promise<ControlResult> {
     const spot = this.spots.get(name);
     if (!spot || spot.purpose !== SpotPurpose.Park) return fail(`unknown parking spot ${name}`);
@@ -1897,7 +1921,7 @@ export class Controller implements Engine {
       .map((s) => ({
         name: s.name, zone: s.zone, purpose: s.purpose, car_type: s.car_type, broken: s.broken,
         maintenance: s.maintenance, occupant: s.occupant, occupants: [...s.occupants], reserved_for: s.reserved_for, detected: s.detected,
-        available: s.available,
+        available: s.available, out_of_service: s.out_of_service,
       }));
     return {
       synced: this.synced,
