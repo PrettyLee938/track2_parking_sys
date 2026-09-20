@@ -26,7 +26,7 @@ import {
   CORRECT_AMOUNT_PATTERN, OCCUPIED_SPOT_PATTERN, CarType, ComponentType, Destination, Direction, EventClass, GateState, PenaltyReason,
   SpotPurpose,
   type CarStatus, type CarView, type ControlResult, type Counters, type FeedItem, type FeedLevel, type GateAction,
-  type GateHold, type SessionView, type SimParkingSpot, type StateSnapshot, type TimeScaleSource, type TimeseriesPoint,
+  type GateHold, type SessionView, type SimParkingSpot, type SimulatorStatus, type StateSnapshot, type TimeScaleSource, type TimeseriesPoint,
   type ZoneSummary,
 } from "@gpa/shared";
 import { getAllocator, spotNumber, type AllocContext, type Allocator, type AllocSpot } from "./allocation";
@@ -239,6 +239,12 @@ export class Controller implements Engine {
   private tickHandle: NodeJS.Timeout | null = null;
   private tickPending = false;
   private stopped = false;
+  private simulatorOnline = false;
+  private simulatorLastSuccessAt: string | null = null;
+  private simulatorLastFailureAt: string | null = null;
+  private simulatorLastError: string | null = null;
+  private simulatorHealthCheckedReal = 0;
+  private simulatorResyncNeeded = false;
 
   topology: Topology | null = null;
   spots = new Map<string, Spot>();
@@ -346,7 +352,14 @@ export class Controller implements Engine {
   }
 
   requestResync(): void {
-    this.queue.push(() => this.sync());
+    this.queue.push(async () => {
+      try {
+        await this.sync();
+      } catch (err) {
+        this.markSimulatorOffline(err);
+        throw err;
+      }
+    });
   }
 
   private async initialSync() {
@@ -357,6 +370,7 @@ export class Controller implements Engine {
         // leaves us unsynced in that state, so keep polling until the user loads a level.
         if (!this.synced) await new Promise((resolve) => setTimeout(resolve, this.cfg.levelDiscoveryRetryS * 1000));
       } catch (e) {
+        this.markSimulatorOffline(e);
         this.log.warn(`sync failed (${(e as Error).message}), retrying in ${this.cfg.levelDiscoveryRetryS}s`);
         await new Promise((r) => setTimeout(r, this.cfg.levelDiscoveryRetryS * 1000));
       }
@@ -371,6 +385,7 @@ export class Controller implements Engine {
   async sync(opts: { replay?: boolean } = {}): Promise<void> {
     const liveSpots = await this.sim.listParkingSpots();
     const liveGates = await this.sim.listBarriers();
+    this.markSimulatorOnline();
     this.refreshSimSettingsSpeed();
 
     const entry = new Set(liveSpots.filter((s) => s.purpose === SpotPurpose.Entry).map((s) => s.name));
@@ -1632,6 +1647,7 @@ export class Controller implements Engine {
   // housekeeping
   // ---------------------------------------------------------------------------
   async tick(): Promise<void> {
+    if (this.started) await this.checkSimulatorHealth();
     const now = this.clock.now();
     for (const t of this.timers.filter((t) => t.due <= now)) await this.runTimer(t);
     await this.checkGateTimeouts(now);
@@ -1903,10 +1919,12 @@ export class Controller implements Engine {
     let ok = true, error: string | null = null;
     try {
       await fn();
+      this.markSimulatorOnline();
     } catch (ex) {
       ok = false;
       error = (ex as Error).message ?? String(ex);
       this.counters.command_errors++;
+      if (/fetch failed|econnrefused|enotfound|timed out|unable to connect|network/i.test(error)) this.markSimulatorOffline(ex);
       this.note("error", `command ${what}(${args.join(", ")}) failed: ${error}`);
     }
     this.store.recordAction({
@@ -1947,6 +1965,56 @@ export class Controller implements Engine {
   /** Run fn in turn with webhooks and ticks, so it never sees half-updated state. */
   exclusive<T>(fn: () => Promise<T> | T): Promise<T> {
     return this.queue.run(fn);
+  }
+
+  private simulatorStatus(): SimulatorStatus {
+    return {
+      online: this.simulatorOnline,
+      last_success_at: this.simulatorLastSuccessAt,
+      last_failure_at: this.simulatorLastFailureAt,
+      last_error: this.simulatorLastError,
+    };
+  }
+
+  private markSimulatorOnline() {
+    const recovered = !this.simulatorOnline && this.simulatorLastFailureAt !== null;
+    this.simulatorOnline = true;
+    this.simulatorLastSuccessAt = new Date().toISOString();
+    this.simulatorLastError = null;
+    this.snapshotCache = null;
+    if (recovered) this.note("info", "simulator REST API is online again");
+  }
+
+  private markSimulatorOffline(error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    const changed = this.simulatorOnline;
+    this.simulatorOnline = false;
+    this.simulatorLastFailureAt = new Date().toISOString();
+    this.simulatorLastError = message;
+    this.simulatorResyncNeeded = true;
+    this.snapshotCache = null;
+    if (changed) this.note("warn", `simulator REST API is offline: ${message}`);
+  }
+
+  private async checkSimulatorHealth() {
+    const now = Date.now() / 1000;
+    if (now - this.simulatorHealthCheckedReal < this.cfg.simulatorHealthPollS) return;
+    this.simulatorHealthCheckedReal = now;
+    try {
+      await this.sim.listBarriers();
+      const needsResync = this.simulatorResyncNeeded;
+      this.markSimulatorOnline();
+      if (needsResync && this.synced) {
+        try {
+          await this.sync();
+          this.simulatorResyncNeeded = false;
+        } catch (err) {
+          this.markSimulatorOffline(err);
+        }
+      }
+    } catch (err) {
+      this.markSimulatorOffline(err);
+    }
   }
 
   /**
@@ -2079,6 +2147,7 @@ export class Controller implements Engine {
        }));
     const value: StateSnapshot = {
       synced: this.synced,
+      simulator: this.simulatorStatus(),
       time_scale: Math.round(this.timeScale * 1000) / 1000,
       time_scale_source: this.timeScaleInfo.source,
       topology: this.topology ? { name: this.topology.name, source: this.topology.source ?? "" } : null,

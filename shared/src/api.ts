@@ -145,9 +145,19 @@ export interface Counters {
 /** Where the game speed figure came from (see the server's config.ts, "game clock"). */
 export type TimeScaleSource = "configured" | "gate timing" | "learned" | "simulator settings" | "default";
 
+/** Connectivity/readiness of the simulator REST API behind the controller. */
+export interface SimulatorStatus {
+  online: boolean;
+  last_success_at: string | null;
+  last_failure_at: string | null;
+  last_error: string | null;
+}
+
 /** GET /api/state */
 export interface StateSnapshot {
   synced: boolean;
+  /** The last simulator API probe. Inventory can remain cached while this is false. */
+  simulator: SimulatorStatus;
   /** Game seconds per real second, i.e. the simulator's game speed. */
   time_scale: number;
   time_scale_source: TimeScaleSource;

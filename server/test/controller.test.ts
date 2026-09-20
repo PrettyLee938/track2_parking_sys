@@ -273,6 +273,27 @@ describe("startup discovery", () => {
   });
 });
 
+describe("simulator connectivity", () => {
+  it("marks cached state offline and rediscovers after the simulator returns", async () => {
+    const sim = FakeSim.lvl1();
+    const { c } = await make({ sim, cfg: { simulatorHealthPollS: 0.01 } });
+    c.start();
+    sim.offline = true;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await c.tick();
+    expect(c.snapshot().simulator.online).toBe(false);
+    expect(c.snapshot().simulator.last_error).toBe("fetch failed");
+    expect(c.synced).toBe(true); // inventory is retained, but explicitly stale
+
+    sim.offline = false;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await c.tick();
+    expect(c.snapshot().simulator.online).toBe(true);
+    expect(c.snapshot().simulator.last_error).toBeNull();
+    c.stop();
+  });
+});
+
 // ---------------------------------------------------------------------------
 // game speed
 // ---------------------------------------------------------------------------

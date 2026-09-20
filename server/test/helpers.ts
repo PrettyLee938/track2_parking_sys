@@ -15,6 +15,7 @@ export type Call = [string, ...(string | number)[]];
 
 export class FakeSim implements SimApi {
   calls: Call[] = [];
+  offline = false;
   fans: SimExhaustFan[] = [];
   lights: SimLight[] = [];
   alarms: SimAlarm[] = [];
@@ -48,7 +49,7 @@ export class FakeSim implements SimApi {
   }
 
   async listParkingSpots() { return this.spots; }
-  async listBarriers() { return this.barriers; }
+  async listBarriers() { if (this.offline) throw new Error("fetch failed"); return this.barriers; }
   async openGate(n: string) { this.calls.push(["open", n]); }
   async closeGate(n: string) { this.calls.push(["close", n]); }
   async carGoto(p: string, d: string) { this.calls.push(["goto", p, d]); }

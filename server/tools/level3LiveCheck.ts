@@ -36,6 +36,8 @@ try {
   const topology = typeof state.topology === "string" ? state.topology : state.topology?.name;
 
   check("server is synced to Level 3", state.synced === true && /lvl?3|level3/i.test(String(topology)), String(topology ?? "none"));
+  check("simulator REST API is online", state.simulator?.online === true,
+    state.simulator?.online ? (state.simulator?.last_success_at ?? "online") : (state.simulator?.last_error ?? "no successful simulator probe"));
   check("eight entry lanes", state.entry_lanes?.length === 8, String(state.entry_lanes?.length ?? 0));
   check("ten exit lanes", state.exit_lanes?.length === 10, String(state.exit_lanes?.length ?? 0));
   check("seven zones are represented", Object.keys(state.zones ?? {}).filter((z) => z !== "-").length === 7, Object.keys(state.zones ?? {}).join(", "));

@@ -137,6 +137,9 @@ const schema = z.object({
   entryPatienceGameS: num().positive().default(290),
   // When the simulator is still on its menu, keep discovering until a level is loaded.
   levelDiscoveryRetryS: num().positive().default(2),
+  // Read-only REST health probe. This prevents cached inventory from being presented as live
+  // after the simulator exits, and triggers a fresh discovery when it comes back.
+  simulatorHealthPollS: num().positive().default(10),
   // Cars arrive every ~8 game-s. No webhook for this long usually means the simulator was
   // restarted or reloaded: re-read spots and gates on the next event.
   resyncAfterSilenceGameS: num().positive().default(30),
