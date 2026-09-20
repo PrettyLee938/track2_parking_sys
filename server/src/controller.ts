@@ -353,9 +353,12 @@ export class Controller implements Engine {
     while (!this.stopped && !this.synced) {
       try {
         await this.sync({ replay: true });
+        // A simulator started on its menu has no entry/exit spots yet. sync() deliberately
+        // leaves us unsynced in that state, so keep polling until the user loads a level.
+        if (!this.synced) await new Promise((resolve) => setTimeout(resolve, this.cfg.levelDiscoveryRetryS * 1000));
       } catch (e) {
-        this.log.warn(`sync failed (${(e as Error).message}), retrying in 2s`);
-        await new Promise((r) => setTimeout(r, 2000));
+        this.log.warn(`sync failed (${(e as Error).message}), retrying in ${this.cfg.levelDiscoveryRetryS}s`);
+        await new Promise((r) => setTimeout(r, this.cfg.levelDiscoveryRetryS * 1000));
       }
     }
   }
@@ -378,7 +381,9 @@ export class Controller implements Engine {
       // the first car event from an unknown entry triggers a reload (routeCarEvent).
       if (this.topology) this.reset();
       this.topology = null;
-      this.synced = true;
+      // Do not mark this as a successful sync. The level may be loaded after the backend
+      // starts, and initialSync() must keep discovering until entry/exit spots exist.
+      this.synced = false;
       this.note("warn", "simulator has no level loaded yet - waiting for it");
       this.freshSite = "the level was (re)started from the simulator's menu";
       return;

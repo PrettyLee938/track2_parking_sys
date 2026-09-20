@@ -250,6 +250,29 @@ describe("exit and payment", () => {
   });
 });
 
+describe("startup discovery", () => {
+  it("does not consider the simulator menu a completed sync", async () => {
+    const { c } = await make({ sim: new FakeSim([], []) });
+    expect(c.synced).toBe(false);
+    expect(c.topology).toBeNull();
+  });
+
+  it("discovers a level loaded after the backend starts", async () => {
+    const sim = new FakeSim([], []);
+    const { c } = await make({ sim, cfg: { levelDiscoveryRetryS: 0.01 } });
+    const retryingSync = (c as unknown as { initialSync: () => Promise<void> }).initialSync();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const loaded = FakeSim.lvl1();
+    sim.spots = loaded.spots;
+    sim.barriers = loaded.barriers;
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    c.stop();
+    await retryingSync;
+    expect(c.synced).toBe(true);
+    expect(c.topology?.name).toBe("test-lvl1");
+  });
+});
+
 // ---------------------------------------------------------------------------
 // game speed
 // ---------------------------------------------------------------------------

@@ -135,6 +135,8 @@ const schema = z.object({
   maxGotoResends: num().int().min(0).default(5),
   // Cars give up after ~5 game-minutes at an entry.
   entryPatienceGameS: num().positive().default(290),
+  // When the simulator is still on its menu, keep discovering until a level is loaded.
+  levelDiscoveryRetryS: num().positive().default(2),
   // Cars arrive every ~8 game-s. No webhook for this long usually means the simulator was
   // restarted or reloaded: re-read spots and gates on the next event.
   resyncAfterSilenceGameS: num().positive().default(30),
