@@ -144,8 +144,15 @@ export function routesFromLevel(level: { Paths?: LevelPath[]; ParkingSpots?: Lev
     for (const [zone, spot] of zones) {
       const r = route(nearest(sensor).Name, nearest(spot).Name);
       if (!r) continue;
-      const gates = entryGates.map((g) => ({ name: g, pos: along(r, gatePos.get(g)!) }))
+      const routeGates = entryGates.map((g) => ({ name: g, pos: along(r, gatePos.get(g)!) }))
         .filter((g) => g.pos !== null).sort((a, b) => a.pos! - b.pos!).map((g) => g.name); // in driving order
+      // The route geometry can miss the lane's own barrier when the sensor, gate,
+      // and road centerline are not collinear (as in Level 3 OENTRY1/gate8).
+      // A car at an entry cannot reach the road until that barrier is open, so
+      // always put the lane gate first and retain downstream gates in road order.
+      const gates = lane.gate && gatePos.has(lane.gate)
+        ? [lane.gate, ...routeGates.filter((g) => g !== lane.gate)]
+        : routeGates;
       const sensors = t.entry_lanes.map((l) => at(l.spot)).filter((s): s is LevelSpot => !!s && along(r, s) !== null).map((s) => s.Name);
       routes[lane.spot][zone] = { gates, sensors };
     }

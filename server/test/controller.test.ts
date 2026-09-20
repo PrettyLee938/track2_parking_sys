@@ -678,6 +678,31 @@ describe("topology", () => {
     });
   });
 
+  it("always includes an entrance's own gate even when road geometry omits it", () => {
+    const level = {
+      Paths: [{
+        Points: [{ Name: "E", X: 0, Y: 0 }, { Name: "Z", X: 0, Y: 1000 }],
+        Connections: [{ From: "E", To: "Z", Direction: 0 }],
+      }],
+      ParkingSpots: [
+        { Name: "ENTRY1", Purpose: "EntrySpot", X: 0, Y: 0 },
+        { Name: "S1", Purpose: "Park", ZoneParent: "ZONE1", X: 0, Y: 1000 },
+      ],
+      // Deliberately outside the route-distance threshold. It is still the gate
+      // paired with ENTRY1 and must be opened before the car is sent onward.
+      Gates: [{ Name: "g-entry", X: 500, Y: 0 }],
+    };
+    const topology: Topology = {
+      name: "entrance-gate-regression",
+      entry_lanes: [{ spot: "ENTRY1", gate: "g-entry", zone: "ZONE1" }],
+      exit_lanes: [],
+    };
+
+    expect(routesFromLevel(level, topology)).toEqual({
+      ENTRY1: { ZONE1: { gates: ["g-entry"], sensors: ["ENTRY1"] } },
+    });
+  });
+
   it("picks the matching topology and rejects ones naming missing gates", () => {
     const sim = FakeSim.lvl1();
     const wrong: Topology = { name: "wrong", entry_lanes: [{ spot: "ENTRY1", gate: "nope", zone: "" }], exit_lanes: [{ spot: "EXIT_EXIT", gate: "gateB", zone: "" }] };
