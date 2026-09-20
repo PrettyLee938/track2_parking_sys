@@ -176,16 +176,18 @@ export async function makeQueued(opts: MakeOpts = {}) {
  * A Fastify app with routes, a synced controller and two accounts:
  * admin / admin-password and oper / oper-password.
  */
-export async function testServer(opts: { cfg?: Partial<Settings>; sim?: FakeSim } = {}) {
+export async function testServer(opts: { cfg?: Partial<Settings>; sim?: FakeSim; store?: Store } = {}) {
   const cfg = testSettings({ closeIdleGatesOnSync: false, adminPassword: "admin-password", ...opts.cfg });
-  const store = new Store(":memory:");
+  // An injected store lets a test restart the server on the same database, which is how
+  // durable webhook dedupe is checked.
+  const store = opts.store ?? new Store(":memory:");
   const queue = new RecordingQueue();
   const sim = opts.sim ?? FakeSim.lvl1();
   const controller = new Controller({ sim, cfg, store, log: silentLog, topologies: [LVL1], queue });
   await controller.sync();
   const auth = new AuthService(store, cfg);
   await auth.bootstrap();
-  store.createUser("oper", await hashPassword("oper-password"), "operator");
+  if (!store.findUser("oper")) store.createUser("oper", await hashPassword("oper-password"), "operator");
   const app = Fastify();
   registerRoutes(app, { cfg, controller, store, auth });
 
@@ -196,7 +198,7 @@ export async function testServer(opts: { cfg?: Partial<Settings>; sim?: FakeSim 
     if (res.statusCode !== 200) throw new Error(`sign-in failed: ${res.statusCode} ${res.body}`);
     return String(res.headers["set-cookie"]).split(";")[0];
   };
-  return { app, store, queue, sim, controller, auth, signIn };
+  return { app, store, queue, sim, controller, auth, cfg, signIn };
 }
 
 /** Run every pending timer now, regardless of its delay. */

@@ -157,6 +157,14 @@ before assuming a feature exists.
 * Cars at an *exit* sensor will drive out through an open gate whether they paid or not; cars
   at an *entry* sensor never move without our `goto` (7,124 entries checked), so entry gates
   can safely be held open across a stream of cars.
+* There is an **undocumented `GET /api/v1/status`** we do not use yet: it returns
+  `{"isActive": false, "cars": 50}`. If `isActive` tracks the game's paused state, it is a
+  direct answer to something we currently infer from 20 seconds of webhook silence, and `cars`
+  is a free sanity check against our own car count. **Needs one live check** — press `P` in the
+  simulator and see whether the flag flips.
+* **Entry and exit sensors legitimately hold more than one car**: `ENTRY1` was observed
+  reporting `detectedCars: 2` during normal running. Double-parking detection (§7.9) must
+  therefore only consider spots with `purpose: "Park"`, or it will fire constantly on lanes.
 * Level state is **not saved** — restarting the simulator resets every part's usage counter, so
   our persisted usage has to be reset on a fresh site or gates look worn and stop opening
   (this bug once blocked every entrance).
@@ -209,11 +217,22 @@ strategy aware of indoor/outdoor and of *which exits are healthy*, and make sure
 full or unreachable degrades to the next best zone instead of turning the car away.
 
 ### 7.2 Maintenance mode for spots with sensor abnormalities — *new*
-The REST API we know exposes only `repair` for a spot; `list-parking-spots` reports
-`isUnderMaintenance` and `detectedCars`. **Check the simulator's API docs for a Level 3
-maintenance endpoint** — if there is one, call it behind a flag; if not, implement maintenance
-as *our* soft lock: the spot stays in the registry, is excluded from allocation, is shown as
-"under maintenance" on the dashboard, and a `maintenance_jobs` row records why.
+**Answered by probing the live API on 2026-09-20: there is no maintenance endpoint. Do not
+look for one.** The only spot command in the whole API is `POST /parking-spots/{name}/repair`;
+every maintenance wording we tried (`/maintenance`, `/maintenance/on`, `/set-maintenance`,
+`/out-of-service`, `/disable`, `/lock`, `/block`, `/suspend`, `/service-mode`, collection-level
+`/maintenance/{name}`, and the same under `/barrier-gates` and `/exhaust-fans`) answers 404
+while existing POST-only routes answer 405 with `Allow: POST` — so the absence is conclusive,
+not a guess. (That 405-vs-404 difference is a reliable way to map this API without causing any
+side effect: probe with GET, never POST.) `isUnderMaintenance` in `list-parking-spots` is a
+**read-only flag the simulator sets while it is repairing a part** — it is not something we can
+set.
+
+So maintenance mode is entirely **ours**: the spot stays in the registry, is excluded from
+allocation, is shown as "under maintenance" on the dashboard, and a `maintenance_jobs` row
+records why. Nothing is sent to the simulator, which also means the simulator will happily keep
+sending cars' sensor events for that spot — our state is the authority, and it must survive a
+restart (persist it) and a resync (do not let a fresh `list-parking-spots` clear it).
 Abnormality signals worth detecting (all visible in existing data): `detectedCars` > 1 when we
 placed one car; `detectedCars` > 0 for a spot we believe is free (ghost), persisting across two
 syncs; a spot that never reports the car we sent to it; a sensor flapping several times within
@@ -288,6 +307,7 @@ asks for — per zone and per kind: total / available / broken / under maintenan
 preventive repair, with drill-down, and a whole-site banner when a zone is degraded.
 
 ### 7.9 Double parking — *new*
+Only `purpose: "Park"` spots count — entry and exit sensors routinely read two cars (§5).
 Two distinct cases, both detectable from data we already hold:
 1. a spot reports `detectedCars > 1`, or a `car_spot_action` CarIn arrives for a spot whose
    `occupants` set is not empty;
@@ -333,8 +353,11 @@ uncollected amounts, penalty count and cost. Enforce RBAC on the privileged ones
 Flag these in your PR rather than guessing — the team can check them against the running
 simulator in minutes:
 
-1. Does the Level 3 REST API expose a **maintenance-mode endpoint** for spots (beyond
-   `repair`)? Check the simulator's API docs/Swagger on port 9898.
+1. ~~Does the Level 3 REST API expose a **maintenance-mode endpoint** for spots?~~
+   **ANSWERED 2026-09-20 by probing the live API: no.** `repair` is the only spot command;
+   maintenance mode is ours to implement. See §7.2. There is no Swagger/OpenAPI document on
+   port 9898 either (`/swagger`, `/swagger/v1/swagger.json`, `/openapi.json`, `/api-docs` all
+   404) — the API surface below in §5 plus §7.2's probing trick is what we have.
 2. Does `goto <plate> exit` let us **steer a car to a specific exit** (e.g. `goto <plate>
    Exit187`), or only to "any exit"? This decides whether exit-gate failover can actively
    reroute cars or only repair fast.

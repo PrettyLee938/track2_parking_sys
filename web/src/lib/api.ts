@@ -1,6 +1,7 @@
 /** Typed calls to our own server. The session travels in an HttpOnly cookie. */
 import type {
-  ActionsResponse, AuditResponse, ComponentsResponse, ControlResult, CreateUserRequest, DailyReport, DeviceAction, EventsResponse, GateAction,
+  ActionsResponse, AuditResponse, ComponentsResponse, ControlResult, CreateUserRequest, DailyReport, DeliveriesResponse, DeviceAction,
+  EventsResponse, GateAction,
   IncidentView, LoginAttemptView, MaintenanceJobView, MeResponse, PenaltiesResponse, SessionsResponse, StateSnapshot,
   StatsResponse, TimeseriesResponse, UpdateUserRequest, UsersResponse,
 } from "@gpa/shared";
@@ -81,6 +82,9 @@ export const api = {
   users: () => call<UsersResponse>("GET", "/api/users"),
   audit: (limit = 100) => call<AuditResponse>("GET", `/api/audit${qs({ limit })}`),
   securityLoginAttempts: (limit = 100) => call<{ items: LoginAttemptView[] }>("GET", `/api/security/login-attempts${qs({ limit })}`),
+  /** Raw webhook deliveries with the reason each was refused (admin only). */
+  deliveries: (q: { rejection?: string; class?: string; source?: string; q?: string; since?: string; limit?: number; offset?: number } = {}) =>
+    call<DeliveriesResponse>("GET", `/api/security/deliveries${qs(q)}`),
   createUser: (body: CreateUserRequest) => call<MeResponse>("POST", "/api/users", body),
   updateUser: (id: number, body: UpdateUserRequest) => call<MeResponse>("PATCH", `/api/users/${id}`, body),
 };

@@ -272,6 +272,56 @@ export interface AuditEntryView {
 }
 export interface AuditResponse { items: AuditEntryView[] }
 
+// ---------------------------------------------------------------------------
+// webhook ingress security (Level 3 §7.7)
+// ---------------------------------------------------------------------------
+/**
+ * Why a delivery from the parking network was recorded but not acted on. Every rejected
+ * delivery is kept whole - payload included - because it is the evidence behind the
+ * "invalid / duplicated / tampered" requirement, and a fake payment is a car trying to
+ * leave without paying.
+ */
+export type DeliveryRejection =
+  | "duplicate"         // same EventId, byte-identical payload: at-most-once delivery retried
+  | "tampered"          // same EventId, DIFFERENT payload - somebody rewrote a delivery
+  | "unsigned"          // no Signature where the level requires one
+  | "bad_signature"     // Signature does not match the payload
+  | "stale"             // ServerDateTime outside the accepted window: a replayed delivery
+  | "rate_limited"      // more deliveries from one source than the configured ceiling
+  | "malformed"         // not JSON, or no EventClass
+  | "forbidden_source"; // ingress policy (Level 2+ expects the local simulator)
+
+export const DELIVERY_REJECTIONS: readonly DeliveryRejection[] =
+  ["duplicate", "tampered", "unsigned", "bad_signature", "stale", "rate_limited", "malformed", "forbidden_source"];
+
+/** One raw delivery as the security page shows it. */
+export interface DeliveryView {
+  id: number;
+  received_at: string;
+  event_id: string | null;
+  event_class: string;
+  /** Where it came from (the caller's IP). */
+  source: string | null;
+  sig: string | null;
+  accepted: boolean;
+  duplicate: boolean;
+  rejection: DeliveryRejection | null;
+  seq: number | null;
+  seq_note: string | null;
+  payload: Record<string, unknown>;
+}
+
+/** GET /api/security/deliveries */
+export interface DeliveriesResponse {
+  items: DeliveryView[];
+  /** Matching rows before limit/offset, so the page can page through them. */
+  total: number;
+  limit: number;
+  offset: number;
+  /** Deliveries per outcome over the same time filter: "accepted" plus each rejection. */
+  counts: Record<string, number>;
+}
+
 export type IncidentStatus = "open" | "provisional" | "resolved" | "dismissed";
 export interface IncidentView {
   id: number;

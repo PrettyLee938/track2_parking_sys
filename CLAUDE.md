@@ -190,6 +190,34 @@ Nothing below has been near the simulator: Level 3 work is proven by unit tests 
   50-on/40-off hysteresis (fewer fan switches around 50) rather than changing behaviour back
   - say if you want the spec's plain "off below 50" instead.
 
+### Done: webhook ingress security + Security page (§7.7)
+- **Every** delivery is now stored with `source` (caller IP), `rejection` (why it was
+  refused) and `seq_note`, payload included - rejected ones are the evidence. New columns
+  on `events` + index, added by `migrate()`.
+- Classifications (`DeliveryRejection` in `shared/src/api.ts`): `duplicate` · `tampered`
+  (same EventId, different payload hash - 409 + an `event_id_conflict` incident) ·
+  `unsigned` · `bad_signature` (still handed to `submitRejected`: that is the fake payment)
+  · `stale` (replay window) · `rate_limited` · `malformed` (the raw body is kept, truncated
+  to 2 kB) · `forbidden_source`. A duplicate is answered 200 on purpose - an error would
+  just make the simulator retry.
+- Dedupe is durable: `event_identities` (payload hash per EventId) is the authority and
+  survives a restart; `Intake`'s in-memory set is only a bounded fast path
+  (`GPA_WEBHOOK_DEDUPE_CACHE_SIZE`, 5000).
+- New settings, **all defaulting to today's behaviour**: `GPA_WEBHOOK_REPLAY_WINDOW_S=0`
+  (off - ServerDateTime is the simulator machine's wall clock, so a disagreeing clock would
+  reject every event; set 300 once `report:level` shows the clocks agree) and
+  `GPA_WEBHOOK_RATE_PER_SOURCE_PER_S=0` / `GPA_WEBHOOK_RATE_BURST=200` (off - three Level 3
+  emitters burst legitimately and we would rather queue than refuse the simulator).
+- `GET /api/security/deliveries` (admin) - filter by rejection/class/source/free text,
+  `limit`+`offset`, per-outcome counters; `GET /api/security/intake` for the live counters.
+  Dashboard: new admin-only **Security** page with counters, filter chips, payload
+  drill-down and the sign-in attempt list.
+- Tests: `test/security.test.ts` (17) incl. dedupe surviving a restart on the same store
+  (`testServer({ store })`).
+- **Needs a live run:** confirm Level 3 signs every class the way Level 2 does, and check
+  `report:level` for the ServerDateTime/our-clock difference before turning the replay
+  window on. Also confirm no legitimate Level 3 class trips `malformed`.
+
 ## Other open items
 - Team split: B environment (lights), C RBAC (enforce ROLE_PERMISSIONS: repair +
   reports.financial), login attempts table + last 3 after login, audit log, rejected-webhook

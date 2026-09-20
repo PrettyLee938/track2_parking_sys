@@ -14,14 +14,16 @@ import path from "node:path";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { DEVICE_ACTIONS } from "@gpa/shared";
 import type {
-  ActionsResponse, ApiError, ControlResult, CreateUserRequest, DeviceAction, EventsResponse, GateAction, LoginRequest, MeResponse, Role,
+  ActionsResponse, ApiError, ControlResult, CreateUserRequest, DeliveriesResponse, DeliveryRejection, DeviceAction, EventsResponse,
+  GateAction, LoginRequest, MeResponse, Role,
   ComponentsResponse, SessionsResponse, StateSnapshot, StatsResponse, TimeseriesResponse, UpdateUserRequest, UserView, UsersResponse,
 } from "@gpa/shared";
+import { DELIVERY_REJECTIONS } from "@gpa/shared";
 import { AuthService, hashPassword, hasRole, validateCredentials } from "./auth";
 import { REPO_ROOT, type Settings } from "./config";
 import type { Controller } from "./controller";
 import type { EventRecord, Store } from "./store";
-import { Intake, parseRaw } from "./webhook";
+import { Intake, RateLimiter, parseRaw } from "./webhook";
 
 declare module "fastify" {
   interface FastifyRequest {
@@ -70,7 +72,8 @@ const isLoopback = (ip: string) => ip === "127.0.0.1" || ip === "::1" || ip === 
 
 export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
   const { cfg, controller, store, auth } = deps;
-  const intake = deps.intake ?? new Intake(cfg.signatureMode);
+  const intake = deps.intake ?? new Intake(cfg.signatureMode, cfg.webhookDedupeCacheSize);
+  const limiter = new RateLimiter(cfg.webhookRatePerSourcePerS, cfg.webhookRateBurst);
   const recent: EventRecord[] = [];
 
   // Fastify logs every request at info level; one line per webhook is noise.
@@ -104,57 +107,93 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
   // ---------------------------------------------------------------------------
   // simulator -> us
   // ---------------------------------------------------------------------------
+  /**
+   * The simulator's only way in. Every delivery - accepted or not - is written to the
+   * events table with its payload, source and the reason it was refused, because those
+   * rows are the evidence the security page shows and the only record of an attack.
+   * The response never waits on the engine: the record is persisted, the work is queued.
+   */
   app.post("/webhook", async (req, reply) => {
-    const level2 = cfg.levelProfile === "level2" || cfg.levelProfile === "level3" ||
-      (cfg.levelProfile === "auto" && (/lvl[23]/i.test(deps.controller.topology?.name ?? "") ||
-        deps.controller.components.all("fan").length > 0 || deps.controller.components.all("light").length > 0));
-    if ((level2 && cfg.webhookLoopbackOnly) && !isLoopback(req.ip)) {
-      store.recordAudit({ action: "webhook.rejected", target: req.ip, ok: false, reason: "non-loopback Level 2 ingress" });
-      return err(reply, 403, "Level 2 webhooks are restricted to loopback");
-    }
     const receivedAt = new Date().toISOString();
+    const source = req.ip;
+    /** Store the delivery exactly as it arrived, whatever we decide about it. */
+    const record = (event: Record<string, unknown>, rejection: DeliveryRejection | null, meta: Partial<EventRecord> = {}) => {
+      const row: EventRecord = {
+        EventClass: "?", ...event, _received_at: receivedAt, _source: source, _rejection: rejection,
+        _accepted: rejection === null, ...meta,
+      } as EventRecord;
+      store.recordEvent(row);
+      recent.push(row);
+      if (recent.length > cfg.recentEventsSize) recent.shift();
+      return row;
+    };
+    const refuse = (rejection: Extract<DeliveryRejection, "rate_limited" | "malformed" | "forbidden_source">,
+      event: Record<string, unknown>, reason: string) => {
+      intake.countRefused(rejection);
+      record(event, rejection);
+      store.recordAudit({ action: "webhook.rejected", target: source, ok: false, reason });
+      req.log.warn(`refused a delivery from ${source}: ${reason}`);
+    };
+
+    if (!limiter.allow(source)) {
+      refuse("rate_limited", { EventClass: "?" }, `more than ${cfg.webhookRatePerSourcePerS}/s from this source`);
+      reply.header("retry-after", "1");
+      return err(reply, 429, "too many webhook deliveries from this source");
+    }
+
     let event;
     try {
       event = parseRaw(String(req.body ?? ""));
     } catch {
-      req.log.error({ body: String(req.body).slice(0, 300) }, "non-JSON webhook");
-      store.recordAudit({ action: "webhook.rejected", target: req.ip, ok: false, reason: "malformed JSON" });
+      // Keep the body: unparseable deliveries are the clearest sign of something that is
+      // not the simulator talking to us. Truncated so one huge body cannot fill the disk.
+      refuse("malformed", { EventClass: "?", _raw_body: String(req.body ?? "").slice(0, 2000) }, "malformed JSON");
       return reply.code(400).send({ ok: false });
     }
     if (typeof event.EventClass !== "string" || !event.EventClass) {
-      store.recordAudit({ action: "webhook.rejected", target: req.ip, ok: false, reason: "missing EventClass" });
+      refuse("malformed", { ...event, EventClass: "?" }, "missing EventClass");
       return err(reply, 400, "webhook EventClass is required");
     }
-    const identity = store.eventIdentity(event.EventId, event);
-    if (identity === "conflict") {
-      const incident = store.createIncident({ status: "open", kind: "event_id_conflict", reason: `EventId ${event.EventId} was reused with a different payload`,
-        confidence: "high", evidence: { event_id: event.EventId, payload: event } });
-      store.recordAudit({ action: "webhook.rejected", target: String(event.EventId), ok: false, reason: "event ID payload conflict", detail: { incident: incident.id } });
-      return err(reply, 409, "event ID was already used for a different payload");
+
+    const level2 = cfg.levelProfile === "level2" || cfg.levelProfile === "level3" ||
+      (cfg.levelProfile === "auto" && (/lvl[23]/i.test(deps.controller.topology?.name ?? "") ||
+        deps.controller.components.all("fan").length > 0 || deps.controller.components.all("light").length > 0));
+    if ((level2 && cfg.webhookLoopbackOnly) && !isLoopback(source)) {
+      refuse("forbidden_source", event, "non-loopback Level 2 ingress");
+      return err(reply, 403, "Level 2 webhooks are restricted to loopback");
     }
+
+    // Durable: event_identities holds the payload hash of the first delivery of each
+    // EventId, so a duplicate or a rewrite is still recognised after a restart.
+    const identity = store.eventIdentity(event.EventId, event);
     const mode = cfg.signatureMode === "strict" || level2 ? "strict" : cfg.signatureMode;
-    const meta = intake.check(event, identity === "duplicate", mode);
-    const record: EventRecord = {
-      ...event, _received_at: receivedAt, _sig: meta.sig, _duplicate: meta.duplicate,
-      _seq_note: meta.seqNote, _accepted: meta.accept,
-    };
-    store.recordEvent(record);
-    recent.push(record);
-    if (recent.length > cfg.recentEventsSize) recent.shift();
+    const meta = intake.check(event, { identity, mode, replayWindowS: cfg.webhookReplayWindowS });
+    const row = record(event, meta.rejection, { _sig: meta.sig, _duplicate: meta.duplicate, _seq_note: meta.seqNote });
 
     if (meta.seqNote) req.log.warn(`sequence gap: ${meta.seqNote}`);
-    if (!meta.accept) {
-      req.log.warn(`dropped ${event.EventClass} (${meta.duplicate ? "duplicate" : `signature ${meta.sig}`})`);
+    if (meta.rejection) {
+      req.log.warn(`dropped ${event.EventClass} (${meta.rejection})`);
       store.recordAudit({ action: "webhook.rejected", target: String(event.EventId ?? event.EventClass), ok: false,
-        reason: meta.duplicate ? "duplicate" : `signature ${meta.sig}` });
-      // Keep the controller informed about rejected signed-looking simulator
-      // events. This preserves the penalty/failed-payment workflow while the
-      // HTTP request still receives the correct rejection status.
-      if (!meta.duplicate && meta.sig === "invalid" && cfg.controllerEnabled) controller.submitRejected(record);
+        reason: meta.rejection, detail: { source, sig: meta.sig, event_class: event.EventClass } });
+      // Same EventId, different payload: worth an operator's attention, not just a log line.
+      if (meta.rejection === "tampered") {
+        store.createIncident({ status: "open", kind: "event_id_conflict", confidence: "high",
+          reason: `EventId ${event.EventId} was delivered again with a different payload`,
+          evidence: { event_id: event.EventId, source, payload: event } });
+      }
+      // The controller still needs to see a badly signed payment: that is the spec's fake
+      // payment, and the car must be re-charged rather than released.
+      if (meta.rejection === "bad_signature" && cfg.controllerEnabled) controller.submitRejected(row);
     } else if (cfg.controllerEnabled) {
-      controller.submit(record); // handled on the controller's queue; respond immediately
+      controller.submit(row); // handled on the controller's queue; respond immediately
     }
-    if (!meta.accept && !meta.duplicate && mode === "strict") return err(reply, 401, "valid webhook signature required");
+    if (meta.rejection === "tampered") return err(reply, 409, "event ID was already used for a different payload");
+    if (meta.rejection === "stale") return err(reply, 400, "ServerDateTime is outside the accepted window");
+    // A duplicate is acknowledged: the simulator retried a delivery we already have, and
+    // answering with an error would only make it retry again.
+    if (meta.rejection && meta.rejection !== "duplicate" && mode === "strict") {
+      return err(reply, 401, "valid webhook signature required");
+    }
     return { ok: true };
   });
 
@@ -398,6 +437,30 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
   app.get("/api/users", admin, async (): Promise<UsersResponse> => ({ items: store.listUsers() }));
   app.get<{ Querystring: { limit?: string } }>("/api/audit", admin, async (req) => ({ items: store.listAudit(Number(req.query.limit) || 100) }));
   app.get<{ Querystring: { limit?: string } }>("/api/security/login-attempts", admin, async (req) => ({ items: store.listLoginAttemptsForAdmin(Number(req.query.limit) || 100) }));
+
+  /**
+   * Every delivery the parking network made, with the reason it was refused - the
+   * "invalid / duplicated / tampered requests" admin view the brief asks for. Admin only:
+   * the payloads contain plates and signatures.
+   */
+  app.get<{ Querystring: { rejection?: string; class?: string; source?: string; q?: string; since?: string; until?: string; limit?: string; offset?: string } }>(
+    "/api/security/deliveries", admin, async (req, reply): Promise<DeliveriesResponse | ApiError> => {
+      const rejection = req.query.rejection;
+      if (rejection && rejection !== "any" && !DELIVERY_REJECTIONS.includes(rejection as DeliveryRejection)) {
+        return err(reply, 400, `rejection must be "any" or one of ${DELIVERY_REJECTIONS.join(", ")}`);
+      }
+      const page = store.listDeliveries({
+        rejection: rejection as DeliveryRejection | "any" | undefined, eventClass: req.query.class,
+        source: req.query.source, search: req.query.q, since: req.query.since, until: req.query.until,
+        limit: Number(req.query.limit) || 100, offset: Number(req.query.offset) || 0,
+      });
+      return { ...page, counts: store.deliveryCounts({ since: req.query.since, until: req.query.until }) };
+    });
+
+  /** Live intake counters (this process) next to the durable ones above. */
+  app.get("/api/security/intake", admin, async () => ({ ...intake.stats, last_sequence_id: intake.lastSeq,
+    signature_mode: cfg.signatureMode, replay_window_s: cfg.webhookReplayWindowS,
+    rate_limit_per_source_per_s: cfg.webhookRatePerSourcePerS }));
 
   app.post("/api/users", admin, async (req, reply) => {
     const body = jsonBody<CreateUserRequest>(req);

@@ -16,8 +16,9 @@ import { mkdirSync } from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
 import type {
-  ActionView, AuditEntryView, ComponentEventView, ComponentKind, EventView, IncidentView, IncidentStatus, LoginAttemptView,
-  MaintenanceJobView, MaintenanceStatus, PenaltyView, Role, SessionView, SimEventBase, StatsResponse, UserView,
+  ActionView, AuditEntryView, ComponentEventView, ComponentKind, DeliveryRejection, DeliveryView, EventView, IncidentView,
+  IncidentStatus, LoginAttemptView, MaintenanceJobView, MaintenanceStatus, PenaltyView, Role, SessionView, SimEventBase,
+  StatsResponse, UserView,
 } from "@gpa/shared";
 import { createHash } from "node:crypto";
 
@@ -28,6 +29,10 @@ export type EventRecord = SimEventBase & {
   _duplicate?: boolean;
   _seq_note?: string;
   _accepted?: boolean;
+  /** Where the delivery came from (caller IP), for per-source security views. */
+  _source?: string | null;
+  /** Why it was not acted on; absent/null when accepted. */
+  _rejection?: DeliveryRejection | null;
 };
 
 export interface ActionRecord {
@@ -301,9 +306,9 @@ export class Store {
     this.migrate();
     this.insEvent = this.db.prepare(`
       INSERT INTO events (event_id, seq, event_class, plate, spot, spot_type, direction, received_at, received_ms, sig,
-        accepted, duplicate, payload)
+        accepted, duplicate, payload, rejection, source, seq_note)
       VALUES (@event_id, @seq, @event_class, @plate, @spot, @spot_type, @direction, @received_at, @received_ms, @sig,
-        @accepted, @duplicate, @payload)`);
+        @accepted, @duplicate, @payload, @rejection, @source, @seq_note)`);
     this.insSession = this.db.prepare(`
       INSERT INTO sessions (visit_id, plate, car_type, status, entry_lane, exit_lane, spot, planned_minutes, arrived_at, parked_at,
         left_spot_at, exit_at, left_at, parked_seconds, charge_parking, charge_electric, charge_attempts, paid, payment_ok,
@@ -327,6 +332,15 @@ export class Store {
     if (!columns("components").has("last_event_seq")) this.db.exec("ALTER TABLE components ADD COLUMN last_event_seq INTEGER");
     this.db.exec("CREATE INDEX IF NOT EXISTS events_flow ON events (spot_type, direction, received_ms)");
     if (!columns("actions").has("actor")) this.db.exec("ALTER TABLE actions ADD COLUMN actor TEXT");
+    // Level 3 §7.7: every delivery keeps why it was refused and who sent it, so the
+    // security page can list invalid/duplicate/tampered requests with their evidence.
+    if (!events.has("rejection")) {
+      this.db.exec(`ALTER TABLE events ADD COLUMN rejection TEXT; ALTER TABLE events ADD COLUMN source TEXT;
+        ALTER TABLE events ADD COLUMN seq_note TEXT;
+        UPDATE events SET rejection = CASE WHEN accepted = 1 THEN NULL WHEN duplicate = 1 THEN 'duplicate'
+          WHEN sig = 'invalid' THEN 'bad_signature' WHEN sig = 'unsigned' THEN 'unsigned' END;`);
+    }
+    this.db.exec("CREATE INDEX IF NOT EXISTS events_rejection ON events (rejection, received_ms)");
   }
 
   // ---------------------------------------------------------------------------
@@ -379,6 +393,53 @@ export class Store {
     const row = this.db.prepare("SELECT payload_hash FROM event_identities WHERE event_id = ?").get(eventId) as { payload_hash: string } | undefined;
     if (!row) return "new";
     return row.payload_hash === payloadHash(payload) ? "duplicate" : "conflict";
+  }
+
+  /**
+   * Raw deliveries for the security page (Level 3 §7.7). Rejected ones are kept whole,
+   * payload included: they are the evidence for "invalid / duplicated / tampered".
+   * `rejection: "any"` means every refused delivery whatever the reason.
+   */
+  listDeliveries(opts: {
+    rejection?: DeliveryRejection | "any"; eventClass?: string; source?: string; search?: string;
+    since?: string; until?: string; limit?: number; offset?: number;
+  } = {}): { items: DeliveryView[]; total: number; limit: number; offset: number } {
+    const limit = Math.min(Math.max(opts.limit ?? 100, 1), 500);
+    const offset = Math.max(opts.offset ?? 0, 0);
+    const where: string[] = [], params: Record<string, unknown> = {};
+    if (opts.rejection === "any") where.push("rejection IS NOT NULL");
+    else if (opts.rejection) { where.push("rejection = @rejection"); params.rejection = opts.rejection; }
+    if (opts.eventClass) { where.push("event_class = @cls"); params.cls = opts.eventClass; }
+    if (opts.source) { where.push("source = @source"); params.source = opts.source; }
+    // One box on the page: an EventId, a plate or anything else in the payload.
+    if (opts.search) { where.push("(event_id LIKE @q OR plate LIKE @q OR payload LIKE @q)"); params.q = `%${opts.search}%`; }
+    if (opts.since) { where.push("received_ms >= @since"); params.since = Date.parse(opts.since); }
+    if (opts.until) { where.push("received_ms <= @until"); params.until = Date.parse(opts.until); }
+    const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+    const total = (this.db.prepare(`SELECT count(*) n FROM events ${clause}`).get(params) as { n: number }).n;
+    const rows = this.db.prepare(`SELECT id, event_id, event_class, source, received_at, sig, accepted, duplicate,
+      rejection, seq, seq_note, payload FROM events ${clause} ORDER BY id DESC LIMIT @limit OFFSET @offset`)
+      .all({ ...params, limit, offset }) as Record<string, unknown>[];
+    return {
+      total, limit, offset,
+      items: rows.map((r) => ({
+        id: r.id as number, received_at: r.received_at as string, event_id: (r.event_id as string | null) ?? null,
+        event_class: r.event_class as string, source: (r.source as string | null) ?? null, sig: (r.sig as string | null) ?? null,
+        accepted: !!r.accepted, duplicate: !!r.duplicate, rejection: (r.rejection as DeliveryRejection | null) ?? null,
+        seq: (r.seq as number | null) ?? null, seq_note: (r.seq_note as string | null) ?? null,
+        payload: JSON.parse(String(r.payload ?? "{}")),
+      })),
+    };
+  }
+
+  /** How many deliveries had each outcome, over the same time filter as listDeliveries. */
+  deliveryCounts(range: { since?: string; until?: string } = {}): Record<string, number> {
+    const where: string[] = [], params: Record<string, unknown> = {};
+    if (range.since) { where.push("received_ms >= @since"); params.since = Date.parse(range.since); }
+    if (range.until) { where.push("received_ms <= @until"); params.until = Date.parse(range.until); }
+    const rows = this.db.prepare(`SELECT COALESCE(rejection, 'accepted') AS outcome, count(*) n FROM events
+      ${where.length ? `WHERE ${where.join(" AND ")}` : ""} GROUP BY outcome`).all(params) as { outcome: string; n: number }[];
+    return Object.fromEntries(rows.map((r) => [r.outcome, r.n]));
   }
 
   recordLoginAttempt(input: { username: string; userId?: number | null; ok: boolean; ip?: string | null; reason?: string | null }): number {
@@ -548,7 +609,7 @@ export class Store {
   // writes
   // ---------------------------------------------------------------------------
   recordEvent(r: EventRecord): void {
-    const { _received_at, _sig, _duplicate, _accepted, _seq_note, ...payload } = r;
+    const { _received_at, _sig, _duplicate, _accepted, _seq_note, _source, _rejection, ...payload } = r;
     const seq = Number(payload.SequenceId);
     const text = (v: unknown) => (typeof v === "string" ? v : null);
     this.insEvent.run({
@@ -565,6 +626,9 @@ export class Store {
       accepted: _accepted === false ? 0 : 1,
       duplicate: _duplicate ? 1 : 0,
       payload: JSON.stringify(payload),
+      rejection: _rejection ?? null,
+      source: _source ?? null,
+      seq_note: _seq_note || null,
     });
     // A rejected delivery is still in the raw event log, but must not reserve its
     // identity. Otherwise an unsigned/invalid request could block the later valid

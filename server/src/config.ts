@@ -51,6 +51,24 @@ const schema = z.object({
   /** Level 2 webhooks are expected to arrive from the local simulator process. */
   webhookLoopbackOnly: bool().default(false),
 
+  // ---- webhook ingress security (Level 3, see webhook.ts) --------------------
+  // Duplicate and tampered detection is durable: event_identities holds the payload hash
+  // of the first delivery of every EventId, so it survives a restart. This cache only
+  // saves the lookup for ids seen since startup; it is never the authority.
+  webhookDedupeCacheSize: num().int().min(0).default(5000),
+  // Replay protection. A delivery whose ServerDateTime is more than this many seconds
+  // from our clock is recorded and refused. 0 = off, which is the default: ServerDateTime
+  // is the simulator machine's wall clock, so a clock that disagrees with ours would
+  // otherwise reject every event. Turn it on (300 is sensible) once you have seen from
+  // `report:level` that the two clocks agree.
+  webhookReplayWindowS: num().nonnegative().default(0),
+  // Per-source ceiling on deliveries. 0 = off (the default): three Level 3 car emitters
+  // burst legitimately, and throttling the simulator loses events we would rather queue.
+  // Set it only to protect against something that is not the simulator.
+  webhookRatePerSourcePerS: num().nonnegative().default(0),
+  // How far above the per-second rate a genuine burst may go before it is refused.
+  webhookRateBurst: num().int().min(1).default(200),
+
   // ---- site layout ----------------------------------------------------------
   topologyDir: repoPath().default(path.resolve(REPO_ROOT, "topology")),
   // Optional: the simulator's settings folder (contains lvl*.json). When no topology

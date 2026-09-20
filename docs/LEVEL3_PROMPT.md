@@ -65,8 +65,9 @@ Paste the block below into Devin as the task. It assumes Devin has the repo and 
 >    signals listed in the context file, take the spot out of allocation, record an incident
 >    with evidence and confidence plus a `maintenance_jobs` row, show it on the dashboard, and
 >    return the spot to service automatically once it reads clean (or on operator action).
->    Implement it as our own soft lock; if the Level 3 API turns out to have a maintenance
->    endpoint, call it behind a flag — ask me, do not guess.
+>    **The simulator has no maintenance endpoint** (probed live — `repair` is the only spot
+>    command, see §7.2), so this is entirely our own soft lock: it must survive a restart and
+>    must not be cleared by a resync.
 > 4. **Double-parking early warning (§7.9)** and **vehicle locator (§7.10).** Detect both
 >    double-parking cases, warn before the simulator fines us where possible. For the locator:
 >    one endpoint + search page returning where a car is now, where it was assigned versus
@@ -108,7 +109,10 @@ Paste the block below into Devin as the task. It assumes Devin has the repo and 
 
 * Devin has no simulator, so items **1, 2, 5, 7** are the ones it can finish properly on its
   own; **3, 4, 6, 8** will need one live run each from the team to confirm.
-* Answer §9 of the context file for Devin as soon as you can — especially whether
-  `goto <plate> <ExitSpotName>` works, since item 6 depends on it.
+* §9 question 1 (maintenance endpoint) is answered — no such endpoint exists. The one still
+  worth answering before Devin reaches item 6 is whether `goto <plate> <ExitSpotName>` steers a
+  car to a chosen exit. To check it safely, use the 405-vs-404 trick from §7.2: a GET to
+  `/api/v1/car/{plate}/goto/Exit187` returning 405 means the route accepts it; whether the
+  *simulator* honours a specific exit still needs one car watched live.
 * Keep `GPA_SIGNATURE_MODE=strict` and re-run `report:penalties` after each merged PR; the
   penalty count is the only real score.
