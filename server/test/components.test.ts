@@ -432,3 +432,164 @@ describe("lights", () => {
     expect(lightCalls(always.sim)).toEqual([["group-on", "G1"]]);
   });
 });
+
+describe("manual control of fans and lights", () => {
+  // Same contract as a gate: On/Off hold the part where the operator put it, Automatic
+  // hands it back. Anything the simulator would fine us for is refused with the reason.
+  const rig = async (cfg: Record<string, unknown> = {}) => {
+    const sim = FakeSim.lvl1();
+    sim.fans = [{ name: "fan0", zoneParent: "ZONE1", broken: false, isUnderMaintenance: false, isOn: false }];
+    sim.lights = [{ name: "l1", group: "G1", zoneParent: "ZONE1", isOn: false }];
+    const ctx = await make({ sim, cfg: { gameSpeed: 1, lightsDetail: "group" as const, ...cfg } });
+    return ctx;
+  };
+  const calls = (sim: FakeSim, prefix: string) => sim.calls.filter((x) => x[0].startsWith(prefix));
+  const holds = (c: Awaited<ReturnType<typeof rig>>["c"]) =>
+    (c.snapshot().environment?.holds ?? []).map((h) => `${h.kind}:${h.name}=${h.hold}`);
+
+  it("switches a light on and keeps it on against the automatic rules", async () => {
+    const { c, sim, advance } = await rig();
+    expect(await c.manualDevice("light", "l1", "on", "alice")).toMatchObject({ ok: true });
+    expect(calls(sim, "light-on")).toEqual([["light-on", "l1"]]);
+    expect(holds(c)).toEqual(["light:l1=on"]);
+
+    // Daytime would normally switch every light off; the hold survives it.
+    await c.handle(carEv("A", "ENTRY1", "CarIn", "12:00:00"));
+    advance(c.cfg.lightsIdleOffGameS + 1);
+    await c.tick();
+    expect(calls(sim, "light-off")).toEqual([]);
+    expect(calls(sim, "group-off")).toEqual([]);
+  });
+
+  it("hands a light back to the daylight rules on auto", async () => {
+    const { c, sim } = await rig();
+    await c.manualDevice("light", "l1", "on", "alice");
+    sim.calls.length = 0;
+    expect(await c.manualDevice("light", "l1", "auto", "alice")).toMatchObject({ ok: true });
+    expect(holds(c)).toEqual([]);
+    await c.tick(); // daytime, nothing moving: the light goes off again
+    expect(calls(sim, "group-off").length + calls(sim, "light-off").length).toBeGreaterThan(0);
+  });
+
+  it("holds a fan on even though its zone is clean", async () => {
+    const { c, sim, advance } = await rig();
+    sim.zones = [{ name: "ZONE1", gasCarbonMonoxideLevel: 5, risk: "Safe" }];
+    expect(await c.manualDevice("fan", "fan0", "on", "alice")).toMatchObject({ ok: true });
+    expect(calls(sim, "fan-on")).toEqual([["fan-on", "fan0"]]);
+    advance(c.cfg.coPollGameS * 2);
+    await c.tick();
+    expect(calls(sim, "fan-off")).toEqual([]); // an idle fan only costs wear: the hold stands
+  });
+
+  it("refuses to switch a fan off while its zone is above the CO level", async () => {
+    const { c, sim, advance } = await rig();
+    sim.zones = [{ name: "ZONE1", gasCarbonMonoxideLevel: 70, risk: "Mid" }];
+    await c.handle(carEv("A", "S1", "CarIn", "10:00:00"));
+    await c.tick();
+    expect(calls(sim, "fan-on")).toEqual([["fan-on", "fan0"]]);
+
+    const res = await c.manualDevice("fan", "fan0", "off", "alice");
+    expect(res.ok).toBe(false);
+    expect(res.message).toMatch(/CO level/);
+    expect(holds(c)).toEqual([]);
+    void advance;
+  });
+
+  it("releases a fan held off once its zone goes bad - ventilation is a safety function", async () => {
+    const { c, sim, advance } = await rig();
+    sim.zones = [{ name: "ZONE1", gasCarbonMonoxideLevel: 5, risk: "Safe" }];
+    expect(await c.manualDevice("fan", "fan0", "off", "alice")).toMatchObject({ ok: true });
+    expect(holds(c)).toEqual(["fan:fan0=off"]);
+
+    sim.zones = [{ name: "ZONE1", gasCarbonMonoxideLevel: 70, risk: "Mid" }];
+    await c.handle(carEv("A", "S1", "CarIn", "10:00:00"));
+    advance(c.cfg.coPollGameS);
+    await c.tick();
+    expect(holds(c)).toEqual([]);
+    expect(calls(sim, "fan-on")).toEqual([["fan-on", "fan0"]]);
+  });
+
+  it("never operates a part that is out of service, and reports unknown ones", async () => {
+    const { c, sim } = await rig();
+    await c.handle(broken("ExhaustFan", "fan0"));
+    // A breakdown starts a repair at once, so by now it is "maintenance" rather than
+    // "broken" - operating it is a penalty either way, which is what is refused.
+    const res = await c.manualDevice("fan", "fan0", "on", "alice");
+    expect(res.ok).toBe(false);
+    expect(res.message).toMatch(/penalty/);
+    expect(calls(sim, "fan-on")).toEqual([]);
+    expect(await c.manualDevice("light", "nope", "on", "alice")).toMatchObject({ ok: false });
+  });
+
+  it("records who did it in the audit trail", async () => {
+    const { c, store } = await rig();
+    await c.manualDevice("light", "l1", "on", "alice");
+    const row = store.db.prepare("SELECT args, actor FROM actions WHERE cmd = 'light-on'").get() as { actor: string };
+    expect(row.actor).toBe("alice");
+  });
+});
+
+describe("repairing fans and lights", () => {
+  const rig = async () => {
+    const sim = FakeSim.lvl1();
+    sim.fans = [{ name: "f_0", zoneParent: "ZONE1", broken: false, isUnderMaintenance: false, isOn: false }];
+    sim.lights = [{ name: "t_0", group: "G1", zoneParent: "ZONE1", isOn: false }];
+    return make({ sim, cfg: { gameSpeed: 1, lightsDetail: "group" as const } });
+  };
+
+  it("repairs a fan through the simulator", async () => {
+    const { c, sim } = await rig();
+    expect(await c.manualComponentRepair("fan", "f_0", "alice")).toMatchObject({ ok: true });
+    expect(repairs(sim)).toEqual([["repair", "f_0"]]);
+    expect(c.components.usable("fan", "f_0")).toBe(false); // under repair
+  });
+
+  it("refuses to repair a running fan - that is a penalty", async () => {
+    const { c, sim } = await rig();
+    await c.manualDevice("fan", "f_0", "on", "alice");
+    sim.calls.length = 0;
+    const res = await c.manualComponentRepair("fan", "f_0", "alice");
+    expect(res.ok).toBe(false);
+    expect(res.message).toMatch(/operating/);
+    expect(repairs(sim)).toEqual([]);
+  });
+
+  /**
+   * Verified against the simulator on 2026-09-20: POST /lights/{name}/repair,
+   * /lights/group/{g}/repair and /lights/{name}/fix all answer 404, while
+   * /exhaust-fans/{name}/repair answers 201. So a faulty light is put on record instead.
+   */
+  it("records a faulty light as an incident, since the simulator cannot repair one", async () => {
+    const { c, sim, store } = await rig();
+    const res = await c.manualComponentRepair("light", "t_0", "alice");
+    expect(res.ok).toBe(true);
+    expect(res.message).toMatch(/incident #\d+/);
+    expect(repairs(sim)).toEqual([]); // no command was invented for it
+
+    const [incident] = store.listIncidents({ status: "open" });
+    expect(incident).toMatchObject({ kind: "light_fault", component: "t_0", zone: "ZONE1", status: "open" });
+    expect(incident.reason).toContain("alice");
+  });
+
+  it("points at the incident already open instead of raising duplicates", async () => {
+    const { c, store } = await rig();
+    const first = await c.manualComponentRepair("light", "t_0", "alice");
+    const again = await c.manualComponentRepair("light", "t_0", "bob");
+    expect(again.message).toMatch(/already reported/);
+    expect(again.message).toContain(first.message.match(/#(\d+)/)![0]);
+    expect(store.listIncidents({ status: "open" })).toHaveLength(1);
+  });
+
+  it("writes the report to the audit trail", async () => {
+    const { c, store } = await rig();
+    await c.manualComponentRepair("light", "t_0", "alice");
+    const entry = store.listAudit(50).find((a) => a.action === "light.fault_reported");
+    expect(entry).toMatchObject({ actor: "alice", target: "t_0", ok: true });
+  });
+
+  it("reports an unknown part rather than guessing", async () => {
+    const { c } = await rig();
+    expect(await c.manualComponentRepair("light", "nope", "alice")).toMatchObject({ ok: false });
+    expect(await c.manualComponentRepair("fan", "nope", "alice")).toMatchObject({ ok: false });
+  });
+});

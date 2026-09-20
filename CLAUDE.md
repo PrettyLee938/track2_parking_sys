@@ -141,7 +141,26 @@ crossing an empty one does. Want = night && a car is driving in that zone.
 - On-time is usage in game hours, like fans. Snapshot: `subsystems.environment.lights`
   {on,total,mode,detail,night,hour,reason} + per-zone lights_on/lights.
 - Tests: `test/components.test.ts` describe "lights" (11), `test/lights.test.ts` (6 geometry).
-- **Still to do**: show it in `web/.../health.tsx` and `tools/live.ts`; verify live at night
+- **Manual control** (like gates): `POST /api/control/devices/(fan|light)/:name/(on|off|auto)`,
+  operator+, audited as `fan.on` etc. On/Off take a part out of automatic control until
+  Automatic hands it back; holds live in `Environment.holds` and show in
+  `subsystems.environment.holds`. Dashboard: "Fans & lights" card on the Equipment page with
+  On/Off/Automatic per part plus "Return all N to automatic". A hold *on* always stands (an
+  idle fan only costs wear), but a fan held OFF is refused - and released if it is already
+  held - while its zone is above the CO level: that is the "High CO gas level" penalty.
+  Routing: `Subsystem.control()` returns null for parts it does not own, so the controller
+  offers the command to each subsystem in turn (gates and spots stay on the controller).
+- **Repair**: fans repair normally (`/exhaust-fans/{n}/repair`), refused while running.
+  **Lights cannot be repaired at all** - probed live 2026-09-20: `/lights/{n}/repair`,
+  `/lights/group/{g}/repair` and `/lights/{n}/fix` all 404 while the fan one answers 201.
+  So "Report fault" on a light raises an open `light_fault` incident (one per light, audited
+  as `light.fault_reported`) instead of inventing a command. Both buttons live in the
+  Fans & lights card and in the Equipment health table.
+- Names mean nothing: lights are `t_0..t_11` and `light13..light41`, fans `f_0/f_1` and
+  `fan0..fan9` - two naming batches from the level editor. The level file's `LightType`
+  agrees exactly with our geometry: every `Spot` light is an aisle light, every `Wall` one
+  is over the bays (30/30 on lvl2).
+- **Still to do**: show it in `tools/live.ts`; verify live at night
   (or with `GPA_LIGHTS_MODE=always`) that the right lights follow the cars.
 
 ## Other open items
