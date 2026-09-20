@@ -232,32 +232,35 @@ export class Environment implements Subsystem {
       return held ? held.hold === "on" : this.litUntilG.has(name);
     };
     if (engine.cfg.lightsDetail === "group" || !this.placement) {
-      // One command per zone: a group is lit if anything in it is wanted.
-      const groups = new Map<string, { want: boolean; names: string[] }>();
-      for (const l of lights) {
-        const g = groups.get(l.group ?? "") ?? { want: false, names: [] };
-        g.want ||= on(l.name);
-        g.names.push(l.name);
-        groups.set(l.group ?? "", g);
-      }
-      for (const [group, g] of groups) {
-        if (!group) continue;
-        const usable = g.names.filter((n) => engine.components.usable("light", n));
-        if (!usable.length || usable.every((n) => engine.components.get("light", n)?.on === g.want)) continue;
-        // A group command operates every light in the group, including a broken one - which
-        // is a penalty. With one out of service, switch the rest individually instead.
-        if (usable.length < g.names.length) {
-          for (const n of usable) {
-            if (engine.components.get("light", n)?.on === g.want) continue;
-            const one = await engine.cmd(g.want ? "light-on" : "light-off",
-              () => g.want ? engine.sim.lightOn(n) : engine.sim.lightOff(n), [n]);
-            if (one) engine.components.setOn("light", n, g.want);
-          }
+      // One command per group, but only while the whole group agrees. A group command
+      // operates every light in it, so it cannot express "all on except this one" - it
+      // used to undo an operator's hold on the very next tick, which is why a single
+      // light could not be switched at all from the dashboard (reported 2026-09-20).
+      // It also operates a broken light, which is a penalty. Either way: one by one.
+      const groups = new Map<string, string[]>();
+      for (const l of lights) groups.set(l.group ?? "", [...(groups.get(l.group ?? "") ?? []), l.name]);
+
+      for (const [group, names] of groups) {
+        const usable = names.filter((n) => engine.components.usable("light", n));
+        if (!usable.length) continue;
+        const want = on(usable[0]);
+        // An ungrouped light ("" from list-lights) has no group command of its own.
+        const asGroup = group !== "" && usable.length === names.length && usable.every((n) => on(n) === want);
+        if (asGroup) {
+          if (usable.every((n) => engine.components.get("light", n)?.on === want)) continue;
+          const ok = await engine.cmd(want ? "light-group-on" : "light-group-off",
+            () => want ? engine.sim.lightGroupOn(group) : engine.sim.lightGroupOff(group), [group]);
+          if (ok) for (const n of usable) engine.components.setOn("light", n, want);
           continue;
         }
-        const ok = await engine.cmd(g.want ? "light-group-on" : "light-group-off",
-          () => g.want ? engine.sim.lightGroupOn(group) : engine.sim.lightGroupOff(group), [group]);
-        if (ok) for (const n of usable) engine.components.setOn("light", n, g.want);
+        for (const n of usable) {
+          const one = on(n);
+          if (engine.components.get("light", n)?.on === one) continue;
+          if (await engine.cmd(one ? "light-on" : "light-off",
+            () => one ? engine.sim.lightOn(n) : engine.sim.lightOff(n), [n])) {
+            engine.components.setOn("light", n, one);
+          }
+        }
       }
       return;
     }

@@ -240,7 +240,9 @@ describe("exhaust fans", () => {
   it("runs a zone's fans while its CO is 50 or more, and switches them off once it drops below", async () => {
     // Spec: "better to turn off when CO levels are below 50". 2026-09-20: no CO webhook ever
     // came - only "High CO gas level" penalties (30 each) - so the level is read (list-zones).
-    const { c, sim, advance } = await make({ sim: withFans(), cfg: { gameSpeed: 1 } });
+    // Both thresholds are pinned so this tests the rule, not whatever the deployment has
+    // configured: the defaults have been retuned twice and silently broke this test.
+    const { c, sim, advance } = await make({ sim: withFans(), cfg: { gameSpeed: 1, coFanOnLevel: 50, coFanOffLevel: 50 } });
     sim.zones = zone1(20);
     await c.handle(carEv("A", "S1", "CarIn", "10:00:00")); // traffic: worth measuring
     await c.tick();
@@ -255,6 +257,26 @@ describe("exhaust fans", () => {
     await c.tick();
     expect(fanCalls(sim).slice(2)).toEqual([["fan-off", "fan0"], ["fan-off", "fan1"]]);
     expect(c.components.get("fan", "fan0")!.uses).toBeGreaterThan(0); // on-hours count as wear
+  });
+
+  it("keeps venting between the two thresholds so the fans do not chatter", async () => {
+    // The shipped band is on at 50, off below 40: a reading in between must change nothing,
+    // or a zone hovering around 50 would switch its fans on and off every poll.
+    const { c, sim, advance } = await make({ sim: withFans(), cfg: { gameSpeed: 1, coFanOnLevel: 50, coFanOffLevel: 40 } });
+    sim.zones = zone1(55);
+    await c.handle(carEv("A", "S1", "CarIn", "10:00:00"));
+    await c.tick();
+    expect(fanCalls(sim)).toEqual([["fan-on", "fan0"], ["fan-on", "fan1"]]);
+
+    sim.zones = zone1(45); // inside the band: still venting
+    advance(c.cfg.coPollGameS);
+    await c.tick();
+    expect(fanCalls(sim)).toHaveLength(2);
+
+    sim.zones = zone1(39); // below the off level at last
+    advance(c.cfg.coPollGameS);
+    await c.tick();
+    expect(fanCalls(sim).slice(2)).toEqual([["fan-off", "fan0"], ["fan-off", "fan1"]]);
   });
 
   it("does not poll CO while nothing moves and no fan runs", async () => {
@@ -461,6 +483,41 @@ describe("manual control of fans and lights", () => {
     expect(calls(sim, "group-off")).toEqual([]);
   });
 
+  /**
+   * The group command is all-or-nothing, so it cannot say "all on except this one". While
+   * the whole group was switched together it undid the hold on the very next tick, and a
+   * light could not be held off at all from the dashboard (reported 2026-09-20). With the
+   * group split, the lights are switched one by one instead.
+   */
+  it("holds one light off while the rest of its group is lit", async () => {
+    const sim = FakeSim.lvl1();
+    sim.lights = ["l1", "l2", "l3"].map((name) => ({ name, group: "G1", zoneParent: "ZONE1", isOn: false }));
+    const { c, advance } = await make({ sim, cfg: { gameSpeed: 1, lightsDetail: "group" as const } });
+
+    await c.handle(carEv("A", "ENTRY1", "CarIn", "22:00:00")); // night: the zone wants light
+    await c.tick();
+    expect(sim.calls).toContainEqual(["group-on", "G1"]);
+
+    expect(await c.manualDevice("light", "l2", "off", "alice")).toMatchObject({ ok: true });
+    sim.calls.length = 0;
+    advance(1);
+    await c.tick();
+
+    // The tick must not reach for the group command again - that would switch l2 back on.
+    expect(sim.calls.filter((x) => x[0] === "group-on")).toEqual([]);
+    expect(c.components.get("light", "l2")!.on).toBe(false);
+    expect(c.components.get("light", "l1")!.on).toBe(true);
+  });
+
+  it("switches an ungrouped light individually rather than skipping it", async () => {
+    const sim = FakeSim.lvl1();
+    sim.lights = [{ name: "loose", group: "", zoneParent: "ZONE1", isOn: false }];
+    const { c } = await make({ sim, cfg: { gameSpeed: 1, lightsDetail: "group" as const } });
+    await c.handle(carEv("A", "ENTRY1", "CarIn", "22:00:00"));
+    await c.tick();
+    expect(sim.calls.filter((x) => /^(light|group)-/.test(x[0]))).toEqual([["light-on", "loose"]]);
+  });
+
   it("hands a light back to the daylight rules on auto", async () => {
     const { c, sim } = await rig();
     await c.manualDevice("light", "l1", "on", "alice");
@@ -585,6 +642,26 @@ describe("repairing fans and lights", () => {
     await c.manualComponentRepair("light", "t_0", "alice");
     const entry = store.listAudit(50).find((a) => a.action === "light.fault_reported");
     expect(entry).toMatchObject({ actor: "alice", target: "t_0", ok: true });
+  });
+
+  /**
+   * The button raised an incident and nothing else, so the Maintenance page never changed
+   * and it read as a dead button (reported 2026-09-20). A light is the one part with no
+   * repair command, so the job stays waiting for clearance: nothing will complete it.
+   */
+  it("shows the report in the maintenance history", async () => {
+    const { c, store } = await rig();
+    await c.manualComponentRepair("light", "t_0", "alice");
+    const job = store.listMaintenanceJobs(50).find((j) => j.component_name === "t_0");
+    expect(job).toMatchObject({ component_kind: "light", status: "waiting_for_clearance", actor: "alice" });
+    expect(job!.reason).toMatch(/no light repair command/);
+  });
+
+  it("does not stack a second job on the same light", async () => {
+    const { c, store } = await rig();
+    await c.manualComponentRepair("light", "t_0", "alice");
+    await c.manualComponentRepair("light", "t_0", "bob");
+    expect(store.listMaintenanceJobs(50).filter((j) => j.component_name === "t_0")).toHaveLength(1);
   });
 
   it("reports an unknown part rather than guessing", async () => {

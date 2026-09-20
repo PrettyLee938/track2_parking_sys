@@ -1858,7 +1858,7 @@ export class Controller implements Engine {
   private reportLightFault(part: { name: string; zone: string }, actor: string): ControlResult {
     const open = this.store.listIncidents({ status: "open", limit: 1000 })
       .find((i) => i.kind === "light_fault" && i.component === part.name);
-    if (open) return ok(`${part.name} is already reported - incident #${open.id}`);
+    if (open) return ok(`${part.name} was already reported - incident #${open.id} is still open`);
 
     const incident = this.store.createIncident({
       status: "open",
@@ -1868,6 +1868,14 @@ export class Controller implements Engine {
       reason: `${part.name} reported faulty by ${actor}; the simulator has no light repair endpoint`,
       confidence: "high",
       evidence: { reported_by: actor, health: this.components.health(this.components.get("light", part.name)!) },
+    });
+    // Also a maintenance job, so the report lands where an operator looks for it. Without
+    // one, "Report fault" changed nothing on the Maintenance page and looked like a dead
+    // button (reported 2026-09-20). It waits for clearance because no repair can follow it.
+    this.store.createMaintenanceJob({
+      kind: "light", name: part.name, zone: part.zone || null, status: "waiting_for_clearance",
+      reason: "reported faulty - the simulator has no light repair command", actor,
+      evidence: { incident: incident.id },
     });
     this.store.recordAudit({ actor, action: "light.fault_reported", target: part.name, ok: true });
     this.note("warn", `${actor} reported light ${part.name} faulty - incident #${incident.id}`);
