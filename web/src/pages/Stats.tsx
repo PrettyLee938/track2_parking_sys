@@ -53,6 +53,7 @@ export function StatsBody({ d, spots }: { d: StatsResponse; spots: SpotView[] })
         <Tile label="Penalties" value={fmtInt(t.penalties)} sub={t.penalties ? `${fmtMoney(t.fines)} in fines` : "None"} tone={t.penalties ? "critical" : "good"} />
         <Tile label="Payment problems" value={fmtInt(t.payment_mismatches + t.escaped)}
           sub={`${t.payment_mismatches} wrong amount · ${t.escaped} left unpaid`} tone={t.payment_mismatches + t.escaped ? "critical" : "good"} />
+        <Tile label="Duplicate payments" value={fmtInt(t.duplicate_payments ?? 0)} sub="ignored after an earlier payment" tone={t.duplicate_payments ? "warning" : "good"} />
         <Tile label="Records lost" value={fmtInt(t.lost)} sub="closing event never arrived" />
       </section>
 

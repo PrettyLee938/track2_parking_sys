@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { computeSignature } from "../src/webhook";
-import { carEv, FakeSim, feed, fireTimers, gate, make, spot, testServer } from "./helpers";
+import { carEv, FakeSim, feed, fireTimers, gate, make, parkAndReachExit, payEv, spot, testServer } from "./helpers";
 import type { EventRecord } from "../src/store";
 
 const broken = (type: string, name: string): EventRecord => ({
@@ -63,6 +63,21 @@ describe("Level 3 resilience and control", () => {
     expect(sim.gotos()).toContainEqual(["goto", "A", "EXIT2"]);
     expect(c.counters.gate_failovers).toBe(1);
     expect(store.listIncidents({ status: "open" }).some((i) => i.kind === "gate_failover")).toBe(true);
+  });
+
+  it("does not count or release a duplicate payment delivered with a new event ID", async () => {
+    const { c, sim, store } = await make({ sim: FakeSim.lvl1(), cfg: { levelProfile: "level3" } });
+    await parkAndReachExit(c);
+    await fireTimers(c);
+    const car = c.cars.get("A")!;
+    const payment = payEv("A", (car.charge_parking ?? 0) + (car.charge_electric ?? 0));
+    await c.handle(payment);
+    const revenue = c.counters.revenue;
+    const releases = sim.gotos().filter((call) => call[2] === "leavepark").length;
+    await c.handle({ ...payment, EventId: "a-second-payment-event" });
+    expect(c.counters.revenue).toBe(revenue);
+    expect(sim.gotos().filter((call) => call[2] === "leavepark")).toHaveLength(releases);
+    expect(store.listIncidents({ status: "open" }).some((i) => i.kind === "duplicate_payment")).toBe(true);
   });
 
   it("keeps duplicate and tampered webhook requests visible under concurrent delivery", async () => {

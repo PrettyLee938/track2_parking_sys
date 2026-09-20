@@ -79,7 +79,7 @@ export function Equipment({ s }: { s: StateSnapshot }) {
                   <td><Badge tone={healthTone(c.health)}>{c.health}{c.maintenance_due ? " · due" : ""}</Badge></td>
                   <td className="right">{fmtInt(c.uses)} <span className="muted">({fmtInt(c.uses_total)} total)</span></td>
                   <td className="right">{c.breakdowns}</td><td>{c.last_fixed_at ? fmtDateTime(c.last_fixed_at) : c.last_broken_at ? `broken ${fmtDateTime(c.last_broken_at)}` : "-"}</td>
-                  <td className="right">{can("operator") && c.kind !== "light" && c.health !== "maintenance" &&
+                  <td className="right">{can("maintenance") && c.kind !== "light" && c.health !== "maintenance" &&
                     <Button small variant="danger" disabled={!!c.waiting && /occupied|driving|reserved/.test(c.waiting)} busy={busy === `${c.kind}:${c.name}`} onClick={() => repair(c)}>Repair</Button>}</td>
                 </tr>
               ))}</tbody>

@@ -42,7 +42,7 @@ function Users() {
   };
 
   return (
-    <Card title="Users" subtitle="Operators can monitor and control gates and spots; admins can also manage users, entrances and the site">
+    <Card title="Users" subtitle="Maintenance can view and repair equipment; operators control traffic; admins manage users, entrances and the site">
       <div className="table-wrap">
         <table className="data">
           <thead><tr><th>User</th><th>Role</th><th>Status</th><th>Last sign-in</th><th>Created</th><th className="right">Actions</th></tr></thead>
@@ -53,6 +53,7 @@ function Users() {
                 <td>
                   <select value={u.role} aria-label={`Role of ${u.username}`}
                     onChange={(e) => update(u, { role: e.target.value as Role }, `${u.username} is now ${e.target.value}`)}>
+                    <option value="maintenance">Maintenance</option>
                     <option value="operator">Operator</option>
                     <option value="admin">Admin</option>
                   </select>
@@ -105,6 +106,7 @@ function CreateUser({ onCreated }: { onCreated: () => void }) {
       <input type="password" placeholder="Password (8+ characters)" value={password} onChange={(e) => setPassword(e.target.value)} required
         minLength={8} autoComplete="new-password" aria-label="New password" />
       <select value={role} onChange={(e) => setRole(e.target.value as Role)} aria-label="New user's role">
+        <option value="maintenance">Maintenance</option>
         <option value="operator">Operator</option>
         <option value="admin">Admin</option>
       </select>

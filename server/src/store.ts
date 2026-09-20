@@ -41,6 +41,8 @@ export interface ActionRecord {
   actor?: string | null;
 }
 
+export type PaymentWriteResult = "inserted" | "duplicate";
+
 export interface UserRow extends UserView {
   password_hash: string;
 }
@@ -106,7 +108,7 @@ CREATE TABLE IF NOT EXISTS users (
   id             INTEGER PRIMARY KEY,
   username       TEXT NOT NULL UNIQUE COLLATE NOCASE,
   password_hash  TEXT NOT NULL,
-  role           TEXT NOT NULL CHECK (role IN ('admin', 'operator')),
+  role           TEXT NOT NULL CHECK (role IN ('admin', 'operator', 'maintenance')),
   disabled       INTEGER NOT NULL DEFAULT 0,
   created_at     TEXT NOT NULL,
   last_login_at  TEXT
@@ -361,6 +363,30 @@ export class Store {
     if (!columns("components").has("last_event_seq")) this.db.exec("ALTER TABLE components ADD COLUMN last_event_seq INTEGER");
     this.db.exec("CREATE INDEX IF NOT EXISTS events_flow ON events (spot_type, direction, received_ms)");
     if (!columns("actions").has("actor")) this.db.exec("ALTER TABLE actions ADD COLUMN actor TEXT");
+    const usersSql = this.db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'users'").get() as { sql?: string } | undefined;
+    if (usersSql?.sql && !/maintenance/.test(usersSql.sql)) {
+      const foreignKeysEnabled = Number(this.db.pragma("foreign_keys", { simple: true })) === 1;
+      if (foreignKeysEnabled) this.db.pragma("foreign_keys = OFF");
+      try {
+        this.db.transaction(() => {
+          this.db.exec(`CREATE TABLE users_new (
+            id INTEGER PRIMARY KEY,
+            username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+            password_hash TEXT NOT NULL,
+            role TEXT NOT NULL CHECK (role IN ('admin', 'operator', 'maintenance')),
+            disabled INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            last_login_at TEXT
+          );
+          INSERT INTO users_new (id, username, password_hash, role, disabled, created_at, last_login_at)
+            SELECT id, username, password_hash, role, disabled, created_at, last_login_at FROM users;
+          DROP TABLE users;
+          ALTER TABLE users_new RENAME TO users;`);
+        })();
+      } finally {
+        if (foreignKeysEnabled) this.db.pragma("foreign_keys = ON");
+      }
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -625,22 +651,42 @@ export class Store {
     this.db.prepare("UPDATE invoices SET status = ? WHERE invoice_id = ?").run(status, invoiceId);
   }
 
-  recordPayment(input: { eventId?: string | null; invoiceId?: string | null; visitId?: string | null; plate: string; amount: number; accepted: boolean }): void {
+  recordPayment(input: { eventId?: string | null; invoiceId?: string | null; visitId?: string | null; plate: string; amount: number; accepted: boolean }): PaymentWriteResult {
     if (input.eventId) {
-      const existing = this.db.prepare("SELECT id FROM payments WHERE event_id = ?").get(input.eventId);
-      if (existing) return;
+      const existing = this.db.prepare("SELECT id, accepted FROM payments WHERE event_id = ?").get(input.eventId) as { id: number; accepted: number } | undefined;
+      if (existing) {
+        if (input.accepted && !existing.accepted) {
+          this.db.prepare("UPDATE payments SET invoice_id = ?, visit_id = ?, plate = ?, amount = ?, accepted = 1, received_at = ? WHERE id = ?")
+            .run(input.invoiceId ?? null, input.visitId ?? null, input.plate, input.amount, new Date().toISOString(), existing.id);
+          if (input.invoiceId) this.db.prepare("UPDATE invoices SET status = 'settled', settled_at = COALESCE(settled_at, ?) WHERE invoice_id = ?")
+            .run(new Date().toISOString(), input.invoiceId);
+          return "inserted";
+        }
+        return "duplicate";
+      }
     }
     try {
       this.db.prepare(`INSERT INTO payments (event_id, invoice_id, visit_id, plate, amount, accepted, received_at)
         VALUES (?, ?, ?, ?, ?, ?, ?)`).run(input.eventId ?? null, input.invoiceId ?? null, input.visitId ?? null, input.plate,
         input.amount, input.accepted ? 1 : 0, new Date().toISOString());
     } catch (err) {
-      // The UNIQUE(invoice_id, amount) constraint is deliberate: a repeated matching
-      // payment must not become revenue or another physical passage.
+      // A fake/rejected attempt may use the same invoice and amount as the later
+      // legitimate retry. Upgrade that row in place; only an already accepted row
+      // is a duplicate business payment. The raw webhook/event log preserves the fake.
       if (!(err instanceof Error) || !/UNIQUE/i.test(err.message)) throw err;
+      const prior = input.invoiceId
+        ? this.db.prepare("SELECT id, accepted FROM payments WHERE invoice_id = ? AND amount = ?").get(input.invoiceId, input.amount) as { id: number; accepted: number } | undefined
+        : undefined;
+      if (input.accepted && prior && !prior.accepted) {
+        this.db.prepare("UPDATE payments SET event_id = ?, visit_id = ?, plate = ?, accepted = 1, received_at = ? WHERE id = ?")
+          .run(input.eventId ?? null, input.visitId ?? null, input.plate, new Date().toISOString(), prior.id);
+      } else {
+        return "duplicate";
+      }
     }
     if (input.accepted && input.invoiceId) this.db.prepare("UPDATE invoices SET status = 'settled', settled_at = COALESCE(settled_at, ?) WHERE invoice_id = ?")
       .run(new Date().toISOString(), input.invoiceId);
+    return "inserted";
   }
 
   // ---------------------------------------------------------------------------
@@ -828,7 +874,7 @@ export class Store {
         avg_planned_min: plannedN ? round(plannedSum / plannedN, 1) : 0,
         penalties: penaltyCount, fines: round(fines), payment_mismatches: mismatches, escaped,
         duplicate_requests: security.get("duplicate") ?? 0, tampered_requests: (security.get("invalid_signature") ?? 0) + (security.get("conflict") ?? 0),
-        suspicious_payments: incidents.get("suspicious_payment") ?? 0, double_parking: (incidents.get("double_parking") ?? 0) + (incidents.get("vehicle_multiple_spots") ?? 0),
+        suspicious_payments: incidents.get("suspicious_payment") ?? 0, duplicate_payments: incidents.get("duplicate_payment") ?? 0, double_parking: (incidents.get("double_parking") ?? 0) + (incidents.get("vehicle_multiple_spots") ?? 0),
         gate_failovers: incidents.get("gate_failover") ?? 0,
       },
       buckets: buckets.map((b) => ({ ...b, revenue: round(b.revenue) })),

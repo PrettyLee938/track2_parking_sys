@@ -265,7 +265,7 @@ export class Controller implements Engine {
   counters: Counters = {
     arrived: 0, admitted: 0, turned_away: 0, neglected: 0, exited: 0, revenue: 0, payment_mismatches: 0,
     repeat_exits: 0, ghosts_retired: 0, escaped: 0, penalties: 0, fines: 0, command_errors: 0, fake_payments: 0,
-    suspicious_payments: 0, duplicate_requests: 0, gate_failovers: 0, double_parking: 0,
+    suspicious_payments: 0, duplicate_payments: 0, duplicate_requests: 0, gate_failovers: 0, double_parking: 0,
   };
   /** Snapshot reads are frequent (one SSE timer per browser). A short-lived immutable
    * read model prevents a dashboard burst from rebuilding thousands of spots repeatedly. */
@@ -1091,14 +1091,32 @@ export class Controller implements Engine {
     return realS === null ? null : realS * this.timeScale;
   }
 
+  private noteDuplicatePayment(e: EventRecord, plate: string, amount: number, invoiceId?: string | null): void {
+    this.counters.duplicate_payments++;
+    const eventId = e.EventId ?? null;
+    const paymentKey = `${invoiceId ?? plate}:${amount.toFixed(2)}`;
+    this.note("warn", `DUPLICATE payment ${amount.toFixed(2)} from ${plate} ignored${invoiceId ? ` for ${invoiceId}` : ""}`);
+    if (this.replaying) return;
+    const existing = eventId
+      ? this.store.findOpenIncidentByEvidence("duplicate_payment", "event_id", eventId)
+      : this.store.findOpenIncidentByEvidence("duplicate_payment", "payment_key", paymentKey);
+    if (existing) return;
+    this.store.createIncident({ status: "open", kind: "duplicate_payment", visit_id: this.cars.get(plate)?.visit_id ?? null,
+      reason: `Payment ${amount.toFixed(2)} from ${plate} duplicated an already recorded payment`, confidence: "high",
+      evidence: { plate, amount, invoice_id: invoiceId ?? null, event_id: eventId, payment_key: paymentKey } });
+  }
   private async onPayment(e: EventRecord) {
     const plate = str(e, "CarPlateNumber")!;
     const amount = Number(e.Amount) || 0;
     const car = this.cars.get(plate);
     if (!car || car.charge_parking === null) {
       const invoice = this.store.findInvoice(car?.visit_id, plate);
-      this.store.recordPayment({ eventId: e.EventId, invoiceId: invoice?.invoice_id, visitId: car?.visit_id,
+      const paymentWrite = this.store.recordPayment({ eventId: e.EventId, invoiceId: invoice?.invoice_id, visitId: car?.visit_id,
         plate, amount, accepted: false });
+      if (paymentWrite === "duplicate") {
+        this.noteDuplicatePayment(e, plate, amount, invoice?.invoice_id);
+        return;
+      }
       this.note("warn", `payment ${amount.toFixed(2)} from ${plate} with no invoice - ignored`);
       this.counters.suspicious_payments++;
       if (!this.replaying && !this.store.findOpenIncidentByEvidence("suspicious_payment", "plate", plate)) {
@@ -1110,9 +1128,13 @@ export class Controller implements Engine {
     const expected = car.charge_parking + (car.charge_electric ?? 0);
     const invoice = this.store.findInvoice(car.visit_id, plate);
     car.invoice_id = car.invoice_id ?? invoice?.invoice_id ?? `invoice:${car.visit_id ?? car.plate}`;
-    car.paid = amount;
     const accepted = Math.abs(amount - expected) <= this.cfg.paymentTolerance;
-    this.store.recordPayment({ eventId: e.EventId, invoiceId: car.invoice_id, visitId: car.visit_id, plate, amount, accepted });
+    const paymentWrite = this.store.recordPayment({ eventId: e.EventId, invoiceId: car.invoice_id, visitId: car.visit_id, plate, amount, accepted });
+    if (paymentWrite === "duplicate") {
+      this.noteDuplicatePayment(e, plate, amount, car.invoice_id);
+      return;
+    }
+    car.paid = amount;
     if (accepted) {
       car.payment_ok = true;
       this.counters.revenue += amount;
@@ -1149,8 +1171,10 @@ export class Controller implements Engine {
     this.counters.fake_payments++;
     this.counters.suspicious_payments++;
     const invoice = this.store.findInvoice(car?.visit_id, plate);
-    this.store.recordPayment({ eventId: e.EventId, invoiceId: car?.invoice_id ?? invoice?.invoice_id,
-      visitId: car?.visit_id, plate, amount: Number(e.Amount) || 0, accepted: false });
+    const amount = Number(e.Amount) || 0;
+    const paymentWrite = this.store.recordPayment({ eventId: e.EventId, invoiceId: car?.invoice_id ?? invoice?.invoice_id,
+      visitId: car?.visit_id, plate, amount, accepted: false });
+    if (paymentWrite === "duplicate") this.noteDuplicatePayment(e, plate, amount, car?.invoice_id ?? invoice?.invoice_id);
     this.note("error", `FAKE payment ${e.Amount} from ${plate} (bad signature) - not releasing`);
     if (!this.replaying && !this.store.findOpenIncidentByEvidence("suspicious_payment", "plate", plate)) {
       this.store.createIncident({ status: "open", kind: "suspicious_payment", zone: car?.exit_lane ? this.exitLanes.get(car.exit_lane)?.zone : null,

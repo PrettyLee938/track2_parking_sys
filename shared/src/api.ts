@@ -136,6 +136,8 @@ export interface Counters {
   command_errors: number;
   /** Payment webhooks rejected as fake/invalid by the intake layer. */
   fake_payments: number;
+  /** Valid or invalid payment attempts ignored because the same invoice/amount was already recorded. */
+  duplicate_payments: number;
   suspicious_payments: number;
   duplicate_requests: number;
   gate_failovers: number;
@@ -247,6 +249,7 @@ export type Permission =
   | "config";           // settings, resync
 
 export const ROLE_PERMISSIONS: Record<Role, readonly Permission[]> = {
+  maintenance: ["view", "repair"],
   operator: ["view", "control", "repair"],
   admin: ["view", "control", "repair", "reports.financial", "users.manage", "config"],
 };
@@ -396,8 +399,8 @@ export interface SessionsResponse {
 // ---------------------------------------------------------------------------
 // auth & users
 // ---------------------------------------------------------------------------
-/** admin can do everything an operator can, plus user management and site settings. */
-export type Role = "admin" | "operator";
+/** Maintenance can view and repair; operators control traffic; admins manage users, finance and site settings. */
+export type Role = "admin" | "operator" | "maintenance";
 
 export interface UserView {
   id: number;
@@ -494,6 +497,7 @@ export interface StatsResponse {
     duplicate_requests?: number;
     tampered_requests?: number;
     suspicious_payments?: number;
+    duplicate_payments?: number;
     double_parking?: number;
     gate_failovers?: number;
   };

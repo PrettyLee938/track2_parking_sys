@@ -22,14 +22,14 @@ import type { LoginAttemptView } from "@gpa/shared";
 import { fmtDateTime } from "./lib/format";
 
 type Route = "overview" | "operations" | "equipment" | "maintenance" | "incidents" | "penalties" | "reports" | "locations" | "logs" | "stats" | "admin";
-const ROUTES: { id: Route; label: string; adminOnly?: boolean }[] = [
+const ROUTES: { id: Route; label: string; adminOnly?: boolean; operatorOnly?: boolean }[] = [
   { id: "overview", label: "Overview" },
   { id: "operations", label: "Operations" },
   { id: "equipment", label: "Equipment" },
   { id: "maintenance", label: "Maintenance" },
   { id: "incidents", label: "Incidents" },
   { id: "penalties", label: "Penalties" },
-  { id: "reports", label: "Reports" },
+  { id: "reports", label: "Reports", operatorOnly: true },
   { id: "locations", label: "Vehicles" },
   { id: "logs", label: "Logs" },
   { id: "stats", label: "Statistics" },
@@ -68,7 +68,7 @@ function Shell() {
   const { user, signOut, can, previousLoginAttempts } = useAuth();
   const route = useHashRoute();
   const { state, connected } = useLiveState();
-  const visible = ROUTES.filter((r) => !r.adminOnly || can("admin"));
+  const visible = ROUTES.filter((r) => (!r.adminOnly || can("admin")) && (!r.operatorOnly || can("operator")));
   const current = visible.some((r) => r.id === route) ? route : "overview";
 
   return (

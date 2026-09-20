@@ -96,6 +96,7 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
     if (!req.user) return err(reply, 401, "not signed in");
     if (!hasRole(req.user, role)) return err(reply, 403, `requires the ${role} role`);
   };
+  const maintenance = { preHandler: guard("maintenance") };
   const operator = { preHandler: guard("operator") };
   const admin = { preHandler: guard("admin") };
   const debugAccess = {
@@ -200,20 +201,20 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
     return { ok: true };
   });
 
-  app.get("/api/auth/me", operator, async (req): Promise<MeResponse> => ({
+  app.get("/api/auth/me", maintenance, async (req): Promise<MeResponse> => ({
     user: req.user!, previous_login_attempts: store.listLoginAttempts(req.user!.username, 3),
   }));
-  app.get<{ Querystring: { limit?: string } }>("/api/auth/login-attempts", operator, async (req) => ({
+  app.get<{ Querystring: { limit?: string } }>("/api/auth/login-attempts", maintenance, async (req) => ({
     items: store.listLoginAttempts(req.user!.username, Math.min(Number(req.query.limit) || 3, 50)),
   }));
 
   // ---------------------------------------------------------------------------
   // live state (operator+)
   // ---------------------------------------------------------------------------
-  app.get("/api/state", operator, async (): Promise<StateSnapshot> => controller.snapshot());
+  app.get("/api/state", maintenance, async (): Promise<StateSnapshot> => controller.snapshot());
 
   /** Server-sent events: a snapshot every streamIntervalS, until the session ends. */
-  app.get("/api/stream", operator, (req, reply) => {
+  app.get("/api/stream", maintenance, (req, reply) => {
     const token = cookies(req)[SESSION_COOKIE];
     reply.hijack();
     const res = reply.raw;
@@ -232,21 +233,21 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
     req.raw.on("close", () => clearInterval(timer));
   });
 
-  app.get("/api/timeseries", operator, async (): Promise<TimeseriesResponse> =>
+  app.get("/api/timeseries", maintenance, async (): Promise<TimeseriesResponse> =>
     ({ sample_s: cfg.statsSampleS, points: controller.timeseries }));
 
   // Every gate, spot, fan and light with health and usage, plus breakdown/repair history.
-  app.get<{ Querystring: { name?: string; limit?: string } }>("/api/components", operator, async (req): Promise<ComponentsResponse> => ({
+  app.get<{ Querystring: { name?: string; limit?: string } }>("/api/components", maintenance, async (req): Promise<ComponentsResponse> => ({
     items: controller.components.views(),
     events: store.listComponentEvents({ name: req.query.name || undefined, limit: Number(req.query.limit) || 200 }),
   }));
 
-  app.get<{ Querystring: { kind?: string; zone?: string; limit?: string } }>("/api/equipment", operator, async (req) => {
+  app.get<{ Querystring: { kind?: string; zone?: string; limit?: string } }>("/api/equipment", maintenance, async (req) => {
     const items = controller.components.views().filter((c) => (!req.query.kind || c.kind === req.query.kind) && (!req.query.zone || c.zone === req.query.zone));
     return { items: items.slice(0, Math.min(Number(req.query.limit) || 500, 1000)) };
   });
 
-  app.post<{ Params: { id: string } }>("/api/equipment/:id/maintenance", operator, async (req, reply) => {
+  app.post<{ Params: { id: string } }>("/api/equipment/:id/maintenance", maintenance, async (req, reply) => {
     const [kind, ...nameParts] = decodeURIComponent(req.params.id).split(":");
     const target = `${kind}:${nameParts.join(":")}`;
     const audit = { actor: req.user!.username, action: "component.repair", target, permission: "repair" };
@@ -256,14 +257,14 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
     return err(reply, 400, "equipment id must be kind:name");
   });
 
-  app.get<{ Querystring: { limit?: string } }>("/api/maintenance", operator, async (req) => ({
+  app.get<{ Querystring: { limit?: string } }>("/api/maintenance", maintenance, async (req) => ({
     items: store.listMaintenanceJobs(Number(req.query.limit) || 100),
   }));
 
-  app.get<{ Querystring: { status?: "open" | "provisional" | "resolved" | "dismissed"; limit?: string } }>("/api/incidents", operator, async (req) => ({
+  app.get<{ Querystring: { status?: "open" | "provisional" | "resolved" | "dismissed"; limit?: string } }>("/api/incidents", maintenance, async (req) => ({
     items: store.listIncidents({ status: req.query.status, limit: Number(req.query.limit) || 100 }),
   }));
-  app.get<{ Params: { id: string } }>("/api/incidents/:id", operator, async (req, reply) => {
+  app.get<{ Params: { id: string } }>("/api/incidents/:id", maintenance, async (req, reply) => {
     const incident = store.getIncident(Number(req.params.id));
     return incident ? incident : err(reply, 404, "no such incident");
   });
@@ -278,13 +279,13 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
     });
   });
 
-  app.get("/api/penalties", operator, async (): Promise<{ items: ReturnType<Store["listPenalties"]> }> => ({ items: store.listPenalties() }));
+  app.get("/api/penalties", maintenance, async (): Promise<{ items: ReturnType<Store["listPenalties"]> }> => ({ items: store.listPenalties() }));
 
-  app.get<{ Querystring: { plate?: string; limit?: string } }>("/api/vehicles/locations", operator, async (req) => ({
+  app.get<{ Querystring: { plate?: string; limit?: string } }>("/api/vehicles/locations", maintenance, async (req) => ({
     items: store.listVehicleLocations({ plate: req.query.plate, limit: Number(req.query.limit) || 200 }),
   }));
 
-  app.get<{ Querystring: { minutes?: string } }>("/api/stats", operator, async (req): Promise<StatsResponse> => {
+  app.get<{ Querystring: { minutes?: string } }>("/api/stats", maintenance, async (req): Promise<StatsResponse> => {
     const minutes = Math.min(Math.max(Number(req.query.minutes) || 60, 5), 7 * 24 * 60);
     const bucket = BUCKETS_S.find((b) => (minutes * 60) / b <= 40) ?? BUCKETS_S.at(-1)!;
     const until = Date.now();
@@ -305,7 +306,7 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
         neglected: stats.totals.neglected, lost: stats.totals.lost, penalties: stats.totals.penalties, fines: stats.totals.fines,
         payment_mismatches: stats.totals.payment_mismatches, escaped: stats.totals.escaped,
         duplicate_requests: stats.totals.duplicate_requests ?? 0, tampered_requests: stats.totals.tampered_requests ?? 0,
-        suspicious_payments: stats.totals.suspicious_payments ?? 0, double_parking: stats.totals.double_parking ?? 0,
+        suspicious_payments: stats.totals.suspicious_payments ?? 0, duplicate_payments: stats.totals.duplicate_payments ?? 0, double_parking: stats.totals.double_parking ?? 0,
         gate_failovers: stats.totals.gate_failovers ?? 0 };
     return { run_id: null, day, kind, time_basis: "UTC received time; simulator calendar is provisional until anchored",
       provisional: true, generated_at: new Date().toISOString(), totals,
@@ -351,17 +352,17 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
   type ListQuery = { plate?: string; status?: string; class?: string; since?: string; until?: string; limit?: string; before?: string };
   const num = (v?: string) => (v ? Number(v) || undefined : undefined);
 
-  app.get<{ Querystring: ListQuery }>("/api/sessions", operator, async (req): Promise<SessionsResponse> => ({
+  app.get<{ Querystring: ListQuery }>("/api/sessions", maintenance, async (req): Promise<SessionsResponse> => ({
     items: store.searchSessions({ plate: req.query.plate, status: req.query.status, since: req.query.since,
       until: req.query.until, limit: num(req.query.limit), beforeId: num(req.query.before) }),
   }));
 
-  app.get<{ Querystring: ListQuery }>("/api/events", operator, async (req): Promise<EventsResponse> => ({
+  app.get<{ Querystring: ListQuery }>("/api/events", maintenance, async (req): Promise<EventsResponse> => ({
     items: store.searchEvents({ plate: req.query.plate, eventClass: req.query.class, since: req.query.since,
       until: req.query.until, limit: num(req.query.limit), beforeId: num(req.query.before) }),
   }));
 
-  app.get<{ Querystring: { manual?: string; limit?: string } }>("/api/actions", operator, async (req): Promise<ActionsResponse> => ({
+  app.get<{ Querystring: { manual?: string; limit?: string } }>("/api/actions", maintenance, async (req): Promise<ActionsResponse> => ({
     items: store.searchActions({ manualOnly: req.query.manual === "1", limit: num(req.query.limit) }),
   }));
 
@@ -388,7 +389,7 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
       { actor: req.user!.username, action: `gate.${action}`, target: req.params.name, permission: "control" });
   });
 
-  app.post<{ Params: { name: string } }>("/api/control/spots/:name/repair", operator, async (req, reply) =>
+  app.post<{ Params: { name: string } }>("/api/control/spots/:name/repair", maintenance, async (req, reply) =>
     control(reply, () => controller.exclusive(() => controller.manualSpotRepair(req.params.name, req.user!.username)),
       { actor: req.user!.username, action: "spot.repair", target: req.params.name, permission: "repair" }));
 
@@ -421,7 +422,7 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
   app.post("/api/users", admin, async (req, reply) => {
     const body = jsonBody<CreateUserRequest>(req);
     if (!body) return err(reply, 400, "invalid JSON");
-    if (body.role !== "admin" && body.role !== "operator") return err(reply, 400, "role must be admin or operator");
+    if (body.role !== "admin" && body.role !== "operator" && body.role !== "maintenance") return err(reply, 400, "role must be admin, operator or maintenance");
     const problem = validateCredentials(body.username ?? "", body.password ?? "");
     if (problem) return err(reply, 400, problem);
     if (store.findUser(body.username)) return err(reply, 409, `user ${body.username} already exists`);
@@ -438,12 +439,12 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
     if (!target) return err(reply, 404, "no such user");
     const body = jsonBody<UpdateUserRequest>(req);
     if (!body) return err(reply, 400, "invalid JSON");
-    if (body.role !== undefined && body.role !== "admin" && body.role !== "operator") return err(reply, 400, "role must be admin or operator");
+    if (body.role !== undefined && body.role !== "admin" && body.role !== "operator" && body.role !== "maintenance") return err(reply, 400, "role must be admin, operator or maintenance");
     if (body.password !== undefined) {
       const problem = validateCredentials(undefined, body.password);
       if (problem) return err(reply, 400, problem);
     }
-    const losesAdmin = target.role === "admin" && (body.role === "operator" || body.disabled === true);
+    const losesAdmin = target.role === "admin" && (body.role === "operator" || body.role === "maintenance" || body.disabled === true);
     if (losesAdmin && store.countOtherActiveAdmins(id) === 0) return err(reply, 409, "cannot remove the last active admin");
     if (id === req.user!.id && body.disabled === true) return err(reply, 409, "you cannot disable your own account");
 

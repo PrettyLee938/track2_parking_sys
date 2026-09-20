@@ -14,8 +14,10 @@ describe("passwords", () => {
   });
 
   it("ranks admin above operator", () => {
-    const u = (role: "admin" | "operator", disabled = false) => ({ id: 1, username: "u", role, disabled, created_at: "", last_login_at: null });
+    const u = (role: "admin" | "operator" | "maintenance", disabled = false) => ({ id: 1, username: "u", role, disabled, created_at: "", last_login_at: null });
     expect(hasRole(u("admin"), "operator")).toBe(true);
+    expect(hasRole(u("maintenance"), "maintenance")).toBe(true);
+    expect(hasRole(u("maintenance"), "operator")).toBe(false);
     expect(hasRole(u("operator"), "admin")).toBe(false);
     expect(hasRole(u("admin", true), "operator")).toBe(false);
   });
@@ -79,6 +81,24 @@ describe("roles", () => {
     }
   });
 
+  it("gives maintenance users read and repair access without traffic or admin control", async () => {
+    const { app, signIn } = await testServer();
+    const admin = await signIn("admin", "admin-password");
+    const created = await app.inject({ method: "POST", url: "/api/users", headers: { cookie: admin, ...json },
+      payload: JSON.stringify({ username: "maint.shift", password: "long-enough", role: "maintenance" }) });
+    expect(created.statusCode).toBe(201);
+    const cookie = await signIn("maint.shift", "long-enough");
+    for (const url of ["/api/auth/me", "/api/state", "/api/components", "/api/equipment", "/api/maintenance", "/api/incidents", "/api/penalties", "/api/stats?minutes=60", "/api/sessions", "/api/events", "/api/actions"]) {
+      expect((await app.inject({ url, headers: { cookie } })).statusCode, url).toBe(200);
+    }
+    expect((await app.inject({ url: "/api/reports/daily?kind=operations", headers: { cookie } })).statusCode).toBe(403);
+    expect((await app.inject({ url: "/api/reports/daily?kind=financial", headers: { cookie } })).statusCode).toBe(403);
+    expect((await app.inject({ method: "POST", url: "/api/control/gates/gateA/open", headers: { cookie } })).statusCode).toBe(403);
+    expect((await app.inject({ method: "POST", url: "/api/control/cars/A/reconcile", headers: { cookie, ...json }, payload: JSON.stringify({ minutes: 1 }) })).statusCode).toBe(403);
+    const repair = await app.inject({ method: "POST", url: "/api/equipment/gate%3AgateB/maintenance", headers: { cookie } });
+    expect(repair.statusCode).not.toBe(403);
+    expect((await app.inject({ method: "POST", url: "/api/users", headers: { cookie, ...json }, payload: JSON.stringify({ username: "nope", password: "long-enough", role: "maintenance" }) })).statusCode).toBe(403);
+  });
   it("lets an admin manage users", async () => {
     const { app, signIn } = await testServer();
     const cookie = await signIn("admin", "admin-password");

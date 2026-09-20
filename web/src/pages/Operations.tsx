@@ -24,6 +24,7 @@ export function Operations({ s }: { s: StateSnapshot }) {
 
   const gateCmd = (g: GateView, action: "open" | "close" | "auto" | "repair") => {
     if (action === "repair" && !confirm(`Start maintenance on ${g.name}? It cannot be used until the simulator reports it repaired.`)) return;
+    if (action === "repair" && !can("operator")) return run(`${g.name}:${action}`, () => api.maintenanceStart("gate", g.name));
     return run(`${g.name}:${action}`, () => api.gate(g.name, action));
   };
 
@@ -40,11 +41,11 @@ export function Operations({ s }: { s: StateSnapshot }) {
                 <div className="gate-head"><b>{g.name}</b><span className="muted small">{laneOf(g)}</span></div>
                 <GateBadge gate={g} />
                 <div className="btn-row">
-                  <Button small onClick={() => gateCmd(g, "open")} busy={busy === `${g.name}:open`} disabled={unusable || g.hold === "open"}
+                  <Button small onClick={() => gateCmd(g, "open")} busy={busy === `${g.name}:open`} disabled={!can("operator") || unusable || g.hold === "open"}
                     title="Open and keep open">Hold open</Button>
-                  <Button small onClick={() => gateCmd(g, "close")} busy={busy === `${g.name}:close`} disabled={unusable || g.hold === "closed"}
+                  <Button small onClick={() => gateCmd(g, "close")} busy={busy === `${g.name}:close`} disabled={!can("operator") || unusable || g.hold === "closed"}
                     title="Close and keep closed - cars for this lane will wait">Hold closed</Button>
-                  <Button small variant="primary" onClick={() => gateCmd(g, "auto")} busy={busy === `${g.name}:auto`} disabled={!g.hold}
+                  <Button small variant="primary" onClick={() => gateCmd(g, "auto")} busy={busy === `${g.name}:auto`} disabled={!can("operator") || !g.hold}
                     title="Give the gate back to the automation">Automatic</Button>
                   <Button small variant="danger" onClick={() => gateCmd(g, "repair")} busy={busy === `${g.name}:repair`} disabled={g.maintenance}
                     title="Start maintenance (refused while a car is passing)">Repair</Button>
